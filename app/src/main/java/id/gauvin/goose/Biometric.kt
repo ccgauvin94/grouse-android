@@ -1,0 +1,32 @@
+package id.gauvin.goose
+
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+
+/** Thin wrapper over BiometricPrompt used to gate app unlock. */
+object Biometric {
+    private const val AUTH = BiometricManager.Authenticators.BIOMETRIC_WEAK
+
+    /** True only if the user has a usable biometric enrolled — otherwise we can't gate. */
+    fun available(activity: FragmentActivity): Boolean =
+        BiometricManager.from(activity).canAuthenticate(AUTH) == BiometricManager.BIOMETRIC_SUCCESS
+
+    fun prompt(activity: FragmentActivity, onSuccess: () -> Unit, onFail: (String) -> Unit) {
+        val prompt = BiometricPrompt(
+            activity, ContextCompat.getMainExecutor(activity),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) = onSuccess()
+                override fun onAuthenticationError(code: Int, msg: CharSequence) = onFail(msg.toString())
+            }
+        )
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Unlock Goose")
+            .setSubtitle("Authenticate to reach your agent")
+            .setAllowedAuthenticators(AUTH)
+            .setNegativeButtonText("Cancel")
+            .build()
+        prompt.authenticate(info)
+    }
+}

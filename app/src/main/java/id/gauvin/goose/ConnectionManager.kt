@@ -1,89 +1,94 @@
 package id.gauvin.goose
 
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.lifecycle.ViewModel
 
 data class ChatMessage(val role: String, val text: String)
 
-class ChatViewModel : ViewModel() {
+/**
+ * Process-scoped owner of the ACP connection + chat state. A singleton (not a ViewModel) so
+ * it survives navigation/config changes and can later be shared with a background service,
+ * share intents, tiles, etc. Compose observes its snapshot state directly.
+ */
+class ConnectionManager private constructor(context: Context) {
+    val store = SecureStore(context)
+
     val messages = mutableStateListOf<ChatMessage>()
     val status = mutableStateOf("not connected")
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
-    val busy = mutableStateOf(false)   // a turn is in flight (for the typing indicator)
+    val busy = mutableStateOf(false)
+    val dynamicColor = mutableStateOf(store.dynamicColor)
+
+    fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
 
     private val main = Handler(Looper.getMainLooper())
     private var client: AcpClient? = null
-    // Which role is currently streaming, so consecutive chunks of the same kind merge into
-    // one bubble but a role change (or a tool call) starts a fresh one.
     private var streamingRole: String? = null
-
-    // Remembered so we can silently reconnect after Android drops the socket in the background.
-    private var host = ""; private var port = ""; private var key = ""
-    private var saved: Map<String, String> = emptyMap()
+    private var live = false
+    private var connecting = false
     private var lastSessionId: String? = null
-    private var live = false        // session is open and usable
-    private var connecting = false  // a connect attempt is in flight
+    private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
 
-    fun connect(host: String, port: String, key: String, saved: Map<String, String> = emptyMap()) {
-        this.host = host; this.port = port; this.key = key; this.saved = saved
-        lastSessionId = null           // explicit (re)connect starts fresh
-        config.value = emptyList()
+    val configured: Boolean get() = store.hasKey()
+
+    /** Connect using the already-saved host/port/key (post-unlock auto-connect). */
+    fun connectSaved() { if (store.hasKey()) open(resume = null, suppressReplay = false) }
+
+    /** Save new credentials and connect fresh (from the Connect screen). */
+    fun connect(host: String, port: String, key: String) {
+        store.host = host; store.port = port; store.secretKey = key
+        lastSessionId = null; config.value = emptyList()
         open(resume = null, suppressReplay = false)
     }
 
-    /** Reconnect if the socket died while backgrounded, resuming the same session silently. */
+    /** Reconnect silently after Android drops the socket in the background. */
     fun ensureConnected() {
-        if (key.isBlank() || live || connecting) return
+        if (!store.hasKey() || live || connecting) return
         open(resume = lastSessionId, suppressReplay = true)
     }
 
     fun listSessions() = client?.listSessions()
 
-    /** Open a picked session from the list: clear the view and replay its transcript. */
     fun openSession(sessionId: String) {
-        messages.clear()
-        lastSessionId = sessionId
+        messages.clear(); lastSessionId = sessionId
         open(resume = sessionId, suppressReplay = false)
     }
 
-    /** Start a brand-new session (applies saved model picks). */
     fun newSession() {
-        messages.clear()
-        lastSessionId = null
-        config.value = emptyList()
+        messages.clear(); lastSessionId = null; config.value = emptyList()
         open(resume = null, suppressReplay = false)
+    }
+
+    fun setOption(configId: String, value: String) {
+        store.saveOption(configId, value)
+        client?.setConfigOption(configId, value)
+    }
+
+    fun send(text: String) {
+        messages.add(ChatMessage("user", text)); streamingRole = null; busy.value = true
+        client?.sendPrompt(text)
     }
 
     private fun open(resume: String?, suppressReplay: Boolean) {
         client?.close()
         live = false; connecting = true
-        val url = "ws://$host:$port/acp"
+        val url = "ws://${store.host}:${store.port}/acp"
         status.value = when {
             resume == null -> "connecting to $url"
             suppressReplay -> "reconnecting…"
             else -> "loading session…"
         }
-        client = AcpClient(url, key) { ev -> main.post { onEvent(ev) } }.also {
-            // Only push saved picks onto a fresh session; a resumed one keeps its own model.
+        val saved = store.savedOptions(optionIds)
+        client = AcpClient(url, store.secretKey) { ev -> main.post { onEvent(ev) } }.also {
             it.desiredOptions = if (resume == null) saved else emptyMap()
             it.resumeSessionId = resume
             it.suppressReplay = suppressReplay
             it.connect()
         }
-    }
-
-    /** User picked a new value for a config knob (provider/model/mode/thinking_effort). */
-    fun setOption(configId: String, value: String) = client?.setConfigOption(configId, value)
-
-    fun send(text: String) {
-        messages.add(ChatMessage("user", text))
-        streamingRole = null
-        busy.value = true
-        client?.sendPrompt(text)
     }
 
     private fun onEvent(ev: AcpEvent) {
@@ -118,5 +123,11 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    override fun onCleared() { client?.close() }
+    companion object {
+        @Volatile private var instance: ConnectionManager? = null
+        fun get(context: Context): ConnectionManager =
+            instance ?: synchronized(this) {
+                instance ?: ConnectionManager(context.applicationContext).also { instance = it }
+            }
+    }
 }
