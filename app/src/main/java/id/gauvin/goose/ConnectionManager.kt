@@ -37,6 +37,30 @@ class ConnectionManager private constructor(context: Context) {
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
     val knownModels = mutableStateOf(store.knownModels)
+    val extensions = mutableStateOf<List<ExtInfo>>(emptyList())
+    val extensionsBusy = mutableStateOf(false)
+
+    private val io = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private fun extApi() = ExtensionsApi("https://${store.host}:${store.port}", store.secretKey)
+
+    /** Fetch the extension list (GET /config/extensions). */
+    fun loadExtensions() {
+        extensionsBusy.value = true
+        io.execute {
+            val list = runCatching { extApi().list() }.getOrDefault(emptyList())
+            main.post { extensions.value = list; extensionsBusy.value = false }
+        }
+    }
+
+    /** Enable/disable an extension globally (affects new chats). */
+    fun toggleExtension(e: ExtInfo, enabled: Boolean) {
+        extensionsBusy.value = true
+        io.execute {
+            runCatching { extApi().set(e, enabled) }
+            val list = runCatching { extApi().list() }.getOrDefault(emptyList())
+            main.post { extensions.value = list; extensionsBusy.value = false }
+        }
+    }
 
     // Providers actually set up on this goose (config.yaml `providers:` with configured:true).
     // Unconfigured catalog entries are hidden unless showAllProviders is on.
@@ -151,7 +175,7 @@ class ConnectionManager private constructor(context: Context) {
     private fun open(resume: String?, suppressReplay: Boolean) {
         client?.close()
         live = false; connecting = true
-        val url = "ws://${store.host}:${store.port}/acp"
+        val url = "wss://${store.host}:${store.port}/acp"
         status.value = when {
             resume == null -> "connecting to $url"
             suppressReplay -> "reconnecting…"

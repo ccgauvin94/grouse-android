@@ -31,6 +31,9 @@ class SecureStore(context: Context) {
             secure.edit().putString("key", legacy).apply()
             cfg.edit().remove("key").apply()
         }
+        // Move off the ACP-only server (:3285) to the full agent server (:3284) which also
+        // serves ACP and exposes the extension API.
+        if (cfg.getString("port", null) == "3285") cfg.edit().putString("port", "3284").apply()
     }
 
     var host: String
@@ -38,7 +41,7 @@ class SecureStore(context: Context) {
         set(v) = cfg.edit().putString("host", v).apply()
 
     var port: String
-        get() = cfg.getString("port", "3285") ?: "3285"
+        get() = cfg.getString("port", "3284") ?: "3284"
         set(v) = cfg.edit().putString("port", v).apply()
 
     var dynamicColor: Boolean

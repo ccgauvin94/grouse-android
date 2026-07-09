@@ -61,7 +61,7 @@ class AcpClient(
     private val secretKey: String,
     private val onEvent: (AcpEvent) -> Unit,
 ) {
-    private val http = OkHttpClient.Builder()
+    private val http = Net.builder()      // trust-all TLS for goosed's self-signed cert (wss)
         .pingInterval(20, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()

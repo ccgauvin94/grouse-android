@@ -107,6 +107,7 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
         composable("chat") { ChatScreen(cm, nav) }
         composable("sessions") { SessionsScreen(cm, nav) }
         composable("settings") { SettingsScreen(cm, nav) }
+        composable("extensions") { ExtensionsScreen(cm, nav) }
     }
 }
 

@@ -381,6 +381,14 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             ) { Text("Save & reconnect") }
 
             Spacer(Modifier.height(24.dp))
+            Text("Extensions", style = MaterialTheme.typography.titleMedium)
+            OutlinedButton(onClick = { nav.navigate("extensions") }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                Text("Manage extensions")
+            }
+            Text("Enable/disable goose's tools to control context per new chat.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+
+            Spacer(Modifier.height(24.dp))
             Text("Models", style = MaterialTheme.typography.titleMedium)
             var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -410,6 +418,57 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             Text("On: stay connected in the background (a persistent notification, more battery). " +
                 "Off: connect while active; you still get a notification when a backgrounded turn finishes.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+        }
+    }
+}
+
+// ---- Extensions -------------------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
+    LaunchedEffect(Unit) { cm.loadExtensions() }
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Extensions") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+            actions = {
+                if (cm.extensionsBusy.value)
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(12.dp))
+            }
+        )
+    }) { pad ->
+        Column(Modifier.padding(pad).fillMaxSize()) {
+            Text("Turn off extensions you don't use to shrink the context every chat carries. " +
+                "Changes apply to new chats.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(16.dp))
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(cm.extensions.value) { e ->
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(e.name, style = MaterialTheme.typography.bodyLarge)
+                            if (e.description.isNotBlank())
+                                Text(e.description, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline, maxLines = 2)
+                        }
+                        Switch(checked = e.enabled, enabled = !cm.extensionsBusy.value,
+                            onCheckedChange = { cm.toggleExtension(e, it) })
+                    }
+                    HorizontalDivider()
+                }
+                if (cm.extensions.value.isEmpty() && !cm.extensionsBusy.value) item {
+                    Text("Couldn't load extensions. This needs the full goose agent server (:3284).",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(16.dp))
+                }
+            }
         }
     }
 }
