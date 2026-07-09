@@ -44,6 +44,8 @@ sealed interface AcpEvent {
     data class Ready(val sessionId: String) : AcpEvent
     data class Sessions(val list: List<SessionInfo>) : AcpEvent
     data class Commands(val names: List<String>) : AcpEvent
+    data class Usage(val used: Int, val size: Int, val cost: Double, val currency: String) : AcpEvent
+    data class Chart(val spec: String) : AcpEvent   // Chart.js-shaped JSON from autovisualiser
     data class Permission(
         val toolCallId: String, val title: String, val detail: String, val options: List<PermOption>,
     ) : AcpEvent
@@ -164,7 +166,9 @@ class AcpClient(
         }
         override fun onMessage(webSocket: WebSocket, text: String) = handle(text)
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            onEvent(AcpEvent.Error("connection failed: ${t.message}"))
+            // Transport drop (usually just backgrounding) — surface on the status line, not as a
+            // chat error bubble. ConnectionManager reconnects on resume.
+            onEvent(AcpEvent.Status("disconnected"))
         }
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             onEvent(AcpEvent.Status("disconnected"))
@@ -290,7 +294,24 @@ class AcpClient(
             "agent_message_chunk" -> text()?.let { onEvent(AcpEvent.AgentChunk(it)) }
             // Thoughts stream live (own collapsible bubble); skipped in a rebuilt transcript.
             "agent_thought_chunk" -> if (!replaying) text()?.let { onEvent(AcpEvent.ThoughtChunk(it)) }
-            "tool_call" -> onEvent(AcpEvent.ToolCall(update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call"))
+            "tool_call" -> {
+                val toolName = (((update["_meta"] as? JsonObject)?.get("goose") as? JsonObject)
+                    ?.get("toolCall") as? JsonObject)?.get("toolName")?.jsonPrimitive?.contentOrNull
+                val chartData = (update["rawInput"] as? JsonObject)?.get("data")?.jsonPrimitive?.contentOrNull
+                if (toolName == "autovisualiser__show_chart" && chartData != null) {
+                    onEvent(AcpEvent.Chart(chartData))
+                } else {
+                    onEvent(AcpEvent.ToolCall(update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call"))
+                }
+            }
+            "usage_update" -> {
+                val used = update["used"]?.jsonPrimitive?.intOrNull ?: 0
+                val size = update["size"]?.jsonPrimitive?.intOrNull ?: 0
+                val cost = update["cost"] as? JsonObject
+                onEvent(AcpEvent.Usage(used, size,
+                    cost?.get("amount")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    cost?.get("currency")?.jsonPrimitive?.contentOrNull ?: ""))
+            }
             "available_commands_update" -> {
                 val names = (update["availableCommands"] as? JsonArray).orEmpty().mapNotNull {
                     (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull

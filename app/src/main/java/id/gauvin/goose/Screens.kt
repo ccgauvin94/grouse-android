@@ -37,12 +37,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavController
 import com.halilibo.richtext.markdown.Markdown
 import com.halilibo.richtext.ui.material3.RichText
+import kotlinx.coroutines.launch
 
 private val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")
 
@@ -105,6 +107,15 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
 
     val currentModel = cm.config.value.firstOrNull { it.id == "model" }?.currentValue ?: ""
     var showVisionWarn by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    // "At bottom" = the last item is visible; drives autoscroll + the jump-to-bottom button.
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            last == null || last.index >= info.totalItemsCount - 1
+        }
+    }
 
     fun reallySend() {
         cm.send(input.trim(), attachments.toList())
@@ -117,9 +128,11 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         reallySend()
     }
 
-    LaunchedEffect(cm.messages.size, cm.busy.value) {
-        val n = cm.messages.size + if (cm.busy.value) 1 else 0
-        if (n > 0) listState.animateScrollToItem(n - 1)
+    // Follow new content only when already pinned to the bottom (don't yank the user up-scroll).
+    val lastLen = cm.messages.lastOrNull()?.text?.length ?: 0
+    LaunchedEffect(cm.messages.size, lastLen, cm.busy.value) {
+        val total = cm.messages.size + if (cm.busy.value) 1 else 0
+        if (total > 0 && atBottom) listState.animateScrollToItem(total - 1)
     }
     // Reconnect (resuming the session) when we return to the foreground.
     val owner = LocalLifecycleOwner.current
@@ -159,12 +172,21 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         )
     }) { pad ->
         Column(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
-            ModelBar(cm.config.value, showConfig) { showConfig = !showConfig }
+            ModelBar(cm.config.value, cm.usage.value, showConfig) { showConfig = !showConfig }
             if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
-                cm.configuredProviders, cm.knownModels.value, cm::setOption)
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
-                items(cm.messages) { m -> MessageBubble(m) }
-                if (cm.busy.value) item { TypingIndicator() }
+                cm.configuredProviders, cm.knownModels.value, cm::setOption, cm::compact)
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                    items(cm.messages) { m -> MessageBubble(m) }
+                    if (cm.busy.value) item { TypingIndicator() }
+                }
+                if (!atBottom) SmallFloatingActionButton(
+                    onClick = {
+                        val total = cm.messages.size + if (cm.busy.value) 1 else 0
+                        scope.launch { listState.animateScrollToItem((total - 1).coerceAtLeast(0)) }
+                    },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
+                ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
             }
 
             // Slash-command autocomplete (goose's available commands).
@@ -395,7 +417,7 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
 // ---- Model pickers ----------------------------------------------------------
 
 @Composable
-fun ModelBar(options: List<ConfigOption>, expanded: Boolean, onToggle: () -> Unit) {
+fun ModelBar(options: List<ConfigOption>, usage: AcpEvent.Usage?, expanded: Boolean, onToggle: () -> Unit) {
     fun cur(id: String) = options.firstOrNull { it.id == id }?.let { o ->
         o.choices.firstOrNull { it.value == o.currentValue }?.label ?: o.currentValue
     }
@@ -414,10 +436,23 @@ fun ModelBar(options: List<ConfigOption>, expanded: Boolean, onToggle: () -> Uni
         ) {
             Icon(Icons.Filled.Tune, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text(summary, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(summary, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f),
+                maxLines = 1)
+            if (usage != null && usage.size > 0) {
+                Spacer(Modifier.width(6.dp))
+                Text("${fmtTokens(usage.used)}/${fmtTokens(usage.size)}",
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+            }
+            Spacer(Modifier.width(6.dp))
             Text(if (expanded) "▲" else "▼", style = MaterialTheme.typography.bodyMedium)
         }
     }
+}
+
+private fun fmtTokens(n: Int): String = when {
+    n >= 1_000_000 -> "%.1fM".format(n / 1_000_000.0)
+    n >= 1_000 -> "${n / 1000}k"
+    else -> "$n"
 }
 
 @Composable
@@ -427,6 +462,7 @@ fun ConfigPanel(
     configured: Set<String>,
     knownModels: Set<String>,
     onPick: (String, String) -> Unit,
+    onCompact: () -> Unit,
 ) {
     if (options.isEmpty()) {
         Text("loading model options…", style = MaterialTheme.typography.bodySmall,
@@ -447,6 +483,9 @@ fun ConfigPanel(
                     onPick)
                 else -> ConfigDropdown(opt, onPick)
             }
+        }
+        OutlinedButton(onClick = onCompact, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            Text("Compact conversation")
         }
         HorizontalDivider(Modifier.padding(top = 8.dp))
     }
@@ -525,9 +564,58 @@ fun MessageBubble(m: ChatMessage) {
         "thought" -> ThoughtBubble(m.text)
         "tool" -> ToolChip(m.text)
         "error" -> ErrorBubble(m.text)
+        "chart" -> ChartView(m.text)
         else -> AssistantBubble(m.text)
     }
 }
+
+/** Renders an autovisualiser chart spec (Chart.js JSON) in a WebView with bundled Chart.js. */
+@android.annotation.SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun ChartView(spec: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(10.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                android.webkit.WebView(ctx).apply {
+                    settings.javaScriptEnabled = true
+                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    isVerticalScrollBarEnabled = false
+                    isHorizontalScrollBarEnabled = false
+                    loadDataWithBaseURL("file:///android_asset/", chartHtml(spec), "text/html", "utf-8", null)
+                }
+            },
+            modifier = Modifier.fillMaxWidth().height(240.dp).padding(8.dp)
+        )
+    }
+}
+
+private fun chartHtml(spec: String): String = CHART_TEMPLATE.replace("__SPEC__", spec)
+
+private val CHART_TEMPLATE = """
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="chart.min.js"></script>
+<style>html,body{margin:0;padding:0;background:transparent}.wrap{position:relative;height:224px}</style></head>
+<body><div class="wrap"><canvas id="c"></canvas></div><script>
+try {
+  const spec = __SPEC__;
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  Chart.defaults.color = dark ? '#e2e2e2' : '#303030';
+  Chart.defaults.borderColor = dark ? '#404040' : '#e2e2e2';
+  new Chart(document.getElementById('c'), {
+    type: spec.type || 'bar',
+    data: { labels: spec.labels || [], datasets: spec.datasets || [] },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { title: { display: !!spec.title, text: spec.title || '' },
+                 legend: { display: (spec.datasets||[]).length > 1 } } }
+  });
+} catch(e) { document.body.innerHTML = '<pre style="color:#c0392b">chart error: '+e+'</pre>'; }
+</script></body></html>
+""".trimIndent()
 
 @Composable
 private fun Markdownish(text: String) {

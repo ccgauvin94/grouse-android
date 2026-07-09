@@ -27,6 +27,7 @@ class ConnectionManager private constructor(context: Context) {
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
     val busy = mutableStateOf(false)
+    val usage = mutableStateOf<AcpEvent.Usage?>(null)   // context window used/size + cost
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
     // Handed in by OS entry points (share sheet, shortcut, tile), consumed by the UI.
@@ -138,6 +139,9 @@ class ConnectionManager private constructor(context: Context) {
     /** Interrupt the running turn. */
     fun cancel() = client?.cancel()
 
+    /** Compact the conversation history to reclaim context (goose /compact command). */
+    fun compact() { busy.value = true; client?.sendPrompt("/compact") }
+
     /** Answer the given approval request; null optionId denies (cancelled). */
     fun answerPermission(p: AcpEvent.Permission, optionId: String?) {
         client?.respondPermission(p.toolCallId, optionId)
@@ -170,9 +174,10 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Error -> {
                 messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false
-                if (ev.text.startsWith("connection failed")) { live = false; connecting = false }
             }
             is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title)); streamingRole = null }
+            is AcpEvent.Usage -> usage.value = ev
+            is AcpEvent.Chart -> { messages.add(ChatMessage("chart", ev.spec)); streamingRole = null }
             is AcpEvent.TurnDone -> {
                 streamingRole = null; busy.value = false
                 if (!appForeground) notifier.postReply(lastAssistantText())
