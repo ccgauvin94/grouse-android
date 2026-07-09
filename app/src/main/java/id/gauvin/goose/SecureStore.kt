@@ -50,6 +50,11 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("persistent_conn", false)
         set(v) = cfg.edit().putBoolean("persistent_conn", v).apply()
 
+    /** Show goose's full provider catalog vs. just the configured ones. */
+    var showAllProviders: Boolean
+        get() = cfg.getBoolean("show_all_providers", false)
+        set(v) = cfg.edit().putBoolean("show_all_providers", v).apply()
+
     /** Last opened session, so a notification reply after process death can resume it. */
     var lastSessionId: String?
         get() = cfg.getString("last_session", null)

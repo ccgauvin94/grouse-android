@@ -123,7 +123,8 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     }) { pad ->
         Column(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
             ModelBar(cm.config.value, showConfig) { showConfig = !showConfig }
-            if (showConfig) ConfigPanel(cm.config.value, cm::setOption)
+            if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
+                cm.configuredProviders, cm::setOption)
             LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
                 items(cm.messages) { m -> MessageBubble(m) }
                 if (cm.busy.value) item { TypingIndicator() }
@@ -309,6 +310,17 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             ) { Text("Save & reconnect") }
 
             Spacer(Modifier.height(24.dp))
+            Text("Models", style = MaterialTheme.typography.titleMedium)
+            var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Show all providers", Modifier.weight(1f))
+                Switch(checked = showAll, onCheckedChange = { showAll = it; cm.setShowAllProviders(it) })
+            }
+            Text("Off shows only providers set up on your goose (openai, openrouter). " +
+                "Turn on to pick from goose's full catalog.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+
+            Spacer(Modifier.height(24.dp))
             Text("Appearance", style = MaterialTheme.typography.titleMedium)
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Material You dynamic color", Modifier.weight(1f))
@@ -360,7 +372,12 @@ fun ModelBar(options: List<ConfigOption>, expanded: Boolean, onToggle: () -> Uni
 }
 
 @Composable
-fun ConfigPanel(options: List<ConfigOption>, onPick: (String, String) -> Unit) {
+fun ConfigPanel(
+    options: List<ConfigOption>,
+    showAllProviders: Boolean,
+    configured: Set<String>,
+    onPick: (String, String) -> Unit,
+) {
     if (options.isEmpty()) {
         Text("loading model options…", style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(vertical = 8.dp))
@@ -368,7 +385,13 @@ fun ConfigPanel(options: List<ConfigOption>, onPick: (String, String) -> Unit) {
     }
     val byId = options.associateBy { it.id }
     Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-        for (id in CONFIG_IDS) byId[id]?.let { ConfigDropdown(it, onPick) }
+        for (id in CONFIG_IDS) byId[id]?.let { opt ->
+            // Hide unconfigured providers unless the user opted into the full catalog.
+            val shown = if (id == "provider" && !showAllProviders)
+                opt.copy(choices = opt.choices.filter { it.value in configured || it.value == opt.currentValue })
+            else opt
+            ConfigDropdown(shown, onPick)
+        }
         HorizontalDivider(Modifier.padding(top = 8.dp))
     }
 }

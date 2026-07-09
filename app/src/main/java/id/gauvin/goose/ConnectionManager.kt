@@ -30,8 +30,14 @@ class ConnectionManager private constructor(context: Context) {
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
     val dynamicColor = mutableStateOf(store.dynamicColor)
+    val showAllProviders = mutableStateOf(store.showAllProviders)
+
+    // Providers actually set up on this goose (config.yaml `providers:` with configured:true).
+    // Unconfigured catalog entries are hidden unless showAllProviders is on.
+    val configuredProviders = setOf("openai", "openrouter")
 
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
+    fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
 
     private val main = Handler(Looper.getMainLooper())
     private var client: AcpClient? = null
@@ -170,7 +176,12 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.AgentChunk -> appendStream("assistant", ev.text)
             is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
             is AcpEvent.UserChunk -> { messages.add(ChatMessage("user", ev.text)); streamingRole = null }
-            is AcpEvent.Config -> if (ev.options.isNotEmpty()) config.value = ev.options
+            is AcpEvent.Config -> if (ev.options.isNotEmpty()) {
+                config.value = ev.options
+                // Persist the true current values so re-apply on reconnect can't drift
+                // (e.g. leave a LocalAI model selected after switching to openrouter).
+                ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
+            }
             is AcpEvent.Ready -> {
                 live = true; connecting = false
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
