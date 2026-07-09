@@ -17,7 +17,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
@@ -386,13 +388,54 @@ fun ConfigPanel(
     val byId = options.associateBy { it.id }
     Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
         for (id in CONFIG_IDS) byId[id]?.let { opt ->
-            // Hide unconfigured providers unless the user opted into the full catalog.
-            val shown = if (id == "provider" && !showAllProviders)
-                opt.copy(choices = opt.choices.filter { it.value in configured || it.value == opt.currentValue })
-            else opt
-            ConfigDropdown(shown, onPick)
+            when (id) {
+                // Editable: goose only lists "featured" models + a "current" placeholder, so
+                // typing an exact slug (e.g. z-ai/glm-5.2) is the only way to pick many models.
+                "model" -> ModelField(opt, onPick)
+                // Hide unconfigured providers unless the user opted into the full catalog.
+                "provider" -> ConfigDropdown(
+                    if (showAllProviders) opt
+                    else opt.copy(choices = opt.choices.filter { it.value in configured || it.value == opt.currentValue }),
+                    onPick)
+                else -> ConfigDropdown(opt, onPick)
+            }
         }
         HorizontalDivider(Modifier.padding(top = 8.dp))
+    }
+}
+
+/** Editable model field: type any model id or pick a featured one from the menu. */
+@Composable
+fun ModelField(opt: ConfigOption, onPick: (String, String) -> Unit) {
+    var text by remember(opt.currentValue) { mutableStateOf(opt.currentValue) }
+    var menu by remember { mutableStateOf(false) }
+    val dirty = text.trim() != opt.currentValue && text.isNotBlank()
+    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        OutlinedTextField(
+            value = text, onValueChange = { text = it }, singleLine = true,
+            label = { Text("model") },
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                onDone = { if (dirty) onPick("model", text.trim()) }),
+            trailingIcon = {
+                Row {
+                    if (dirty) IconButton(onClick = { onPick("model", text.trim()) }) {
+                        Icon(Icons.Filled.Check, contentDescription = "set model")
+                    }
+                    IconButton(onClick = { menu = true }) {
+                        Icon(Icons.Filled.ArrowDropDown, contentDescription = "model list")
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        )
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            opt.choices.forEach { c ->
+                val label = if (c.value == "current") "Provider default" else c.label
+                DropdownMenuItem(text = { Text(label) },
+                    onClick = { menu = false; text = c.value; onPick("model", c.value) })
+            }
+        }
     }
 }
 
