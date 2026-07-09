@@ -29,6 +29,7 @@ data class SessionInfo(
 sealed interface AcpEvent {
     data class Status(val text: String) : AcpEvent
     data class AgentChunk(val text: String) : AcpEvent
+    data class ThoughtChunk(val text: String) : AcpEvent
     data class UserChunk(val text: String) : AcpEvent
     data class ToolCall(val title: String) : AcpEvent
     data class TurnDone(val stopReason: String) : AcpEvent
@@ -250,8 +251,8 @@ class AcpClient(
             // user_message_chunk only appears during a session/load replay (live prompts aren't echoed).
             "user_message_chunk" -> text()?.let { onEvent(AcpEvent.UserChunk(it)) }
             "agent_message_chunk" -> text()?.let { onEvent(AcpEvent.AgentChunk(it)) }
-            // Thoughts stream live but are noise in a rebuilt transcript.
-            "agent_thought_chunk" -> if (!replaying) text()?.let { onEvent(AcpEvent.AgentChunk(it)) }
+            // Thoughts stream live (own collapsible bubble); skipped in a rebuilt transcript.
+            "agent_thought_chunk" -> if (!replaying) text()?.let { onEvent(AcpEvent.ThoughtChunk(it)) }
             "tool_call" -> onEvent(AcpEvent.ToolCall(update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call"))
         }
     }

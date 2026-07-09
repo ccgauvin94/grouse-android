@@ -4,25 +4,36 @@ import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.halilibo.richtext.markdown.Markdown
+import com.halilibo.richtext.ui.material3.RichText
+import id.gauvin.goose.ui.theme.GooseTheme
 
 // Config knobs we persist + re-apply on reconnect, in display order.
 private val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")
@@ -30,7 +41,7 @@ private val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { App() } }
+        setContent { GooseTheme { App() } }
     }
 }
 
@@ -126,14 +137,8 @@ fun App(vm: ChatViewModel = viewModel()) {
                 ModelBar(vm.config.value, showConfig) { showConfig = !showConfig }
                 if (showConfig) ConfigPanel(vm.config.value, ::pick)
                 LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    items(vm.messages) { m ->
-                        Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                            Column(Modifier.padding(10.dp)) {
-                                Text(m.role, style = MaterialTheme.typography.labelSmall)
-                                Text(m.text, style = MaterialTheme.typography.bodyMedium)
-                            }
-                        }
-                    }
+                    items(vm.messages) { m -> MessageBubble(m) }
+                    if (vm.busy.value) item { TypingIndicator() }
                 }
                 Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(input, { input = it }, modifier = Modifier.weight(1f),
@@ -242,5 +247,117 @@ fun ConfigDropdown(opt: ConfigOption, onPick: (String, String) -> Unit) {
                 )
             }
         }
+    }
+}
+
+// ---- Chat message rendering -------------------------------------------------
+
+/** Renders one message by role: user / assistant / thought / tool / error. */
+@Composable
+fun MessageBubble(m: ChatMessage) {
+    when (m.role) {
+        "user" -> UserBubble(m.text)
+        "thought" -> ThoughtBubble(m.text)
+        "tool" -> ToolChip(m.text)
+        "error" -> ErrorBubble(m.text)
+        else -> AssistantBubble(m.text)
+    }
+}
+
+@Composable
+private fun Markdownish(text: String) {
+    // goose emits markdown; render it (headers, bold, lists, fenced code).
+    RichText(modifier = Modifier.fillMaxWidth()) { Markdown(text) }
+}
+
+@Composable
+private fun UserBubble(text: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
+        Surface(
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
+            modifier = Modifier.widthIn(max = 320.dp)
+        ) {
+            Box(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) { Markdownish(text) }
+        }
+    }
+}
+
+@Composable
+private fun AssistantBubble(text: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Box(Modifier.padding(horizontal = 2.dp, vertical = 4.dp)) { Markdownish(text) }
+    }
+}
+
+@Composable
+private fun ThoughtBubble(text: String) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Row(
+            Modifier.clickable { expanded = !expanded }.padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (expanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
+                contentDescription = null, modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.outline
+            )
+            Icon(Icons.Filled.Psychology, contentDescription = null, modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.width(6.dp))
+            Text("Thinking", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.outline)
+        }
+        AnimatedVisibility(expanded) {
+            Text(
+                text, style = MaterialTheme.typography.bodySmall.copy(fontStyle = FontStyle.Italic),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 24.dp, bottom = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ToolChip(title: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(title, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ErrorBubble(text: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+    ) {
+        Text(text, style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(10.dp))
+    }
+}
+
+@Composable
+private fun TypingIndicator() {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+        Spacer(Modifier.width(8.dp))
+        Text("goose is thinking…", style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.outline)
     }
 }

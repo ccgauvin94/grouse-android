@@ -13,10 +13,13 @@ class ChatViewModel : ViewModel() {
     val status = mutableStateOf("not connected")
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
+    val busy = mutableStateOf(false)   // a turn is in flight (for the typing indicator)
 
     private val main = Handler(Looper.getMainLooper())
     private var client: AcpClient? = null
-    private var streaming = false
+    // Which role is currently streaming, so consecutive chunks of the same kind merge into
+    // one bubble but a role change (or a tool call) starts a fresh one.
+    private var streamingRole: String? = null
 
     // Remembered so we can silently reconnect after Android drops the socket in the background.
     private var host = ""; private var port = ""; private var key = ""
@@ -78,7 +81,8 @@ class ChatViewModel : ViewModel() {
 
     fun send(text: String) {
         messages.add(ChatMessage("user", text))
-        streaming = false
+        streamingRole = null
+        busy.value = true
         client?.sendPrompt(text)
     }
 
@@ -89,26 +93,28 @@ class ChatViewModel : ViewModel() {
                 if (ev.text == "disconnected") { live = false; connecting = false }
             }
             is AcpEvent.Error -> {
-                messages.add(ChatMessage("error", ev.text)); streaming = false
+                messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false
                 if (ev.text.startsWith("connection failed")) { live = false; connecting = false }
             }
-            is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title)); streaming = false }
-            is AcpEvent.TurnDone -> streaming = false
-            is AcpEvent.AgentChunk -> appendAgent(ev.text)
-            is AcpEvent.UserChunk -> { messages.add(ChatMessage("user", ev.text)); streaming = false }
+            is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title)); streamingRole = null }
+            is AcpEvent.TurnDone -> { streamingRole = null; busy.value = false }
+            is AcpEvent.AgentChunk -> appendStream("assistant", ev.text)
+            is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
+            is AcpEvent.UserChunk -> { messages.add(ChatMessage("user", ev.text)); streamingRole = null }
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) config.value = ev.options
             is AcpEvent.Ready -> { live = true; connecting = false; lastSessionId = ev.sessionId }
             is AcpEvent.Sessions -> sessions.value = ev.list
         }
     }
 
-    private fun appendAgent(chunk: String) {
+    /** Merge a streamed chunk into the last bubble of the same role, else start a new one. */
+    private fun appendStream(role: String, chunk: String) {
         val last = messages.lastOrNull()
-        if (streaming && last != null && last.role == "assistant") {
+        if (streamingRole == role && last != null && last.role == role) {
             messages[messages.lastIndex] = last.copy(text = last.text + chunk)
         } else {
-            streaming = true
-            messages.add(ChatMessage("assistant", chunk))
+            streamingRole = role
+            messages.add(ChatMessage(role, chunk))
         }
     }
 
