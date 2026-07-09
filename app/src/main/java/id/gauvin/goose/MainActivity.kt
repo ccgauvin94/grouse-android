@@ -10,6 +10,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -43,6 +45,7 @@ fun App(vm: ChatViewModel = viewModel()) {
     var key by remember { mutableStateOf(prefs.getString("key", "") ?: "") }
     var connected by remember { mutableStateOf(false) }
     var showConfig by remember { mutableStateOf(false) }
+    var showSessions by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
@@ -89,6 +92,10 @@ fun App(vm: ChatViewModel = viewModel()) {
             title = { Text("Goose · ${vm.status.value}") },
             actions = {
                 if (connected) {
+                    IconButton(onClick = {
+                        showSessions = !showSessions
+                        if (showSessions) vm.listSessions()
+                    }) { Icon(Icons.Filled.History, contentDescription = "sessions") }
                     IconButton(onClick = { showConfig = !showConfig }) {
                         Icon(Icons.Filled.Tune, contentDescription = "model settings")
                     }
@@ -109,6 +116,12 @@ fun App(vm: ChatViewModel = viewModel()) {
                 Spacer(Modifier.height(8.dp))
                 Button(onClick = { doConnect() }, enabled = key.isNotBlank(),
                     modifier = Modifier.fillMaxWidth()) { Text("Connect") }
+            } else if (showSessions) {
+                SessionsScreen(
+                    sessions = vm.sessions.value,
+                    onNew = { vm.newSession(); showSessions = false },
+                    onOpen = { id -> vm.openSession(id); showSessions = false },
+                )
             } else {
                 ModelBar(vm.config.value, showConfig) { showConfig = !showConfig }
                 if (showConfig) ConfigPanel(vm.config.value, ::pick)
@@ -127,6 +140,37 @@ fun App(vm: ChatViewModel = viewModel()) {
                         placeholder = { Text("message goose…") })
                     Spacer(Modifier.width(8.dp))
                     Button(onClick = { if (input.isNotBlank()) { vm.send(input.trim()); input = "" } }) { Text("Send") }
+                }
+            }
+        }
+    }
+}
+
+/** List of resumable server-side sessions + a "new chat" action. */
+@Composable
+fun SessionsScreen(sessions: List<SessionInfo>, onNew: () -> Unit, onOpen: (String) -> Unit) {
+    LazyColumn(Modifier.fillMaxSize().padding(top = 8.dp)) {
+        item {
+            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onNew() }) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Add, contentDescription = null)
+                    Spacer(Modifier.width(10.dp))
+                    Text("New chat", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+        }
+        if (sessions.isEmpty()) item {
+            Text("no saved sessions", style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(12.dp))
+        }
+        items(sessions) { s ->
+            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onOpen(s.sessionId) }) {
+                Column(Modifier.padding(14.dp)) {
+                    Text(s.title.ifBlank { s.sessionId }, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(2.dp))
+                    val when_ = s.updatedAt.take(16).replace('T', ' ')
+                    val bits = listOf("${s.messageCount} msgs", s.model, when_).filter { it.isNotBlank() }
+                    Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.bodySmall)
                 }
             }
         }

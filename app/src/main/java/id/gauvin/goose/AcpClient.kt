@@ -16,15 +16,26 @@ data class ConfigOption(
     val choices: List<Choice>,
 )
 
+/** A resumable server-side goose session, from session/list. */
+data class SessionInfo(
+    val sessionId: String,
+    val title: String,
+    val updatedAt: String,
+    val messageCount: Int,
+    val model: String,
+)
+
 /** Events surfaced from the ACP connection to the UI layer. */
 sealed interface AcpEvent {
     data class Status(val text: String) : AcpEvent
     data class AgentChunk(val text: String) : AcpEvent
+    data class UserChunk(val text: String) : AcpEvent
     data class ToolCall(val title: String) : AcpEvent
     data class TurnDone(val stopReason: String) : AcpEvent
     data class Error(val text: String) : AcpEvent
     data class Config(val options: List<ConfigOption>) : AcpEvent
     data class Ready(val sessionId: String) : AcpEvent
+    data class Sessions(val list: List<SessionInfo>) : AcpEvent
 }
 
 /**
@@ -54,8 +65,10 @@ class AcpClient(
 
     /** If set, resume this server-side session (session/load) instead of a fresh session/new. */
     var resumeSessionId: String? = null
-    // True while session/load replays history — suppress those updates (UI already has them).
-    private var loadingHistory = false
+    /** On a silent background reconnect the UI still holds the transcript — drop the replay. */
+    var suppressReplay = false
+    // True between sending session/load and its response (i.e. while history replays).
+    private var replaying = false
 
     fun connect() {
         val req = Request.Builder().url(url).addHeader("X-Secret-Key", secretKey).build()
@@ -63,6 +76,9 @@ class AcpClient(
     }
 
     fun close() { ws?.close(1000, "bye"); ws = null }
+
+    /** Ask the agent for its resumable sessions; reply arrives as AcpEvent.Sessions. */
+    fun listSessions() { rpc("session/list", buildJsonObject {}) }
 
     /** Change a session config knob; server replies with the refreshed configOptions. */
     fun setConfigOption(configId: String, value: String) {
@@ -134,14 +150,14 @@ class AcpClient(
         val method = pending.remove(id)
         if (error != null && error !is JsonNull) {
             // A stale/expired session can't be resumed — fall back to a fresh one.
-            if (method == "session/load") { loadingHistory = false; startNewSession(); return }
+            if (method == "session/load") { replaying = false; startNewSession(); return }
             onEvent(AcpEvent.Error("$method: $error")); return
         }
         when (method) {
             "initialize" -> {
                 val resume = resumeSessionId
                 if (resume != null) {
-                    loadingHistory = true
+                    replaying = true
                     rpc("session/load", buildJsonObject {
                         put("sessionId", resume)
                         put("cwd", "/state")
@@ -158,12 +174,13 @@ class AcpClient(
                 applyDesired(cfg)
             }
             "session/load" -> {
-                loadingHistory = false
+                replaying = false
                 sessionId = resumeSessionId
                 onEvent(AcpEvent.Status("ready"))
                 sessionId?.let { onEvent(AcpEvent.Ready(it)) }
-                onEvent(AcpEvent.Config(parseConfig(result)))   // may be empty; VM keeps last
+                onEvent(AcpEvent.Config(parseConfig(result)))   // reflects this session's model
             }
+            "session/list" -> onEvent(AcpEvent.Sessions(parseSessions(result)))
             "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))
             "session/set_mode" -> {}
             "session/prompt" ->
@@ -197,6 +214,22 @@ class AcpClient(
         }
     }
 
+    private fun parseSessions(result: JsonObject?): List<SessionInfo> {
+        val arr = result?.get("sessions") as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val sid = o["sessionId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val meta = o["_meta"] as? JsonObject
+            SessionInfo(
+                sessionId = sid,
+                title = o["title"]?.jsonPrimitive?.contentOrNull ?: sid,
+                updatedAt = o["updatedAt"]?.jsonPrimitive?.contentOrNull ?: "",
+                messageCount = meta?.get("messageCount")?.jsonPrimitive?.intOrNull ?: 0,
+                model = meta?.get("modelId")?.jsonPrimitive?.contentOrNull ?: "",
+            )
+        }
+    }
+
     /** Re-apply persisted picks after a session opens (provider first for the model cascade). */
     private fun applyDesired(cfg: List<ConfigOption>) {
         if (desiredOptions.isEmpty()) return
@@ -209,15 +242,17 @@ class AcpClient(
 
     private fun notification(method: String, params: JsonObject?) {
         if (method != "session/update") return
-        if (loadingHistory) return   // replayed history on session/load — UI already has it
+        // Silent reconnect: the UI already holds the transcript, so drop the replay.
+        if (replaying && suppressReplay) return
         val update = params?.get("update") as? JsonObject ?: return
+        fun text() = (update["content"] as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
         when (update["sessionUpdate"]?.jsonPrimitive?.contentOrNull) {
-            "agent_message_chunk", "agent_thought_chunk" -> {
-                val t = (update["content"] as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
-                if (t != null) onEvent(AcpEvent.AgentChunk(t))
-            }
-            "tool_call", "tool_call_update" ->
-                onEvent(AcpEvent.ToolCall(update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call"))
+            // user_message_chunk only appears during a session/load replay (live prompts aren't echoed).
+            "user_message_chunk" -> text()?.let { onEvent(AcpEvent.UserChunk(it)) }
+            "agent_message_chunk" -> text()?.let { onEvent(AcpEvent.AgentChunk(it)) }
+            // Thoughts stream live but are noise in a rebuilt transcript.
+            "agent_thought_chunk" -> if (!replaying) text()?.let { onEvent(AcpEvent.AgentChunk(it)) }
+            "tool_call" -> onEvent(AcpEvent.ToolCall(update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call"))
         }
     }
 
