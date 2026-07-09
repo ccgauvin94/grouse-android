@@ -60,6 +60,11 @@ class SecureStore(context: Context) {
         get() = cfg.getString("last_session", null)
         set(v) = cfg.edit().putString("last_session", v).apply()
 
+    /** Real model slugs we've seen active (goose hides non-featured models like z-ai/glm-5.2). */
+    var knownModels: Set<String>
+        get() = cfg.getStringSet("known_models", emptySet()) ?: emptySet()
+        set(v) = cfg.edit().putStringSet("known_models", HashSet(v)).apply()
+
     fun savedOptions(ids: List<String>): Map<String, String> =
         ids.mapNotNull { id -> cfg.getString("opt_$id", null)?.let { id to it } }.toMap()
 

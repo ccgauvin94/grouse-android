@@ -103,10 +103,18 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         }
     }
 
-    fun doSend() {
-        if (input.isBlank() && attachments.isEmpty()) return
+    val currentModel = cm.config.value.firstOrNull { it.id == "model" }?.currentValue ?: ""
+    var showVisionWarn by remember { mutableStateOf(false) }
+
+    fun reallySend() {
         cm.send(input.trim(), attachments.toList())
         input = ""; attachments.clear()
+    }
+    fun doSend() {
+        if (input.isBlank() && attachments.isEmpty()) return
+        // Sending images to a non-vision model (esp. LocalAI without mmproj) hangs the session.
+        if (attachments.isNotEmpty() && !isLikelyVisionModel(currentModel)) { showVisionWarn = true; return }
+        reallySend()
     }
 
     LaunchedEffect(cm.messages.size, cm.busy.value) {
@@ -124,6 +132,15 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     cm.permissions.firstOrNull()?.let { req ->
         PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
     }
+
+    if (showVisionWarn) AlertDialog(
+        onDismissRequest = { showVisionWarn = false },
+        title = { Text("Model may not support images") },
+        text = { Text("“$currentModel” probably can't read images and may get stuck on them — " +
+            "even later text messages. If that happens, start a New chat. Send anyway?") },
+        confirmButton = { TextButton(onClick = { showVisionWarn = false; reallySend() }) { Text("Send anyway") } },
+        dismissButton = { TextButton(onClick = { showVisionWarn = false }) { Text("Cancel") } },
+    )
 
     Scaffold(topBar = {
         TopAppBar(
@@ -144,7 +161,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         Column(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
             ModelBar(cm.config.value, showConfig) { showConfig = !showConfig }
             if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
-                cm.configuredProviders, cm::setOption)
+                cm.configuredProviders, cm.knownModels.value, cm::setOption)
             LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
                 items(cm.messages) { m -> MessageBubble(m) }
                 if (cm.busy.value) item { TypingIndicator() }
@@ -238,6 +255,16 @@ fun PermissionSheet(req: AcpEvent.Permission, onChoose: (String?) -> Unit) {
             }
         }
     }
+}
+
+/** Best-effort guess whether a model can accept images, to warn before hanging a text-only model. */
+private fun isLikelyVisionModel(model: String): Boolean {
+    val s = model.lowercase()
+    return listOf(
+        "gemini", "claude", "gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4-", "llava", "vision",
+        "-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "pixtral", "minicpm", "internvl",
+        "gemma-3", "gemma3", "mmproj", "molmo", "phi-3.5-vision", "phi-4-multimodal", "llama-3.2",
+    ).any { s.contains(it) }
 }
 
 private fun prettyOption(raw: String) = when (raw) {
@@ -398,6 +425,7 @@ fun ConfigPanel(
     options: List<ConfigOption>,
     showAllProviders: Boolean,
     configured: Set<String>,
+    knownModels: Set<String>,
     onPick: (String, String) -> Unit,
 ) {
     if (options.isEmpty()) {
@@ -411,7 +439,7 @@ fun ConfigPanel(
             when (id) {
                 // Editable: goose only lists "featured" models + a "current" placeholder, so
                 // typing an exact slug (e.g. z-ai/glm-5.2) is the only way to pick many models.
-                "model" -> ModelField(opt, onPick)
+                "model" -> ModelField(opt, knownModels, onPick)
                 // Hide unconfigured providers unless the user opted into the full catalog.
                 "provider" -> ConfigDropdown(
                     if (showAllProviders) opt
@@ -424,16 +452,20 @@ fun ConfigPanel(
     }
 }
 
-/** Editable model field: type any model id or pick a featured one from the menu. */
+/** Editable model field: type any model id or pick a featured/remembered one from the menu. */
 @Composable
-fun ModelField(opt: ConfigOption, onPick: (String, String) -> Unit) {
+fun ModelField(opt: ConfigOption, knownModels: Set<String>, onPick: (String, String) -> Unit) {
     var text by remember(opt.currentValue) { mutableStateOf(opt.currentValue) }
     var menu by remember { mutableStateOf(false) }
     val dirty = text.trim() != opt.currentValue && text.isNotBlank()
+    // goose's featured list + models we've seen before (so e.g. z-ai/glm-5.2 stays selectable).
+    val featured = opt.choices.map { it.value }
+    val entries = (featured + knownModels.filter { it !in featured }).distinct()
     Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         OutlinedTextField(
             value = text, onValueChange = { text = it }, singleLine = true,
             label = { Text("model") },
+            placeholder = { Text("type a model id, e.g. z-ai/glm-5.2") },
             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
             keyboardActions = androidx.compose.foundation.text.KeyboardActions(
                 onDone = { if (dirty) onPick("model", text.trim()) }),
@@ -450,10 +482,11 @@ fun ModelField(opt: ConfigOption, onPick: (String, String) -> Unit) {
             modifier = Modifier.fillMaxWidth()
         )
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-            opt.choices.forEach { c ->
-                val label = if (c.value == "current") "Provider default" else c.label
+            entries.forEach { v ->
+                val label = if (v == "current") "Provider default"
+                    else opt.choices.firstOrNull { it.value == v }?.label ?: v
                 DropdownMenuItem(text = { Text(label) },
-                    onClick = { menu = false; text = c.value; onPick("model", c.value) })
+                    onClick = { menu = false; text = v; onPick("model", v) })
             }
         }
     }

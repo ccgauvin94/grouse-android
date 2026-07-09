@@ -35,6 +35,7 @@ class ConnectionManager private constructor(context: Context) {
     val pendingNewChat = mutableStateOf(false)
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
+    val knownModels = mutableStateOf(store.knownModels)
 
     // Providers actually set up on this goose (config.yaml `providers:` with configured:true).
     // Unconfigured catalog entries are hidden unless showAllProviders is on.
@@ -185,6 +186,13 @@ class ConnectionManager private constructor(context: Context) {
                 // Persist the true current values so re-apply on reconnect can't drift
                 // (e.g. leave a LocalAI model selected after switching to openrouter).
                 ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
+                // Remember real model slugs (goose only lists featured models + "current").
+                ev.options.firstOrNull { it.id == "model" }?.currentValue?.let { m ->
+                    if (m.isNotBlank() && m != "current" && m !in store.knownModels) {
+                        store.knownModels = store.knownModels + m
+                        knownModels.value = store.knownModels
+                    }
+                }
             }
             is AcpEvent.Ready -> {
                 live = true; connecting = false
