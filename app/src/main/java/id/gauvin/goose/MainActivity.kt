@@ -1,7 +1,11 @@
 package id.gauvin.goose
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
@@ -50,6 +54,13 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
     if (!unlocked) {
         LockScreen(error) { authenticate() }
         return
+    }
+
+    // Ask for notification permission so backgrounded turns can alert (API 33+).
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val notifPerm = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()) {}
+        LaunchedEffect(Unit) { notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS) }
     }
 
     val nav = rememberNavController()

@@ -45,6 +45,16 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("dynamic_color", true)
         set(v) = cfg.edit().putBoolean("dynamic_color", v).apply()
 
+    /** Keep a foreground connection alive even when idle (opt-in; costs battery). */
+    var persistentConnection: Boolean
+        get() = cfg.getBoolean("persistent_conn", false)
+        set(v) = cfg.edit().putBoolean("persistent_conn", v).apply()
+
+    /** Last opened session, so a notification reply after process death can resume it. */
+    var lastSessionId: String?
+        get() = cfg.getString("last_session", null)
+        set(v) = cfg.edit().putString("last_session", v).apply()
+
     fun savedOptions(ids: List<String>): Map<String, String> =
         ids.mapNotNull { id -> cfg.getString("opt_$id", null)?.let { id to it } }.toMap()
 

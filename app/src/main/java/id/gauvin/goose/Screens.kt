@@ -316,6 +316,17 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             }
             Text("Off uses the built-in goose-green palette.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+
+            Spacer(Modifier.height(24.dp))
+            Text("Background", style = MaterialTheme.typography.titleMedium)
+            var persistent by remember { mutableStateOf(cm.persistent) }
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Keep connection alive", Modifier.weight(1f))
+                Switch(checked = persistent, onCheckedChange = { persistent = it; cm.setPersistent(it) })
+            }
+            Text("On: stay connected in the background (a persistent notification, more battery). " +
+                "Off: connect while active; you still get a notification when a backgrounded turn finishes.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
         }
     }
 }

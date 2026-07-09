@@ -1,6 +1,7 @@
 package id.gauvin.goose
 
 import android.content.Context
+import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.mutableStateListOf
@@ -15,6 +16,11 @@ data class ChatMessage(val role: String, val text: String)
  */
 class ConnectionManager private constructor(context: Context) {
     val store = SecureStore(context)
+    private val appContext = context.applicationContext
+    private val notifier = Notifier(context)
+    private var appForeground = true
+    private var serviceRunning = false
+    private var pendingSend: String? = null   // a reply that must wait for (re)connect
 
     val messages = mutableStateListOf<ChatMessage>()
     val status = mutableStateOf("not connected")
@@ -73,8 +79,50 @@ class ConnectionManager private constructor(context: Context) {
     fun send(text: String, images: List<ImageBlock> = emptyList()) {
         val label = if (images.isEmpty()) text else "$text  [📎 ${images.size}]".trim()
         messages.add(ChatMessage("user", label)); streamingRole = null; busy.value = true
+        startService()   // keep the socket alive if the user backgrounds mid-turn
         client?.sendPrompt(text, images)
     }
+
+    /** Send once connected — used by notification replies, which may arrive disconnected. */
+    fun sendWhenReady(text: String) {
+        if (live) { send(text); return }
+        pendingSend = text
+        startService()
+        if (!connecting) open(resume = lastSessionId ?: store.lastSessionId, suppressReplay = true)
+    }
+
+    fun setForeground(fg: Boolean) {
+        appForeground = fg
+        if (fg) {
+            notifier.cancelAlert()
+            ensureConnected()
+            if (!store.persistentConnection && !busy.value) stopService()
+        } else if (store.persistentConnection) {
+            startService()
+        }
+    }
+
+    fun setPersistent(on: Boolean) {
+        store.persistentConnection = on
+        if (on) startService() else if (!busy.value && appForeground) stopService()
+    }
+
+    val persistent: Boolean get() = store.persistentConnection
+
+    private fun startService() {
+        if (serviceRunning) return
+        serviceRunning = true
+        appContext.startForegroundService(Intent(appContext, ConnectionService::class.java))
+    }
+
+    private fun stopService() {
+        if (!serviceRunning) return
+        serviceRunning = false
+        appContext.stopService(Intent(appContext, ConnectionService::class.java))
+    }
+
+    private fun lastAssistantText(): String =
+        messages.lastOrNull { it.role == "assistant" }?.text ?: "Turn finished."
 
     /** Interrupt the running turn. */
     fun cancel() = client?.cancel()
@@ -114,15 +162,26 @@ class ConnectionManager private constructor(context: Context) {
                 if (ev.text.startsWith("connection failed")) { live = false; connecting = false }
             }
             is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title)); streamingRole = null }
-            is AcpEvent.TurnDone -> { streamingRole = null; busy.value = false }
+            is AcpEvent.TurnDone -> {
+                streamingRole = null; busy.value = false
+                if (!appForeground) notifier.postReply(lastAssistantText())
+                if (!store.persistentConnection) stopService()
+            }
             is AcpEvent.AgentChunk -> appendStream("assistant", ev.text)
             is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
             is AcpEvent.UserChunk -> { messages.add(ChatMessage("user", ev.text)); streamingRole = null }
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) config.value = ev.options
-            is AcpEvent.Ready -> { live = true; connecting = false; lastSessionId = ev.sessionId }
+            is AcpEvent.Ready -> {
+                live = true; connecting = false
+                lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
+                pendingSend?.let { pendingSend = null; send(it) }   // flush a queued reply
+            }
             is AcpEvent.Sessions -> sessions.value = ev.list
             is AcpEvent.Commands -> commands.value = ev.names
-            is AcpEvent.Permission -> permissions.add(ev)
+            is AcpEvent.Permission -> {
+                permissions.add(ev)
+                if (!appForeground) notifier.postApprovalNeeded(ev.title)
+            }
         }
     }
 
