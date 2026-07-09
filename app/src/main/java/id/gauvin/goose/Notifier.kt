@@ -73,6 +73,25 @@ class Notifier(context: Context) {
         nm.notify(ID_ALERT, n)
     }
 
+    /** A scheduled proactive check found something worth surfacing. */
+    fun postProactive(text: String) {
+        val remote = RemoteInput.Builder(KEY_REPLY).setLabel("Reply to goose").build()
+        val replyPi = PendingIntent.getBroadcast(
+            app, 2, Intent(app, ReplyReceiver::class.java).setAction(ACTION_REPLY), flags(mutable = true))
+        val action = NotificationCompat.Action.Builder(R.drawable.ic_launcher_monochrome, "Reply", replyPi)
+            .addRemoteInput(remote).build()
+        val n = NotificationCompat.Builder(app, CH_ALERT)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle("Goose briefing")
+            .setContentText(text.take(120))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text.take(1500)))
+            .setContentIntent(openApp())
+            .setAutoCancel(true)
+            .addAction(action)
+            .build()
+        nm.notify(ID_PROACTIVE, n)
+    }
+
     fun cancelAlert() = nm.cancel(ID_ALERT)
 
     private fun flags(mutable: Boolean): Int {
@@ -85,6 +104,7 @@ class Notifier(context: Context) {
         const val CH_ALERT = "goose_alert"
         const val ID_ONGOING = 1
         const val ID_ALERT = 2
+        const val ID_PROACTIVE = 3
         const val KEY_REPLY = "goose_reply_text"
         const val ACTION_REPLY = "id.gauvin.goose.action.REPLY"
     }

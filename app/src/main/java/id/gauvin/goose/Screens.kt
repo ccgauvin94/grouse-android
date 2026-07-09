@@ -9,6 +9,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -381,6 +383,14 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             ) { Text("Save & reconnect") }
 
             Spacer(Modifier.height(24.dp))
+            Text("Assistant", style = MaterialTheme.typography.titleMedium)
+            OutlinedButton(onClick = { nav.navigate("proactive") }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                Text("Proactive checks")
+            }
+            Text("Scheduled read-only check-ins that notify you when something needs attention.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+
+            Spacer(Modifier.height(24.dp))
             Text("Extensions", style = MaterialTheme.typography.titleMedium)
             OutlinedButton(onClick = { nav.navigate("extensions") }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
                 Text("Manage extensions")
@@ -418,6 +428,58 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             Text("On: stay connected in the background (a persistent notification, more battery). " +
                 "Off: connect while active; you still get a notification when a backgrounded turn finishes.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+        }
+    }
+}
+
+// ---- Proactive assistant ----------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ProactiveScreen(cm: ConnectionManager, nav: NavController) {
+    val ctx = LocalContext.current
+    val store = cm.store
+    var enabled by remember { mutableStateOf(store.proactiveEnabled) }
+    var time by remember { mutableStateOf(store.proactiveTime) }
+    var prompt by remember { mutableStateOf(store.proactivePrompt) }
+
+    fun save() {
+        store.proactiveEnabled = enabled
+        store.proactiveTime = time.trim()
+        store.proactivePrompt = prompt
+        ProactiveScheduler.reschedule(ctx)
+    }
+
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Proactive assistant") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            }
+        )
+    }) { pad ->
+        Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
+            Text("goose checks in on a schedule and notifies you only when something needs " +
+                "attention. Runs read-only in the background — it can look, not act.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Enabled", Modifier.weight(1f))
+                Switch(checked = enabled, onCheckedChange = { enabled = it })
+            }
+            OutlinedTextField(time, { time = it }, label = { Text("Time (HH:MM, 24h)") },
+                singleLine = true, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(prompt, { prompt = it }, label = { Text("Briefing prompt") },
+                minLines = 4, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = { save() }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
+            OutlinedButton(onClick = { save(); ProactiveScheduler.runNow(ctx) },
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) { Text("Run now (test)") }
+            Text("A test run may take a minute; you'll get a notification if there's something to report.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(top = 6.dp))
         }
     }
 }

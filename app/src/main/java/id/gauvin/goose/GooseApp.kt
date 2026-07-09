@@ -14,5 +14,6 @@ class GooseApp : Application() {
             override fun onStart(owner: LifecycleOwner) = cm.setForeground(true)
             override fun onStop(owner: LifecycleOwner) = cm.setForeground(false)
         })
+        ProactiveScheduler.reschedule(this)   // ensure the check is (re)armed at process start
     }
 }
