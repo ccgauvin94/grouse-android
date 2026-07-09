@@ -21,6 +21,8 @@ class ConnectionManager private constructor(context: Context) {
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
     val busy = mutableStateOf(false)
+    val commands = mutableStateOf<List<String>>(emptyList())
+    val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
     val dynamicColor = mutableStateOf(store.dynamicColor)
 
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
@@ -68,9 +70,19 @@ class ConnectionManager private constructor(context: Context) {
         client?.setConfigOption(configId, value)
     }
 
-    fun send(text: String) {
-        messages.add(ChatMessage("user", text)); streamingRole = null; busy.value = true
-        client?.sendPrompt(text)
+    fun send(text: String, images: List<ImageBlock> = emptyList()) {
+        val label = if (images.isEmpty()) text else "$text  [📎 ${images.size}]".trim()
+        messages.add(ChatMessage("user", label)); streamingRole = null; busy.value = true
+        client?.sendPrompt(text, images)
+    }
+
+    /** Interrupt the running turn. */
+    fun cancel() = client?.cancel()
+
+    /** Answer the given approval request; null optionId denies (cancelled). */
+    fun answerPermission(p: AcpEvent.Permission, optionId: String?) {
+        client?.respondPermission(p.toolCallId, optionId)
+        permissions.remove(p)
     }
 
     private fun open(resume: String?, suppressReplay: Boolean) {
@@ -109,6 +121,8 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) config.value = ev.options
             is AcpEvent.Ready -> { live = true; connecting = false; lastSessionId = ev.sessionId }
             is AcpEvent.Sessions -> sessions.value = ev.list
+            is AcpEvent.Commands -> commands.value = ev.names
+            is AcpEvent.Permission -> permissions.add(ev)
         }
     }
 

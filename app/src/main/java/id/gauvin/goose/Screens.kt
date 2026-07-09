@@ -1,5 +1,11 @@
 package id.gauvin.goose
 
+import android.content.Context
+import android.net.Uri
+import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -12,15 +18,20 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -62,9 +73,21 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(cm: ConnectionManager, nav: NavController) {
+    val ctx = LocalContext.current
     var showConfig by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
+    val attachments = remember { mutableStateListOf<ImageBlock>() }
     val listState = rememberLazyListState()
+
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? -> uri?.let { readImage(ctx, it)?.let(attachments::add) } }
+
+    fun doSend() {
+        if (input.isBlank() && attachments.isEmpty()) return
+        cm.send(input.trim(), attachments.toList())
+        input = ""; attachments.clear()
+    }
 
     LaunchedEffect(cm.messages.size, cm.busy.value) {
         val n = cm.messages.size + if (cm.busy.value) 1 else 0
@@ -76,6 +99,10 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         val obs = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_RESUME) cm.ensureConnected() }
         owner.lifecycle.addObserver(obs)
         onDispose { owner.lifecycle.removeObserver(obs) }
+    }
+
+    cm.permissions.firstOrNull()?.let { req ->
+        PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
     }
 
     Scaffold(topBar = {
@@ -101,15 +128,102 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                 items(cm.messages) { m -> MessageBubble(m) }
                 if (cm.busy.value) item { TypingIndicator() }
             }
+
+            // Slash-command autocomplete (goose's available commands).
+            val slash = input.startsWith("/") && !input.contains(' ')
+            if (slash) {
+                val matches = cm.commands.value.filter { it.startsWith(input.drop(1), true) }.take(6)
+                if (matches.isNotEmpty()) Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column {
+                        matches.forEach { name ->
+                            Text("/$name", modifier = Modifier.fillMaxWidth()
+                                .clickable { input = "/$name " }.padding(horizontal = 12.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            }
+
+            if (attachments.isNotEmpty()) Row(Modifier.padding(vertical = 4.dp)) {
+                attachments.forEachIndexed { i, _ ->
+                    AssistChip(onClick = { attachments.removeAt(i) },
+                        label = { Text("image ${i + 1}") },
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
+                            modifier = Modifier.size(16.dp)) },
+                        modifier = Modifier.padding(end = 6.dp))
+                }
+            }
+
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = {
+                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                }) { Icon(Icons.Filled.Image, contentDescription = "attach image") }
                 OutlinedTextField(input, { input = it }, modifier = Modifier.weight(1f),
                     placeholder = { Text("message goose…") })
-                Spacer(Modifier.width(8.dp))
-                Button(onClick = { if (input.isNotBlank()) { cm.send(input.trim()); input = "" } }) { Text("Send") }
+                Spacer(Modifier.width(6.dp))
+                if (cm.busy.value) {
+                    FilledIconButton(onClick = { cm.cancel() }) {
+                        Icon(Icons.Filled.Stop, contentDescription = "stop")
+                    }
+                } else {
+                    FilledIconButton(onClick = { doSend() }) {
+                        Icon(Icons.Filled.Send, contentDescription = "send")
+                    }
+                }
             }
         }
     }
 }
+
+/** Tool-approval bottom sheet. Options come straight from goose (allow/reject × once/always). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PermissionSheet(req: AcpEvent.Permission, onChoose: (String?) -> Unit) {
+    ModalBottomSheet(onDismissRequest = { onChoose(null) }) {
+        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+            Text("Allow tool?", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(6.dp))
+            Text(req.title, style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary)
+            if (req.detail.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text(req.detail, style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(10.dp))
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            req.options.forEach { opt ->
+                val reject = opt.kind.startsWith("reject")
+                if (reject) {
+                    OutlinedButton(onClick = { onChoose(opt.optionId) },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { Text(prettyOption(opt.label)) }
+                } else {
+                    Button(onClick = { onChoose(opt.optionId) },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { Text(prettyOption(opt.label)) }
+                }
+            }
+        }
+    }
+}
+
+private fun prettyOption(raw: String) = when (raw) {
+    "allow_once" -> "Allow once"
+    "allow_always" -> "Always allow"
+    "reject_once" -> "Reject"
+    "reject_always" -> "Always reject"
+    else -> raw.replace('_', ' ').replaceFirstChar { it.uppercase() }
+}
+
+private fun readImage(context: Context, uri: Uri): ImageBlock? = runCatching {
+    val mime = context.contentResolver.getType(uri) ?: "image/jpeg"
+    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+    ImageBlock(mime, Base64.encodeToString(bytes, Base64.NO_WRAP))
+}.getOrNull()
 
 // ---- Sessions ---------------------------------------------------------------
 

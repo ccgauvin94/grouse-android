@@ -16,6 +16,12 @@ data class ConfigOption(
     val choices: List<Choice>,
 )
 
+/** An image to attach to a prompt (base64 payload + mime). */
+data class ImageBlock(val mimeType: String, val dataB64: String)
+
+/** One choice in a tool-approval request (allow_once / allow_always / reject_*). */
+data class PermOption(val optionId: String, val label: String, val kind: String)
+
 /** A resumable server-side goose session, from session/list. */
 data class SessionInfo(
     val sessionId: String,
@@ -37,6 +43,10 @@ sealed interface AcpEvent {
     data class Config(val options: List<ConfigOption>) : AcpEvent
     data class Ready(val sessionId: String) : AcpEvent
     data class Sessions(val list: List<SessionInfo>) : AcpEvent
+    data class Commands(val names: List<String>) : AcpEvent
+    data class Permission(
+        val toolCallId: String, val title: String, val detail: String, val options: List<PermOption>,
+    ) : AcpEvent
 }
 
 /**
@@ -58,6 +68,8 @@ class AcpClient(
     private val pending = HashMap<Int, String>()      // request id -> method we sent
     private var sessionId: String? = null
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    // Outstanding tool-approval requests: toolCallId -> the JSON-RPC id we must answer.
+    private val pendingPermissions = HashMap<String, JsonElement>()
 
     /** Config values to re-apply once a session opens (persisted picks). id -> value. */
     var desiredOptions: Map<String, String> = emptyMap()
@@ -89,13 +101,38 @@ class AcpClient(
         })
     }
 
-    fun sendPrompt(text: String) {
+    fun sendPrompt(text: String, images: List<ImageBlock> = emptyList()) {
         val sid = sessionId
         if (sid == null) { onEvent(AcpEvent.Error("not ready — no session")); return }
         rpc("session/prompt", buildJsonObject {
             put("sessionId", sid)
             putJsonArray("prompt") {
-                add(buildJsonObject { put("type", "text"); put("text", text) })
+                if (text.isNotBlank()) add(buildJsonObject { put("type", "text"); put("text", text) })
+                images.forEach { img ->
+                    add(buildJsonObject {
+                        put("type", "image"); put("mimeType", img.mimeType); put("data", img.dataB64)
+                    })
+                }
+            }
+        })
+    }
+
+    /** Interrupt the running turn (ACP notification — no response expected). */
+    fun cancel() {
+        val sid = sessionId ?: return
+        ws?.send(buildJsonObject {
+            put("jsonrpc", "2.0"); put("method", "session/cancel")
+            putJsonObject("params") { put("sessionId", sid) }
+        }.toString())
+    }
+
+    /** Answer a pending tool-approval request; null optionId = cancelled/deny. */
+    fun respondPermission(toolCallId: String, optionId: String?) {
+        val id = pendingPermissions.remove(toolCallId) ?: return
+        respond(id, buildJsonObject {
+            putJsonObject("outcome") {
+                if (optionId != null) { put("outcome", "selected"); put("optionId", optionId) }
+                else put("outcome", "cancelled")
             }
         })
     }
@@ -254,24 +291,34 @@ class AcpClient(
             // Thoughts stream live (own collapsible bubble); skipped in a rebuilt transcript.
             "agent_thought_chunk" -> if (!replaying) text()?.let { onEvent(AcpEvent.ThoughtChunk(it)) }
             "tool_call" -> onEvent(AcpEvent.ToolCall(update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call"))
+            "available_commands_update" -> {
+                val names = (update["availableCommands"] as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                }
+                if (names.isNotEmpty()) onEvent(AcpEvent.Commands(names))
+            }
         }
     }
 
     private fun serverRequest(method: String, id: JsonElement, params: JsonObject?) {
         if (method == "session/request_permission") {
-            // v1: auto-allow — it's your own agent doing what you asked. TODO: approval UI.
-            val options = params?.get("options") as? JsonArray
-            val chosen = options?.firstOrNull {
-                val k = (it as? JsonObject)?.get("kind")?.jsonPrimitive?.contentOrNull
-                k == "allow_once" || k == "allow_always"
-            } ?: options?.firstOrNull()
-            val optionId = (chosen as? JsonObject)?.get("optionId")?.jsonPrimitive?.contentOrNull
-            respond(id, buildJsonObject {
-                putJsonObject("outcome") {
-                    put("outcome", "selected")
-                    if (optionId != null) put("optionId", optionId)
-                }
-            })
+            // Surface it to the user — goose's mode (smart_approve by default) already decides
+            // which tools reach here; we just present the decision.
+            val tc = params?.get("toolCall") as? JsonObject
+            val toolCallId = tc?.get("toolCallId")?.jsonPrimitive?.contentOrNull
+            if (toolCallId == null) { respond(id, buildJsonObject {}); return }
+            val title = tc["title"]?.jsonPrimitive?.contentOrNull ?: "tool"
+            val detail = (tc["rawInput"] as? JsonObject)?.let { ri ->
+                ri["command"]?.jsonPrimitive?.contentOrNull ?: ri.toString()
+            } ?: ""
+            val opts = (params["options"] as? JsonArray).orEmpty().mapNotNull { el ->
+                val o = el as? JsonObject ?: return@mapNotNull null
+                val oid = o["optionId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                PermOption(oid, o["name"]?.jsonPrimitive?.contentOrNull ?: oid,
+                    o["kind"]?.jsonPrimitive?.contentOrNull ?: "")
+            }
+            pendingPermissions[toolCallId] = id
+            onEvent(AcpEvent.Permission(toolCallId, title, detail, opts))
         } else {
             respond(id, buildJsonObject {})   // unknown request: empty result so the agent doesn't hang
         }
