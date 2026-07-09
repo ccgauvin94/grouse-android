@@ -11,17 +11,23 @@ data class ChatMessage(val role: String, val text: String)
 class ChatViewModel : ViewModel() {
     val messages = mutableStateListOf<ChatMessage>()
     val status = mutableStateOf("not connected")
+    val config = mutableStateOf<List<ConfigOption>>(emptyList())
 
     private val main = Handler(Looper.getMainLooper())
     private var client: AcpClient? = null
     private var streaming = false
 
-    fun connect(host: String, port: String, key: String) {
+    fun connect(host: String, port: String, key: String, saved: Map<String, String> = emptyMap()) {
         client?.close()
+        config.value = emptyList()
         val url = "ws://$host:$port/acp"
         status.value = "connecting to $url"
-        client = AcpClient(url, key) { ev -> main.post { onEvent(ev) } }.also { it.connect() }
+        client = AcpClient(url, key) { ev -> main.post { onEvent(ev) } }
+            .also { it.desiredOptions = saved; it.connect() }
     }
+
+    /** User picked a new value for a config knob (provider/model/mode/thinking_effort). */
+    fun setOption(configId: String, value: String) = client?.setConfigOption(configId, value)
 
     fun send(text: String) {
         messages.add(ChatMessage("user", text))
@@ -36,6 +42,7 @@ class ChatViewModel : ViewModel() {
             is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title)); streaming = false }
             is AcpEvent.TurnDone -> streaming = false
             is AcpEvent.AgentChunk -> appendAgent(ev.text)
+            is AcpEvent.Config -> if (ev.options.isNotEmpty()) config.value = ev.options
         }
     }
 

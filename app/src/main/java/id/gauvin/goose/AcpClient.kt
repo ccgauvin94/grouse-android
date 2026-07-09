@@ -5,6 +5,17 @@ import okhttp3.*
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
+/** A selectable value inside a [ConfigOption] (goose "select" config). */
+data class Choice(val value: String, val label: String)
+
+/** One goose session config knob — provider / model / mode / thinking_effort. */
+data class ConfigOption(
+    val id: String,
+    val name: String,
+    val currentValue: String,
+    val choices: List<Choice>,
+)
+
 /** Events surfaced from the ACP connection to the UI layer. */
 sealed interface AcpEvent {
     data class Status(val text: String) : AcpEvent
@@ -12,6 +23,7 @@ sealed interface AcpEvent {
     data class ToolCall(val title: String) : AcpEvent
     data class TurnDone(val stopReason: String) : AcpEvent
     data class Error(val text: String) : AcpEvent
+    data class Config(val options: List<ConfigOption>) : AcpEvent
 }
 
 /**
@@ -34,12 +46,25 @@ class AcpClient(
     private var sessionId: String? = null
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
+    /** Config values to re-apply once a session opens (persisted picks). id -> value. */
+    var desiredOptions: Map<String, String> = emptyMap()
+    // provider before model so the model list is valid when the model set lands.
+    private val applyOrder = listOf("provider", "model", "mode", "thinking_effort")
+
     fun connect() {
         val req = Request.Builder().url(url).addHeader("X-Secret-Key", secretKey).build()
         ws = http.newWebSocket(req, listener)
     }
 
     fun close() { ws?.close(1000, "bye"); ws = null }
+
+    /** Change a session config knob; server replies with the refreshed configOptions. */
+    fun setConfigOption(configId: String, value: String) {
+        val sid = sessionId ?: return
+        rpc("session/set_config_option", buildJsonObject {
+            put("sessionId", sid); put("configId", configId); put("value", value)
+        })
+    }
 
     fun sendPrompt(text: String) {
         val sid = sessionId
@@ -104,15 +129,51 @@ class AcpClient(
         if (error != null && error !is JsonNull) { onEvent(AcpEvent.Error("$method: $error")); return }
         when (method) {
             "initialize" -> rpc("session/new", buildJsonObject {
-                put("cwd", "/home/colin")
+                // cwd must exist INSIDE the goose_acp container (not the host).
+                // /state is bind-mounted + writable + persistent.
+                put("cwd", "/state")
                 putJsonArray("mcpServers") {}
             })
             "session/new" -> {
                 sessionId = result?.get("sessionId")?.jsonPrimitive?.contentOrNull
                 onEvent(AcpEvent.Status(if (sessionId != null) "ready" else "session/new returned no sessionId"))
+                val cfg = parseConfig(result)
+                onEvent(AcpEvent.Config(cfg))
+                applyDesired(cfg)
             }
+            "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))
+            "session/set_mode" -> {}
             "session/prompt" ->
                 onEvent(AcpEvent.TurnDone(result?.get("stopReason")?.jsonPrimitive?.contentOrNull ?: "end"))
+        }
+    }
+
+    private fun parseConfig(result: JsonObject?): List<ConfigOption> {
+        val arr = result?.get("configOptions") as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val choices = (o["options"] as? JsonArray).orEmpty().mapNotNull { c ->
+                val co = c as? JsonObject ?: return@mapNotNull null
+                val v = co["value"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                Choice(v, co["name"]?.jsonPrimitive?.contentOrNull ?: v)
+            }
+            ConfigOption(
+                id = id,
+                name = o["name"]?.jsonPrimitive?.contentOrNull ?: id,
+                currentValue = o["currentValue"]?.jsonPrimitive?.contentOrNull ?: "",
+                choices = choices,
+            )
+        }
+    }
+
+    /** Re-apply persisted picks after a session opens (provider first for the model cascade). */
+    private fun applyDesired(cfg: List<ConfigOption>) {
+        if (desiredOptions.isEmpty()) return
+        val current = cfg.associate { it.id to it.currentValue }
+        for (id in applyOrder) {
+            val want = desiredOptions[id] ?: continue
+            if (want.isNotBlank() && want != current[id]) setConfigOption(id, want)
         }
     }
 
