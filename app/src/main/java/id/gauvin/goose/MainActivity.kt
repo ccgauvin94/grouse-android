@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -16,6 +17,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 
 // Config knobs we persist + re-apply on reconnect, in display order.
@@ -54,6 +58,15 @@ fun App(vm: ChatViewModel = viewModel()) {
     // keep the chat pinned to the newest message
     LaunchedEffect(vm.messages.size) {
         if (vm.messages.isNotEmpty()) listState.animateScrollToItem(vm.messages.lastIndex)
+    }
+    // Android drops the socket when we background — reconnect (and resume the session) on return.
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner, connected) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && connected) vm.ensureConnected()
+        }
+        owner.lifecycle.addObserver(obs)
+        onDispose { owner.lifecycle.removeObserver(obs) }
     }
 
     fun doConnect() {
@@ -97,6 +110,7 @@ fun App(vm: ChatViewModel = viewModel()) {
                 Button(onClick = { doConnect() }, enabled = key.isNotBlank(),
                     modifier = Modifier.fillMaxWidth()) { Text("Connect") }
             } else {
+                ModelBar(vm.config.value, showConfig) { showConfig = !showConfig }
                 if (showConfig) ConfigPanel(vm.config.value, ::pick)
                 LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
                     items(vm.messages) { m ->
@@ -115,6 +129,33 @@ fun App(vm: ChatViewModel = viewModel()) {
                     Button(onClick = { if (input.isNotBlank()) { vm.send(input.trim()); input = "" } }) { Text("Send") }
                 }
             }
+        }
+    }
+}
+
+/** Always-visible one-line summary of the active model; tap to open/close the pickers. */
+@Composable
+fun ModelBar(options: List<ConfigOption>, expanded: Boolean, onToggle: () -> Unit) {
+    fun cur(id: String) = options.firstOrNull { it.id == id }?.let { o ->
+        o.choices.firstOrNull { it.value == o.currentValue }?.label ?: o.currentValue
+    }
+    val summary = when {
+        options.isEmpty() -> "loading model…"
+        else -> listOfNotNull(cur("model"), cur("mode")).joinToString(" · ").ifBlank { "model settings" }
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().clickable { onToggle() }.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Filled.Tune, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text(summary, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(if (expanded) "▲" else "▼", style = MaterialTheme.typography.bodyMedium)
         }
     }
 }

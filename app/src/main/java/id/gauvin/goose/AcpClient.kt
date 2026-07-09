@@ -24,6 +24,7 @@ sealed interface AcpEvent {
     data class TurnDone(val stopReason: String) : AcpEvent
     data class Error(val text: String) : AcpEvent
     data class Config(val options: List<ConfigOption>) : AcpEvent
+    data class Ready(val sessionId: String) : AcpEvent
 }
 
 /**
@@ -50,6 +51,11 @@ class AcpClient(
     var desiredOptions: Map<String, String> = emptyMap()
     // provider before model so the model list is valid when the model set lands.
     private val applyOrder = listOf("provider", "model", "mode", "thinking_effort")
+
+    /** If set, resume this server-side session (session/load) instead of a fresh session/new. */
+    var resumeSessionId: String? = null
+    // True while session/load replays history — suppress those updates (UI already has them).
+    private var loadingHistory = false
 
     fun connect() {
         val req = Request.Builder().url(url).addHeader("X-Secret-Key", secretKey).build()
@@ -126,20 +132,37 @@ class AcpClient(
 
     private fun response(id: Int?, result: JsonObject?, error: JsonElement?) {
         val method = pending.remove(id)
-        if (error != null && error !is JsonNull) { onEvent(AcpEvent.Error("$method: $error")); return }
+        if (error != null && error !is JsonNull) {
+            // A stale/expired session can't be resumed — fall back to a fresh one.
+            if (method == "session/load") { loadingHistory = false; startNewSession(); return }
+            onEvent(AcpEvent.Error("$method: $error")); return
+        }
         when (method) {
-            "initialize" -> rpc("session/new", buildJsonObject {
-                // cwd must exist INSIDE the goose_acp container (not the host).
-                // /state is bind-mounted + writable + persistent.
-                put("cwd", "/state")
-                putJsonArray("mcpServers") {}
-            })
+            "initialize" -> {
+                val resume = resumeSessionId
+                if (resume != null) {
+                    loadingHistory = true
+                    rpc("session/load", buildJsonObject {
+                        put("sessionId", resume)
+                        put("cwd", "/state")
+                        putJsonArray("mcpServers") {}
+                    })
+                } else startNewSession()
+            }
             "session/new" -> {
                 sessionId = result?.get("sessionId")?.jsonPrimitive?.contentOrNull
                 onEvent(AcpEvent.Status(if (sessionId != null) "ready" else "session/new returned no sessionId"))
+                sessionId?.let { onEvent(AcpEvent.Ready(it)) }
                 val cfg = parseConfig(result)
                 onEvent(AcpEvent.Config(cfg))
                 applyDesired(cfg)
+            }
+            "session/load" -> {
+                loadingHistory = false
+                sessionId = resumeSessionId
+                onEvent(AcpEvent.Status("ready"))
+                sessionId?.let { onEvent(AcpEvent.Ready(it)) }
+                onEvent(AcpEvent.Config(parseConfig(result)))   // may be empty; VM keeps last
             }
             "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))
             "session/set_mode" -> {}
@@ -147,6 +170,13 @@ class AcpClient(
                 onEvent(AcpEvent.TurnDone(result?.get("stopReason")?.jsonPrimitive?.contentOrNull ?: "end"))
         }
     }
+
+    private fun startNewSession() = rpc("session/new", buildJsonObject {
+        // cwd must exist INSIDE the goose_acp container (not the host).
+        // /state is bind-mounted + writable + persistent.
+        put("cwd", "/state")
+        putJsonArray("mcpServers") {}
+    })
 
     private fun parseConfig(result: JsonObject?): List<ConfigOption> {
         val arr = result?.get("configOptions") as? JsonArray ?: return emptyList()
@@ -179,6 +209,7 @@ class AcpClient(
 
     private fun notification(method: String, params: JsonObject?) {
         if (method != "session/update") return
+        if (loadingHistory) return   // replayed history on session/load — UI already has it
         val update = params?.get("update") as? JsonObject ?: return
         when (update["sessionUpdate"]?.jsonPrimitive?.contentOrNull) {
             "agent_message_chunk", "agent_thought_chunk" -> {
