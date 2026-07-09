@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -84,6 +85,23 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? -> uri?.let { readImage(ctx, it)?.let(attachments::add) } }
+
+    val voice = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        res.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()?.let { input = (input.trim() + " " + it).trim() }
+    }
+
+    // Content shared into Goose from another app.
+    LaunchedEffect(cm.pendingShareText.value) {
+        cm.pendingShareText.value?.let { input = it; cm.pendingShareText.value = null }
+    }
+    LaunchedEffect(cm.pendingShareImages.size) {
+        if (cm.pendingShareImages.isNotEmpty()) {
+            attachments.addAll(cm.pendingShareImages); cm.pendingShareImages.clear()
+        }
+    }
 
     fun doSend() {
         if (input.isBlank() && attachments.isEmpty()) return
@@ -164,6 +182,14 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                 IconButton(onClick = {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 }) { Icon(Icons.Filled.Image, contentDescription = "attach image") }
+                IconButton(onClick = {
+                    val i = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                            android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Speak to goose")
+                    }
+                    runCatching { voice.launch(i) }
+                }) { Icon(Icons.Filled.Mic, contentDescription = "voice input") }
                 OutlinedTextField(input, { input = it }, modifier = Modifier.weight(1f),
                     placeholder = { Text("message goose…") })
                 Spacer(Modifier.width(6.dp))
@@ -221,12 +247,6 @@ private fun prettyOption(raw: String) = when (raw) {
     "reject_always" -> "Always reject"
     else -> raw.replace('_', ' ').replaceFirstChar { it.uppercase() }
 }
-
-private fun readImage(context: Context, uri: Uri): ImageBlock? = runCatching {
-    val mime = context.contentResolver.getType(uri) ?: "image/jpeg"
-    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
-    ImageBlock(mime, Base64.encodeToString(bytes, Base64.NO_WRAP))
-}.getOrNull()
 
 // ---- Sessions ---------------------------------------------------------------
 

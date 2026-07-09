@@ -1,12 +1,15 @@
 package id.gauvin.goose
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.core.content.IntentCompat
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
@@ -28,12 +31,36 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val cm = ConnectionManager.get(this)
+        handleEntry(intent, cm)
         setContent {
             GooseTheme(dynamicColor = cm.dynamicColor.value) {
                 AppRoot(this@MainActivity, cm)
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleEntry(intent, ConnectionManager.get(this))
+    }
+
+    /** Route share-sheet / shortcut / tile intents into ConnectionManager for the UI to pick up. */
+    private fun handleEntry(intent: Intent?, cm: ConnectionManager) {
+        when (intent?.action) {
+            Intent.ACTION_SEND -> {
+                intent.getStringExtra(Intent.EXTRA_TEXT)?.let { cm.pendingShareText.value = it }
+                IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+                    ?.let { readImage(this, it)?.let(cm.pendingShareImages::add) }
+            }
+            Intent.ACTION_SEND_MULTIPLE ->
+                IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+                    ?.forEach { readImage(this, it)?.let(cm.pendingShareImages::add) }
+            ACTION_NEW_CHAT -> cm.pendingNewChat.value = true
+        }
+    }
+
+    companion object { const val ACTION_NEW_CHAT = "id.gauvin.goose.NEW_CHAT" }
 }
 
 @Composable
@@ -65,6 +92,14 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
 
     val nav = rememberNavController()
     LaunchedEffect(Unit) { cm.connectSaved() }   // auto-connect once unlocked
+    // "New chat" from a shortcut/tile: start fresh and land on the chat screen.
+    LaunchedEffect(cm.pendingNewChat.value) {
+        if (cm.pendingNewChat.value && cm.configured) {
+            cm.pendingNewChat.value = false
+            cm.newSession()
+            nav.navigate("chat") { popUpTo("chat") { inclusive = true } }
+        }
+    }
     NavHost(nav, startDestination = if (cm.configured) "chat" else "connect") {
         composable("connect") {
             ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }

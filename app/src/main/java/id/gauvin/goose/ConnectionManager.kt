@@ -29,6 +29,10 @@ class ConnectionManager private constructor(context: Context) {
     val busy = mutableStateOf(false)
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
+    // Handed in by OS entry points (share sheet, shortcut, tile), consumed by the UI.
+    val pendingShareText = mutableStateOf<String?>(null)
+    val pendingShareImages = mutableStateListOf<ImageBlock>()
+    val pendingNewChat = mutableStateOf(false)
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
 
