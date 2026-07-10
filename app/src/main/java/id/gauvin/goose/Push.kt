@@ -2,6 +2,10 @@ package id.gauvin.goose
 
 import android.app.Activity
 import android.content.Context
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -42,11 +46,28 @@ object Push {
 /** Receives UnifiedPush events: renders pushes as notifications, records/publishes the endpoint. */
 class GoosePushService : PushService() {
     override fun onMessage(message: PushMessage, instance: String) {
-        val text = String(message.content).trim()
-        if (text.isEmpty()) return
-        // Suppress when the app is foregrounded — you're already watching; the nudge is redundant.
-        if (ConnectionManager.get(this).isForeground) return
+        val raw = String(message.content).trim()
+        if (raw.isEmpty()) return
+        val cm = ConnectionManager.get(this)
+        // Suppress when the app is foregrounded — you're already watching.
+        if (cm.isForeground) return
+        // Envelope {type,session,text}; plain text falls back to always-show (e.g. proactive briefings).
+        val (type, session, text) = parsePush(raw)
+        // A "turn" nudge fires for EVERY goose turn (Desktop too). Only surface it when it's this
+        // phone's own session — drop other clients' turns.
+        if (type == "turn" && session != null && session != cm.store.lastSessionId) return
         Notifier(this).postProactive(text)
+    }
+
+    private fun parsePush(raw: String): Triple<String?, String?, String> = try {
+        val o = Json.parseToJsonElement(raw).jsonObject
+        Triple(
+            o["type"]?.jsonPrimitive?.contentOrNull,
+            o["session"]?.jsonPrimitive?.contentOrNull,
+            o["text"]?.jsonPrimitive?.contentOrNull ?: raw,
+        )
+    } catch (e: Exception) {
+        Triple(null, null, raw)
     }
 
     override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) {
