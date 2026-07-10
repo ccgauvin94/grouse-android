@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Declares Goose as an Android Auto notification-messaging app: Auto reads MessagingStyle
+     alerts aloud and takes a voice reply via the SEMANTIC_ACTION_REPLY RemoteInput. -->
+<automotiveApp>
+    <uses name="notification" />
+</automotiveApp>
