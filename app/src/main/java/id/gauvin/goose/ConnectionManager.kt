@@ -37,6 +37,8 @@ class ConnectionManager private constructor(context: Context) {
     val pendingShareText = mutableStateOf<String?>(null)
     val pendingShareImages = mutableStateListOf<ImageBlock>()
     val pendingNewChat = mutableStateOf(false)
+    // A notification tap that should open a specific session (finished-turn alert). Consumed in MainActivity.
+    val pendingOpenSession = mutableStateOf<String?>(null)
     // Draft attachments live here (process-scoped) so a rotation/recreation doesn't drop picked
     // images — and base64 payloads stay out of the saved-state Bundle (TransactionTooLarge).
     val draftAttachments = mutableStateListOf<ImageBlock>()

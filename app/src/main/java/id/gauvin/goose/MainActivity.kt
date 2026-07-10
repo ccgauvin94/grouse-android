@@ -61,10 +61,16 @@ class MainActivity : FragmentActivity() {
                 IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
                     ?.forEach { readImage(this, it)?.let(cm.pendingShareImages::add) }
             ACTION_NEW_CHAT -> cm.pendingNewChat.value = true
+            ACTION_OPEN_SESSION ->
+                intent.getStringExtra(EXTRA_SESSION_ID)?.let { cm.pendingOpenSession.value = it }
         }
     }
 
-    companion object { const val ACTION_NEW_CHAT = "id.gauvin.goose.NEW_CHAT" }
+    companion object {
+        const val ACTION_NEW_CHAT = "id.gauvin.goose.NEW_CHAT"
+        const val ACTION_OPEN_SESSION = "id.gauvin.goose.OPEN_SESSION"
+        const val EXTRA_SESSION_ID = "id.gauvin.goose.extra.SESSION_ID"
+    }
 }
 
 @Composable
@@ -136,6 +142,16 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
             cm.pendingNewChat.value = false
             cm.newSession()
             nav.navigate("chat") { popUpTo("chat") { inclusive = true } }
+        }
+    }
+    // A finished-turn notification tap: open that session and land on the chat screen.
+    LaunchedEffect(cm.pendingOpenSession.value) {
+        cm.pendingOpenSession.value?.let { sid ->
+            if (cm.configured) {
+                cm.pendingOpenSession.value = null
+                cm.openSession(sid)
+                nav.navigate("chat") { popUpTo("chat") { inclusive = true } }
+            }
         }
     }
     NavHost(nav, startDestination = if (cm.configured) "chat" else "connect") {

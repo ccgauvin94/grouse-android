@@ -28,16 +28,24 @@ class Notifier(context: Context) {
         }
     }
 
-    private fun openApp(): PendingIntent {
+    /** Tap intent: open the app, optionally deep-linking to a specific session. */
+    private fun openApp(sessionId: String? = null): PendingIntent {
         val i = Intent(app, MainActivity::class.java)
             .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        return PendingIntent.getActivity(app, 0, i, flags(mutable = false))
+        val sid = sessionId?.takeIf { it.isNotBlank() }   // blank == no thread yet → just open the app
+        if (sid != null) {
+            i.action = MainActivity.ACTION_OPEN_SESSION
+            i.putExtra(MainActivity.EXTRA_SESSION_ID, sid)
+        }
+        // Distinct requestCode per session so PendingIntents don't collapse onto one another.
+        val rc = sid?.hashCode() ?: 0
+        return PendingIntent.getActivity(app, rc, i, flags(mutable = false))
     }
 
     /** The persistent low-priority notification the foreground service must show. */
     fun ongoing(text: String): Notification =
         NotificationCompat.Builder(app, CH_ONGOING)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setSmallIcon(R.drawable.ic_stat_goose)
             .setContentTitle("Goose")
             .setContentText(text)
             .setContentIntent(openApp())
@@ -50,12 +58,12 @@ class Notifier(context: Context) {
      * MessagingStyle + the SEMANTIC_ACTION_REPLY/MARK_AS_READ actions are what Android Auto reads
      * aloud and turns into a voice reply; on the phone it renders like a chat message.
      */
-    private fun postReplyable(title: String, text: String, requestCode: Int, id: Int) {
+    private fun postReplyable(title: String, text: String, requestCode: Int, id: Int, sessionId: String? = null) {
         val remote = RemoteInput.Builder(KEY_REPLY).setLabel("Reply to goose").build()
         val replyPi = PendingIntent.getBroadcast(app, requestCode,
             Intent(app, ReplyReceiver::class.java).setAction(ACTION_REPLY).putExtra(EXTRA_NOTIF_ID, id),
             flags(mutable = true))
-        val replyAction = NotificationCompat.Action.Builder(R.drawable.ic_launcher_monochrome, "Reply", replyPi)
+        val replyAction = NotificationCompat.Action.Builder(R.drawable.ic_reply, "Reply", replyPi)
             .addRemoteInput(remote)
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
             .setShowsUserInterface(false)
@@ -63,7 +71,7 @@ class Notifier(context: Context) {
         val markReadPi = PendingIntent.getBroadcast(app, requestCode + 100,
             Intent(app, ReplyReceiver::class.java).setAction(ACTION_MARK_READ).putExtra(EXTRA_NOTIF_ID, id),
             flags(mutable = false))
-        val markReadAction = NotificationCompat.Action.Builder(R.drawable.ic_launcher_monochrome, "Mark read", markReadPi)
+        val markReadAction = NotificationCompat.Action.Builder(R.drawable.ic_check, "Mark read", markReadPi)
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
             .setShowsUserInterface(false)
             .build()
@@ -71,10 +79,10 @@ class Notifier(context: Context) {
             .setConversationTitle(title)
             .addMessage(text.take(1500), System.currentTimeMillis(), goosePerson)
         val n = NotificationCompat.Builder(app, CH_ALERT)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setSmallIcon(R.drawable.ic_stat_goose)
             .setStyle(style)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setContentIntent(openApp())
+            .setContentIntent(openApp(sessionId))
             .setAutoCancel(true)
             .addAction(replyAction)
             .addInvisibleAction(markReadAction)
@@ -82,13 +90,14 @@ class Notifier(context: Context) {
         nm.notify(id, n)
     }
 
-    /** Turn finished while backgrounded: show the reply + an inline reply action. */
-    fun postReply(text: String) = postReplyable("Goose replied", text, 1, ID_ALERT)
+    /** Turn finished while backgrounded: show the reply, tap deep-links to its session. */
+    fun postReply(text: String, sessionId: String? = null) =
+        postReplyable("Goose replied", text, 1, ID_ALERT, sessionId)
 
     /** goose is blocked on a tool approval while backgrounded. */
     fun postApprovalNeeded(tool: String) {
         val n = NotificationCompat.Builder(app, CH_ALERT)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setSmallIcon(R.drawable.ic_stat_goose)
             .setContentTitle("Goose needs approval")
             .setContentText("Allow “$tool”? Open to decide.")
             .setContentIntent(openApp())
@@ -97,8 +106,9 @@ class Notifier(context: Context) {
         nm.notify(ID_ALERT, n)
     }
 
-    /** A scheduled proactive check found something worth surfacing. */
-    fun postProactive(text: String) = postReplyable("Goose briefing", text, 2, ID_PROACTIVE)
+    /** A proactive briefing; tap deep-links to the persistent goose-assistant thread. */
+    fun postProactive(text: String, sessionId: String? = null) =
+        postReplyable("Goose briefing", text, 2, ID_PROACTIVE, sessionId)
 
     fun cancelAlert() = nm.cancel(ID_ALERT)
 
