@@ -43,7 +43,10 @@ object Push {
 class GoosePushService : PushService() {
     override fun onMessage(message: PushMessage, instance: String) {
         val text = String(message.content).trim()
-        if (text.isNotEmpty()) Notifier(this).postProactive(text)
+        if (text.isEmpty()) return
+        // Suppress when the app is foregrounded — you're already watching; the nudge is redundant.
+        if (ConnectionManager.get(this).isForeground) return
+        Notifier(this).postProactive(text)
     }
 
     override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) {

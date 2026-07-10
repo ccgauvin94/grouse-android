@@ -157,6 +157,9 @@ class ConnectionManager private constructor(context: Context) {
 
     val persistent: Boolean get() = store.persistentConnection
 
+    /** Whether the app is currently in the foreground (for push dedup). */
+    val isForeground: Boolean get() = appForeground
+
     private fun startService() {
         if (serviceRunning) return
         serviceRunning = true
@@ -220,7 +223,8 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Chart -> { messages.add(ChatMessage("chart", ev.spec)); streamingRole = null }
             is AcpEvent.TurnDone -> {
                 streamingRole = null; busy.value = false
-                if (!appForeground) notifier.postReply(lastAssistantText())
+                // If push is on, the goose Stop hook nudges the phone — don't double-notify.
+                if (!appForeground && !store.pushEnabled) notifier.postReply(lastAssistantText())
                 if (!store.persistentConnection) stopService()
             }
             is AcpEvent.AgentChunk -> appendStream("assistant", ev.text)
