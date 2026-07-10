@@ -81,6 +81,21 @@ class SecureStore(context: Context) {
         get() = cfg.getString("last_session", null)
         set(v) = cfg.edit().putString("last_session", v).apply()
 
+    // --- UnifiedPush ---
+    var pushEnabled: Boolean
+        get() = cfg.getBoolean("push_on", false)
+        set(v) = cfg.edit().putBoolean("push_on", v).apply()
+
+    /** The UnifiedPush endpoint URL the distributor gave us; phaethon POSTs here to reach us. */
+    var pushEndpoint: String
+        get() = cfg.getString("push_endpoint", "") ?: ""
+        set(v) = cfg.edit().putString("push_endpoint", v).apply()
+
+    /** Optional phaethon URL the app POSTs its endpoint to, so the server knows where to push. */
+    var pushRegistryUrl: String
+        get() = cfg.getString("push_registry", "") ?: ""
+        set(v) = cfg.edit().putString("push_registry", v).apply()
+
     // --- Proactive assistant ---
     var proactiveEnabled: Boolean
         get() = cfg.getBoolean("proactive_on", false)

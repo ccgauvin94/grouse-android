@@ -34,6 +34,14 @@ android {
     }
 }
 
+// The UnifiedPush connector transitively pulls kotlin-stdlib 2.3.0, whose metadata this project's
+// Kotlin 2.0.20 compiler can't read. Pin the stdlib to our compiler's version.
+configurations.all {
+    resolutionStrategy {
+        force("org.jetbrains.kotlin:kotlin-stdlib:2.0.20")
+    }
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.2")
@@ -51,6 +59,13 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
+    // Exclude the connector's JVM tink; security-crypto needs tink-android (Android Keystore), so
+    // keep only that and bump it high enough for the connector's classes to resolve — otherwise the
+    // two Tink artifacts collide (duplicate classes).
+    implementation("org.unifiedpush.android:connector:3.3.3") {
+        exclude(group = "com.google.crypto.tink", module = "tink")
+    }
+    implementation("com.google.crypto.tink:tink-android:1.16.0")
     // Markdown rendering for agent output (headers, bold, lists, fenced code).
     implementation("com.halilibo.compose-richtext:richtext-commonmark:0.20.0")
     implementation("com.halilibo.compose-richtext:richtext-ui-material3:0.20.0")

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -399,6 +400,13 @@ private fun SettingsSwitchRow(label: String, checked: Boolean, onChange: (Boolea
     }
 }
 
+/** Unwrap the hosting Activity from a Compose context (needed for the UnifiedPush distributor picker). */
+private fun Context.findActivity(): android.app.Activity? {
+    var c = this
+    while (c is android.content.ContextWrapper) { if (c is android.app.Activity) return c; c = c.baseContext }
+    return null
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
@@ -479,6 +487,24 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                 SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
                 SettingCaption("On: stay connected in the background (a persistent notification, more battery). " +
                     "Off: connect while active; you still get a notification when a backgrounded turn finishes.")
+            }
+
+            SettingsSection("Push") {
+                var pushOn by remember { mutableStateOf(cm.store.pushEnabled) }
+                SettingsSwitchRow("Push notifications (UnifiedPush)", pushOn) { on ->
+                    pushOn = on
+                    val act = ctx.findActivity()
+                    if (on && act != null) Push.enable(act) else Push.disable(ctx)
+                }
+                SettingCaption("Server-pushed briefings/alerts via your distributor (NextPush) — " +
+                    "no always-on socket, no FCM. Pick the distributor when prompted.")
+                val endpoint = cm.store.pushEndpoint
+                if (endpoint.isNotBlank()) {
+                    SelectionContainer {
+                        Text("Endpoint: $endpoint", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline)
+                    }
+                }
             }
 
             Spacer(Modifier.height(24.dp))

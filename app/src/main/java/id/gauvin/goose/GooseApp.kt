@@ -15,5 +15,6 @@ class GooseApp : Application() {
             override fun onStop(owner: LifecycleOwner) = cm.setForeground(false)
         })
         ProactiveScheduler.reschedule(this)   // ensure the check is (re)armed at process start
+        Push.refresh(this)                    // refresh the UnifiedPush endpoint if push is enabled
     }
 }

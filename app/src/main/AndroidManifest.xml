@@ -74,6 +74,15 @@
             </intent-filter>
         </receiver>
 
+        <!-- UnifiedPush: the distributor delivers pushes to this service. -->
+        <service
+            android:name=".GoosePushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- Voice Tier 2: register as a digital-assistant (VoiceInteractionService). Bound only by
              the system via BIND_VOICE_INTERACTION. -->
         <service
