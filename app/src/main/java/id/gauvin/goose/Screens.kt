@@ -351,12 +351,41 @@ fun SessionsScreen(cm: ConnectionManager, nav: NavController) {
 
 // ---- Settings ---------------------------------------------------------------
 
+// ---- Reusable settings building blocks --------------------------------------
+
+/** A titled group of settings rows. */
+@Composable
+private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Text(title.uppercase(), style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 22.dp, bottom = 6.dp))
+    Column(content = content)
+}
+
+/** Explanatory caption under a setting. */
+@Composable
+private fun SettingCaption(text: String) {
+    Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+        modifier = Modifier.padding(bottom = 2.dp))
+}
+
+/** A label + trailing switch row. */
+@Composable
+private fun SettingsSwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
     var host by remember { mutableStateOf(cm.store.host) }
     var port by remember { mutableStateOf(cm.store.port) }
     var newKey by remember { mutableStateOf("") }
+    var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
+    var persistent by remember { mutableStateOf(cm.persistent) }
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Settings") },
@@ -367,70 +396,57 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             }
         )
     }) { pad ->
-        Column(Modifier.padding(pad).padding(16.dp).fillMaxWidth()) {
-            Text("Server", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(host, { host = it }, label = { Text("host") }, singleLine = true,
-                modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(port, { port = it }, label = { Text("port") }, singleLine = true,
-                modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(newKey, { newKey = it }, label = { Text("replace X-Secret-Key (optional)") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = {
-                    val key = newKey.trim().ifBlank { cm.store.secretKey }
-                    cm.connect(host.trim(), port.trim(), key)
-                    nav.popBackStack()
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Save & reconnect") }
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+
+            SettingsSection("Connection") {
+                OutlinedTextField(host, { host = it }, label = { Text("host") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(port, { port = it }, label = { Text("port") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                OutlinedTextField(newKey, { newKey = it }, label = { Text("replace X-Secret-Key (optional)") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        val key = newKey.trim().ifBlank { cm.store.secretKey }
+                        cm.connect(host.trim(), port.trim(), key)
+                        nav.popBackStack()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Save & reconnect") }
+            }
+
+            SettingsSection("Assistant") {
+                OutlinedButton(onClick = { nav.navigate("proactive") }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Proactive checks")
+                }
+                SettingCaption("Scheduled read-only check-ins that notify you when something needs attention.")
+                OutlinedButton(onClick = { nav.navigate("extensions") },
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                    Text("Manage extensions")
+                }
+                SettingCaption("Enable/disable goose's tools to control context per new chat.")
+            }
+
+            SettingsSection("Models") {
+                SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
+                SettingCaption("Off shows only providers set up on your goose (openai, openrouter). " +
+                    "Turn on to pick from goose's full catalog.")
+            }
+
+            SettingsSection("Appearance") {
+                SettingsSwitchRow("Material You dynamic color", cm.dynamicColor.value) { cm.setDynamicColor(it) }
+                SettingCaption("Off uses the built-in goose-green palette.")
+            }
+
+            SettingsSection("Background") {
+                SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
+                SettingCaption("On: stay connected in the background (a persistent notification, more battery). " +
+                    "Off: connect while active; you still get a notification when a backgrounded turn finishes.")
+            }
 
             Spacer(Modifier.height(24.dp))
-            Text("Assistant", style = MaterialTheme.typography.titleMedium)
-            OutlinedButton(onClick = { nav.navigate("proactive") }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                Text("Proactive checks")
-            }
-            Text("Scheduled read-only check-ins that notify you when something needs attention.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-
-            Spacer(Modifier.height(24.dp))
-            Text("Extensions", style = MaterialTheme.typography.titleMedium)
-            OutlinedButton(onClick = { nav.navigate("extensions") }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                Text("Manage extensions")
-            }
-            Text("Enable/disable goose's tools to control context per new chat.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-
-            Spacer(Modifier.height(24.dp))
-            Text("Models", style = MaterialTheme.typography.titleMedium)
-            var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
-            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Show all providers", Modifier.weight(1f))
-                Switch(checked = showAll, onCheckedChange = { showAll = it; cm.setShowAllProviders(it) })
-            }
-            Text("Off shows only providers set up on your goose (openai, openrouter). " +
-                "Turn on to pick from goose's full catalog.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-
-            Spacer(Modifier.height(24.dp))
-            Text("Appearance", style = MaterialTheme.typography.titleMedium)
-            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Material You dynamic color", Modifier.weight(1f))
-                Switch(checked = cm.dynamicColor.value, onCheckedChange = { cm.setDynamicColor(it) })
-            }
-            Text("Off uses the built-in goose-green palette.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-
-            Spacer(Modifier.height(24.dp))
-            Text("Background", style = MaterialTheme.typography.titleMedium)
-            var persistent by remember { mutableStateOf(cm.persistent) }
-            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Keep connection alive", Modifier.weight(1f))
-                Switch(checked = persistent, onCheckedChange = { persistent = it; cm.setPersistent(it) })
-            }
-            Text("On: stay connected in the background (a persistent notification, more battery). " +
-                "Off: connect while active; you still get a notification when a backgrounded turn finishes.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
         }
     }
 }
@@ -543,7 +559,8 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
 @Composable
 fun ModelBar(options: List<ConfigOption>, usage: AcpEvent.Usage?, expanded: Boolean, onToggle: () -> Unit) {
     fun cur(id: String) = options.firstOrNull { it.id == id }?.let { o ->
-        o.choices.firstOrNull { it.value == o.currentValue }?.label ?: o.currentValue
+        if (o.currentValue == "current") "Provider default"
+        else o.choices.firstOrNull { it.value == o.currentValue }?.label ?: o.currentValue
     }
     val summary = when {
         options.isEmpty() -> "loading model…"
