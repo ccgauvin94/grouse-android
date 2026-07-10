@@ -73,5 +73,33 @@
                 <action android:name="id.gauvin.goose.action.REPLY" />
             </intent-filter>
         </receiver>
+
+        <!-- Voice Tier 2: register as a digital-assistant (VoiceInteractionService). Bound only by
+             the system via BIND_VOICE_INTERACTION. -->
+        <service
+            android:name=".GooseVoiceInteractionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/interaction_service" />
+        </service>
+        <service
+            android:name=".GooseVoiceSessionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true" />
+        <service
+            android:name=".GooseRecognitionService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/recognition_service" />
+        </service>
     </application>
 </manifest>

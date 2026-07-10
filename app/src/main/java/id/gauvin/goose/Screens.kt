@@ -402,6 +402,7 @@ private fun SettingsSwitchRow(label: String, checked: Boolean, onChange: (Boolea
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
+    val ctx = LocalContext.current
     var host by remember { mutableStateOf(cm.store.host) }
     var port by remember { mutableStateOf(cm.store.port) }
     var newKey by remember { mutableStateOf("") }
@@ -450,6 +451,17 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                 SettingCaption("Enable/disable goose's tools to control context per new chat.")
                 SettingsSwitchRow("Speak replies aloud", cm.speakReplies.value) { cm.setSpeakReplies(it) }
                 SettingCaption("Read each finished reply with text-to-speech.")
+                OutlinedButton(onClick = {
+                    runCatching {
+                        ctx.startActivity(android.content.Intent(
+                            android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                    Text("Set Goose as device assistant")
+                }
+                SettingCaption("Then the assist gesture / power-button hold opens a voice-first " +
+                    "Goose. Hands-free voice runs read-only.")
             }
 
             SettingsSection("Models") {
