@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -82,8 +83,10 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
 fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     val ctx = LocalContext.current
     var showConfig by remember { mutableStateOf(false) }
-    var input by remember { mutableStateOf("") }
-    val attachments = remember { mutableStateListOf<ImageBlock>() }
+    // rememberSaveable so a rotation/dark-mode recreate doesn't wipe the typed draft.
+    var input by rememberSaveable { mutableStateOf("") }
+    // Hoisted to ConnectionManager so picked images survive recreation (see draftAttachments).
+    val attachments = cm.draftAttachments
     val listState = rememberLazyListState()
 
     val picker = rememberLauncherForActivityResult(
@@ -97,9 +100,9 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
             ?.firstOrNull()?.let { input = (input.trim() + " " + it).trim() }
     }
 
-    // Content shared into Goose from another app.
+    // Content shared into Goose from another app — append (don't clobber an in-progress draft).
     LaunchedEffect(cm.pendingShareText.value) {
-        cm.pendingShareText.value?.let { input = it; cm.pendingShareText.value = null }
+        cm.pendingShareText.value?.let { input = (input.trim() + " " + it).trim(); cm.pendingShareText.value = null }
     }
     LaunchedEffect(cm.pendingShareImages.size) {
         if (cm.pendingShareImages.isNotEmpty()) {

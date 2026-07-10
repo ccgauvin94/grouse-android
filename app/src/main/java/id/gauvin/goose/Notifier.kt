@@ -42,24 +42,27 @@ class Notifier(context: Context) {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
-    /** Turn finished while backgrounded: show the reply + an inline reply action. */
-    fun postReply(text: String) {
+    /** A notification carrying an inline RemoteInput reply action, routed to ReplyReceiver. */
+    private fun postReplyable(title: String, text: String, requestCode: Int, id: Int) {
         val remote = RemoteInput.Builder(KEY_REPLY).setLabel("Reply to goose").build()
         val replyPi = PendingIntent.getBroadcast(
-            app, 1, Intent(app, ReplyReceiver::class.java).setAction(ACTION_REPLY), flags(mutable = true))
+            app, requestCode, Intent(app, ReplyReceiver::class.java).setAction(ACTION_REPLY), flags(mutable = true))
         val action = NotificationCompat.Action.Builder(R.drawable.ic_launcher_monochrome, "Reply", replyPi)
             .addRemoteInput(remote).build()
         val n = NotificationCompat.Builder(app, CH_ALERT)
             .setSmallIcon(R.drawable.ic_launcher_monochrome)
-            .setContentTitle("Goose replied")
+            .setContentTitle(title)
             .setContentText(text.take(120))
             .setStyle(NotificationCompat.BigTextStyle().bigText(text.take(1500)))
             .setContentIntent(openApp())
             .setAutoCancel(true)
             .addAction(action)
             .build()
-        nm.notify(ID_ALERT, n)
+        nm.notify(id, n)
     }
+
+    /** Turn finished while backgrounded: show the reply + an inline reply action. */
+    fun postReply(text: String) = postReplyable("Goose replied", text, 1, ID_ALERT)
 
     /** goose is blocked on a tool approval while backgrounded. */
     fun postApprovalNeeded(tool: String) {
@@ -74,23 +77,7 @@ class Notifier(context: Context) {
     }
 
     /** A scheduled proactive check found something worth surfacing. */
-    fun postProactive(text: String) {
-        val remote = RemoteInput.Builder(KEY_REPLY).setLabel("Reply to goose").build()
-        val replyPi = PendingIntent.getBroadcast(
-            app, 2, Intent(app, ReplyReceiver::class.java).setAction(ACTION_REPLY), flags(mutable = true))
-        val action = NotificationCompat.Action.Builder(R.drawable.ic_launcher_monochrome, "Reply", replyPi)
-            .addRemoteInput(remote).build()
-        val n = NotificationCompat.Builder(app, CH_ALERT)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
-            .setContentTitle("Goose briefing")
-            .setContentText(text.take(120))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text.take(1500)))
-            .setContentIntent(openApp())
-            .setAutoCancel(true)
-            .addAction(action)
-            .build()
-        nm.notify(ID_PROACTIVE, n)
-    }
+    fun postProactive(text: String) = postReplyable("Goose briefing", text, 2, ID_PROACTIVE)
 
     fun cancelAlert() = nm.cancel(ID_ALERT)
 

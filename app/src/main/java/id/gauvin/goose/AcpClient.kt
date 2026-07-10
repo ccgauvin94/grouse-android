@@ -2,6 +2,7 @@ package id.gauvin.goose
 
 import kotlinx.serialization.json.*
 import okhttp3.*
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -67,11 +68,13 @@ class AcpClient(
         .build()
     private var ws: WebSocket? = null
     private val nextId = AtomicInteger(1)
-    private val pending = HashMap<Int, String>()      // request id -> method we sent
+    // Touched from both the main thread (outbound rpc) and the OkHttp WS thread (responses).
+    private val pending = ConcurrentHashMap<Int, String>()      // request id -> method we sent
     private var sessionId: String? = null
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     // Outstanding tool-approval requests: toolCallId -> the JSON-RPC id we must answer.
-    private val pendingPermissions = HashMap<String, JsonElement>()
+    // Inserted on the WS thread, removed on the main thread — must be concurrent.
+    private val pendingPermissions = ConcurrentHashMap<String, JsonElement>()
 
     /** Config values to re-apply once a session opens (persisted picks). id -> value. */
     var desiredOptions: Map<String, String> = emptyMap()
@@ -179,17 +182,24 @@ class AcpClient(
         val obj = try { json.parseToJsonElement(text).jsonObject } catch (e: Exception) {
             onEvent(AcpEvent.Error("bad json: ${e.message}")); return
         }
-        val method = obj["method"]?.jsonPrimitive?.contentOrNull
-        val id = obj["id"]
-        when {
-            method != null && id != null -> serverRequest(method, id, obj["params"] as? JsonObject)
-            method != null -> notification(method, obj["params"] as? JsonObject)
-            id != null -> response(id.jsonPrimitive.intOrNull, obj["result"] as? JsonObject, obj["error"])
+        // Dispatch runs on the OkHttp WS thread; a field of an unexpected JSON kind (e.g. a
+        // structured value where we read .jsonPrimitive) must surface as an error, not throw out
+        // of onMessage and tear the socket down mid-turn.
+        try {
+            val method = obj["method"]?.jsonPrimitive?.contentOrNull
+            val id = obj["id"]
+            when {
+                method != null && id != null -> serverRequest(method, id, obj["params"] as? JsonObject)
+                method != null -> notification(method, obj["params"] as? JsonObject)
+                id != null -> response(id.jsonPrimitive.intOrNull, obj["result"] as? JsonObject, obj["error"])
+            }
+        } catch (e: Exception) {
+            onEvent(AcpEvent.Error("bad message: ${e.message}"))
         }
     }
 
     private fun response(id: Int?, result: JsonObject?, error: JsonElement?) {
-        val method = pending.remove(id)
+        val method = id?.let { pending.remove(it) }   // ConcurrentHashMap rejects a null key
         if (error != null && error !is JsonNull) {
             // A stale/expired session can't be resumed — fall back to a fresh one.
             if (method == "session/load") { replaying = false; startNewSession(); return }
@@ -297,7 +307,9 @@ class AcpClient(
             "tool_call" -> {
                 val toolName = (((update["_meta"] as? JsonObject)?.get("goose") as? JsonObject)
                     ?.get("toolCall") as? JsonObject)?.get("toolName")?.jsonPrimitive?.contentOrNull
-                val chartData = (update["rawInput"] as? JsonObject)?.get("data")?.jsonPrimitive?.contentOrNull
+                // `as? JsonPrimitive` (not .jsonPrimitive) so a tool whose `data` arg is an
+                // object/array is simply treated as a normal tool call, not a crash.
+                val chartData = ((update["rawInput"] as? JsonObject)?.get("data") as? JsonPrimitive)?.contentOrNull
                 if (toolName == "autovisualiser__show_chart" && chartData != null) {
                     onEvent(AcpEvent.Chart(chartData))
                 } else {

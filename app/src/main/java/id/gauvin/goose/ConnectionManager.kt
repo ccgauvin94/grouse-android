@@ -20,7 +20,10 @@ class ConnectionManager private constructor(context: Context) {
     private val notifier = Notifier(context)
     private var appForeground = true
     private var serviceRunning = false
-    private var pendingSend: String? = null   // a reply that must wait for (re)connect
+    // Sends that must wait for (re)connect — a queue, not one slot, so a second reply while
+    // still connecting can't clobber the first. The user bubble is added when queued (in send()).
+    private data class PendingSend(val text: String, val images: List<ImageBlock>)
+    private val pendingSends = ArrayDeque<PendingSend>()
 
     val messages = mutableStateListOf<ChatMessage>()
     val status = mutableStateOf("not connected")
@@ -34,6 +37,9 @@ class ConnectionManager private constructor(context: Context) {
     val pendingShareText = mutableStateOf<String?>(null)
     val pendingShareImages = mutableStateListOf<ImageBlock>()
     val pendingNewChat = mutableStateOf(false)
+    // Draft attachments live here (process-scoped) so a rotation/recreation doesn't drop picked
+    // images — and base64 payloads stay out of the saved-state Bundle (TransactionTooLarge).
+    val draftAttachments = mutableStateListOf<ImageBlock>()
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
     val knownModels = mutableStateOf(store.knownModels)
@@ -71,6 +77,7 @@ class ConnectionManager private constructor(context: Context) {
 
     private val main = Handler(Looper.getMainLooper())
     private var client: AcpClient? = null
+    private var clientGen = 0   // bumped per open(); drops events from superseded clients
     private var streamingRole: String? = null
     private var live = false
     private var connecting = false
@@ -116,16 +123,19 @@ class ConnectionManager private constructor(context: Context) {
         val label = if (images.isEmpty()) text else "$text  [📎 ${images.size}]".trim()
         messages.add(ChatMessage("user", label)); streamingRole = null; busy.value = true
         startService()   // keep the socket alive if the user backgrounds mid-turn
-        client?.sendPrompt(text, images)
+        if (live) {
+            client?.sendPrompt(text, images)
+        } else {
+            // Not connected yet (initial connect / silent reconnect window): queue and connect,
+            // rather than calling sendPrompt against a session-less client (which just errors and
+            // loses the message). Flushed in the Ready branch.
+            pendingSends.add(PendingSend(text, images))
+            if (!connecting) open(resume = lastSessionId ?: store.lastSessionId, suppressReplay = true)
+        }
     }
 
     /** Send once connected — used by notification replies, which may arrive disconnected. */
-    fun sendWhenReady(text: String) {
-        if (live) { send(text); return }
-        pendingSend = text
-        startService()
-        if (!connecting) open(resume = lastSessionId ?: store.lastSessionId, suppressReplay = true)
-    }
+    fun sendWhenReady(text: String) = send(text)
 
     fun setForeground(fg: Boolean) {
         appForeground = fg
@@ -182,7 +192,11 @@ class ConnectionManager private constructor(context: Context) {
             else -> "loading session…"
         }
         val saved = store.savedOptions(optionIds)
-        client = AcpClient(url, store.secretKey) { ev -> main.post { onEvent(ev) } }.also {
+        // Tag this client's events with a generation; a just-closed client still fires
+        // onClosed/onFailure asynchronously and its stale "disconnected" must not flip us offline
+        // after the new client is already live.
+        val gen = ++clientGen
+        client = AcpClient(url, store.secretKey) { ev -> main.post { if (gen == clientGen) onEvent(ev) } }.also {
             it.desiredOptions = if (resume == null) saved else emptyMap()
             it.resumeSessionId = resume
             it.suppressReplay = suppressReplay
@@ -226,7 +240,11 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Ready -> {
                 live = true; connecting = false
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
-                pendingSend?.let { pendingSend = null; send(it) }   // flush a queued reply
+                // Flush every queued send (bubbles were already added when queued).
+                while (pendingSends.isNotEmpty()) {
+                    val p = pendingSends.removeFirst()
+                    client?.sendPrompt(p.text, p.images)
+                }
             }
             is AcpEvent.Sessions -> sessions.value = ev.list
             is AcpEvent.Commands -> commands.value = ev.names

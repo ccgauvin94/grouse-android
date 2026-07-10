@@ -17,11 +17,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -65,18 +67,42 @@ class MainActivity : FragmentActivity() {
 
 @Composable
 fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
-    // Lock the app behind biometrics whenever a key is stored and a biometric is enrolled.
+    // Lock the app behind biometrics whenever a key is stored and an authenticator is enrolled.
     val needsLock = remember { cm.configured && Biometric.available(activity) }
-    var unlocked by rememberSaveable { mutableStateOf(!needsLock) }
+    // Plain `remember` (NOT rememberSaveable): a saved `unlocked=true` would survive process death
+    // and let the app reopen without a prompt. Any recreation must re-lock.
+    var unlocked by remember { mutableStateOf(!needsLock) }
     var error by remember { mutableStateOf<String?>(null) }
+    // True while a prompt is on screen, so a device-credential screen (which stops our activity)
+    // doesn't trigger a re-lock / re-prompt loop.
+    var authenticating by remember { mutableStateOf(false) }
 
-    fun authenticate() = Biometric.prompt(
-        activity,
-        onSuccess = { unlocked = true; error = null },
-        onFail = { error = it },
-    )
+    fun authenticate() {
+        if (authenticating) return
+        authenticating = true
+        Biometric.prompt(
+            activity,
+            onSuccess = { authenticating = false; unlocked = true; error = null },
+            onFail = { authenticating = false; error = it },
+        )
+    }
 
-    LaunchedEffect(Unit) { if (!unlocked) authenticate() }
+    // Re-lock when backgrounded; (re)prompt when foregrounded while locked. On observer
+    // registration the Lifecycle replays up to the current state, so this fires the initial
+    // cold-start prompt too.
+    val lockOwner = LocalLifecycleOwner.current
+    DisposableEffect(lockOwner, needsLock) {
+        val obs = LifecycleEventObserver { _, e ->
+            if (!needsLock) return@LifecycleEventObserver
+            when (e) {
+                Lifecycle.Event.ON_STOP -> if (!authenticating) unlocked = false
+                Lifecycle.Event.ON_RESUME -> if (!unlocked && !authenticating) authenticate()
+                else -> {}
+            }
+        }
+        lockOwner.lifecycle.addObserver(obs)
+        onDispose { lockOwner.lifecycle.removeObserver(obs) }
+    }
 
     if (!unlocked) {
         LockScreen(error) { authenticate() }

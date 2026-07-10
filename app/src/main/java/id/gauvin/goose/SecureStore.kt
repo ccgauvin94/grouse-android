@@ -13,15 +13,28 @@ class SecureStore(context: Context) {
     private val app = context.applicationContext
     private val cfg: SharedPreferences = app.getSharedPreferences("goose", Context.MODE_PRIVATE)
 
-    private val secure: SharedPreferences by lazy {
-        val masterKey = MasterKey.Builder(app)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        EncryptedSharedPreferences.create(
-            app, "goose_secure", masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-        )
+    private val secure: SharedPreferences by lazy { openSecure() }
+
+    private fun openSecure(): SharedPreferences {
+        fun create(): SharedPreferences {
+            val masterKey = MasterKey.Builder(app)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            return EncryptedSharedPreferences.create(
+                app, "goose_secure", masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+            )
+        }
+        return try {
+            create()
+        } catch (e: Exception) {
+            // The Keystore-wrapped keyset can't be decrypted (e.g. app data restored to a new
+            // device, or the key was invalidated). Reset the store so the app starts and can
+            // re-onboard, instead of hard-crashing on every launch. The secret must be re-entered.
+            app.deleteSharedPreferences("goose_secure")
+            create()
+        }
     }
 
     init {
