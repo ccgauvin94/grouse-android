@@ -71,6 +71,11 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("show_all_providers", false)
         set(v) = cfg.edit().putBoolean("show_all_providers", v).apply()
 
+    /** Read agent replies aloud (TextToSpeech) when a turn finishes. */
+    var speakReplies: Boolean
+        get() = cfg.getBoolean("speak_replies", false)
+        set(v) = cfg.edit().putBoolean("speak_replies", v).apply()
+
     /** Last opened session, so a notification reply after process death can resume it. */
     var lastSessionId: String?
         get() = cfg.getString("last_session", null)

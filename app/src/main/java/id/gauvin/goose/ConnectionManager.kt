@@ -42,6 +42,7 @@ class ConnectionManager private constructor(context: Context) {
     val draftAttachments = mutableStateListOf<ImageBlock>()
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
+    val speakReplies = mutableStateOf(store.speakReplies)
     val knownModels = mutableStateOf(store.knownModels)
     val extensions = mutableStateOf<List<ExtInfo>>(emptyList())
     val extensionsBusy = mutableStateOf(false)
@@ -74,6 +75,7 @@ class ConnectionManager private constructor(context: Context) {
 
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
+    fun setSpeakReplies(v: Boolean) { store.speakReplies = v; speakReplies.value = v }
 
     private val main = Handler(Looper.getMainLooper())
     private var client: AcpClient? = null

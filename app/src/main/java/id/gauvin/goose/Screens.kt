@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -93,11 +94,20 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? -> uri?.let { readImage(ctx, it)?.let(attachments::add) } }
 
-    val voice = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { res ->
-        res.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
-            ?.firstOrNull()?.let { input = (input.trim() + " " + it).trim() }
+    // Voice: push-to-talk STT streaming into the draft, and TTS to read replies aloud.
+    val voiceInput = remember { VoiceInput(ctx) }
+    val speaker = remember { Speaker(ctx) }
+    DisposableEffect(Unit) { onDispose { voiceInput.stop(); speaker.shutdown() } }
+    fun startListening() {
+        val base = input
+        voiceInput.start(
+            onPartial = { input = (base.trim() + " " + it).trim() },
+            onFinal = { input = (base.trim() + " " + it).trim() },
+            onError = {},
+        )
+    }
+    val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) startListening()
     }
 
     // Content shared into Goose from another app — append (don't clobber an in-progress draft).
@@ -138,6 +148,14 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     LaunchedEffect(cm.messages.size, lastLen, cm.busy.value) {
         val total = cm.messages.size + if (cm.busy.value) 1 else 0
         if (total > 0 && atBottom) listState.animateScrollToItem(total - 1)
+    }
+    // Speak the reply aloud when a turn finishes (busy true→false), if enabled.
+    var wasBusy by remember { mutableStateOf(false) }
+    LaunchedEffect(cm.busy.value) {
+        if (wasBusy && !cm.busy.value && cm.speakReplies.value) {
+            cm.messages.lastOrNull { it.role == "assistant" }?.text?.let { speaker.speak(it) }
+        }
+        wasBusy = cm.busy.value
     }
     // Reconnect (resuming the session) when we return to the foreground.
     val owner = LocalLifecycleOwner.current
@@ -227,13 +245,16 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 }) { Icon(Icons.Filled.Image, contentDescription = "attach image") }
                 IconButton(onClick = {
-                    val i = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                            android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                        putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Speak to goose")
-                    }
-                    runCatching { voice.launch(i) }
-                }) { Icon(Icons.Filled.Mic, contentDescription = "voice input") }
+                    if (voiceInput.listening) voiceInput.stop()
+                    else if (androidx.core.content.ContextCompat.checkSelfPermission(
+                            ctx, android.Manifest.permission.RECORD_AUDIO) ==
+                            android.content.pm.PackageManager.PERMISSION_GRANTED) startListening()
+                    else micPerm.launch(android.Manifest.permission.RECORD_AUDIO)
+                }) {
+                    Icon(if (voiceInput.listening) Icons.Filled.MicOff else Icons.Filled.Mic,
+                        contentDescription = if (voiceInput.listening) "stop listening" else "voice input",
+                        tint = if (voiceInput.listening) MaterialTheme.colorScheme.error else LocalContentColor.current)
+                }
                 OutlinedTextField(input, { input = it }, modifier = Modifier.weight(1f),
                     placeholder = { Text("message goose…") })
                 Spacer(Modifier.width(6.dp))
@@ -427,6 +448,8 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                     Text("Manage extensions")
                 }
                 SettingCaption("Enable/disable goose's tools to control context per new chat.")
+                SettingsSwitchRow("Speak replies aloud", cm.speakReplies.value) { cm.setSpeakReplies(it) }
+                SettingCaption("Read each finished reply with text-to-speech.")
             }
 
             SettingsSection("Models") {
