@@ -95,8 +95,12 @@ class AcpClient(
 
     fun close() { ws?.close(1000, "bye"); ws = null }
 
-    /** Ask the agent for its resumable sessions; reply arrives as AcpEvent.Sessions. */
-    fun listSessions() { rpc("session/list", buildJsonObject {}) }
+    /** Ask the agent for its resumable sessions; reply arrives as AcpEvent.Sessions.
+     *  `_meta.types` (goose ≥1.42) filters out scheduled sessions server-side; on older builds
+     *  it's ignored and parseSessions() drops them client-side by title. */
+    fun listSessions() = rpc("session/list", buildJsonObject {
+        putJsonObject("_meta") { putJsonArray("types") { add("user"); add("acp") } }
+    })
 
     /** Change a session config knob; server replies with the refreshed configOptions. */
     fun setConfigOption(configId: String, value: String) {
@@ -271,10 +275,14 @@ class AcpClient(
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
             val sid = o["sessionId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val title = o["title"]?.jsonPrimitive?.contentOrNull ?: sid
+            // Drop scheduler-created sessions (goose names them "Scheduled job: <id>") so they don't
+            // clutter the list. (Belt-and-suspenders: the proactive job now runs --no-session anyway.)
+            if (title.startsWith("Scheduled job:")) return@mapNotNull null
             val meta = o["_meta"] as? JsonObject
             SessionInfo(
                 sessionId = sid,
-                title = o["title"]?.jsonPrimitive?.contentOrNull ?: sid,
+                title = title,
                 updatedAt = o["updatedAt"]?.jsonPrimitive?.contentOrNull ?: "",
                 messageCount = meta?.get("messageCount")?.jsonPrimitive?.intOrNull ?: 0,
                 model = meta?.get("modelId")?.jsonPrimitive?.contentOrNull ?: "",
