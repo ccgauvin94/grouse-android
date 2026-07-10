@@ -2,6 +2,7 @@ package id.gauvin.goose
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -20,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -114,6 +116,16 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
         val notifPerm = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()) {}
         LaunchedEffect(Unit) { notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS) }
+    }
+
+    // Ask for mic up front: push-to-talk needs it, and the assistant VoiceInteractionSession
+    // can't request runtime permissions itself — so the app must obtain it through the Activity.
+    val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    LaunchedEffect(Unit) {
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            micPerm.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     val nav = rememberNavController()
