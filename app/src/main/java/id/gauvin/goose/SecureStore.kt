@@ -47,6 +47,18 @@ class SecureStore(context: Context) {
         // Move off the ACP-only server (:3285) to the full agent server (:3284) which also
         // serves ACP and exposes the extension API.
         if (cfg.getString("port", null) == "3285") cfg.edit().putString("port", "3284").apply()
+        // One-time: split the old FLAT known_models set into per-provider buckets so models like
+        // z-ai/glm-5.2 (which goose doesn't "feature") survive the provider-scoped picker change.
+        // Heuristic: OpenRouter slugs are "vendor/model" (contain "/"); LocalAI ones are bare names.
+        cfg.getStringSet("known_models", null)?.let { flat ->
+            val or = knownModels("openrouter") + flat.filter { it.contains("/") }
+            val oa = knownModels("openai") + flat.filterNot { it.contains("/") }
+            cfg.edit()
+                .putStringSet("known_models_openrouter", HashSet(or))
+                .putStringSet("known_models_openai", HashSet(oa))
+                .remove("known_models")
+                .apply()
+        }
     }
 
     var host: String
