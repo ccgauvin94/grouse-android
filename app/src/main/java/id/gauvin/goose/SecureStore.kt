@@ -119,10 +119,18 @@ class SecureStore(context: Context) {
         get() = cfg.getString("proactive_prompt", null) ?: DEFAULT_PROACTIVE_PROMPT
         set(v) = cfg.edit().putString("proactive_prompt", v).apply()
 
-    /** Real model slugs we've seen active (goose hides non-featured models like z-ai/glm-5.2). */
-    var knownModels: Set<String>
-        get() = cfg.getStringSet("known_models", emptySet()) ?: emptySet()
-        set(v) = cfg.edit().putStringSet("known_models", HashSet(v)).apply()
+    /** Real model slugs we've seen active, scoped PER PROVIDER (goose hides non-featured models
+     *  like z-ai/glm-5.2). Provider-scoping stops LocalAI models leaking into the OpenRouter list
+     *  and vice-versa. */
+    fun knownModels(provider: String): Set<String> =
+        cfg.getStringSet("known_models_$provider", emptySet()) ?: emptySet()
+
+    fun addKnownModel(provider: String, model: String) {
+        if (provider.isBlank() || model.isBlank()) return
+        val cur = knownModels(provider)
+        if (model in cur) return
+        cfg.edit().putStringSet("known_models_$provider", HashSet(cur + model)).apply()
+    }
 
     fun savedOptions(ids: List<String>): Map<String, String> =
         ids.mapNotNull { id -> cfg.getString("opt_$id", null)?.let { id to it } }.toMap()

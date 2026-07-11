@@ -47,7 +47,7 @@ class ConnectionManager private constructor(context: Context) {
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
     val speakReplies = mutableStateOf(store.speakReplies)
-    val knownModels = mutableStateOf(store.knownModels)
+    val knownModels = mutableStateOf(emptySet<String>())   // models for the CURRENT provider only
     val extensions = mutableStateOf<List<ExtInfo>>(emptyList())
     val extensionsBusy = mutableStateOf(false)
 
@@ -288,13 +288,13 @@ class ConnectionManager private constructor(context: Context) {
                 // transient voice model is applied, so it doesn't overwrite the app's saved model.
                 if (!voiceModelActive)
                     ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
-                // Remember real model slugs (goose only lists featured models + "current").
+                // Remember real model slugs PER PROVIDER (goose only lists featured + "current"),
+                // then expose only the current provider's models so LocalAI/OpenRouter don't mix.
+                val provider = ev.options.firstOrNull { it.id == "provider" }?.currentValue ?: ""
                 ev.options.firstOrNull { it.id == "model" }?.currentValue?.let { m ->
-                    if (m.isNotBlank() && m != "current" && m !in store.knownModels) {
-                        store.knownModels = store.knownModels + m
-                        knownModels.value = store.knownModels
-                    }
+                    if (m.isNotBlank() && m != "current") store.addKnownModel(provider, m)
                 }
+                knownModels.value = if (provider.isNotBlank()) store.knownModels(provider) else emptySet()
             }
             is AcpEvent.Ready -> {
                 live = true; connecting = false; online.value = true

@@ -40,6 +40,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import android.widget.Toast
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -200,17 +206,35 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
             if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
                 cm.configuredProviders, cm.knownModels.value, cm::setOption, cm::compact)
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                    items(cm.messages) { m -> MessageBubble(m) }
-                    if (cm.busy.value) item { TypingIndicator() }
+                if (cm.messages.isEmpty() && !cm.busy.value) {
+                    Column(
+                        Modifier.fillMaxSize().padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(Icons.Filled.Psychology, contentDescription = null,
+                            modifier = Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(12.dp))
+                        Text(if (cm.online.value) "Ask goose anything" else "Connecting…",
+                            style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(4.dp))
+                        Text("Calendar, notes, web search, and memory are wired up — tap the mic or type below.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
+                    }
+                } else {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                        items(cm.messages) { m -> MessageBubble(m) }
+                        if (cm.busy.value) item { TypingIndicator() }
+                    }
+                    if (!atBottom) SmallFloatingActionButton(
+                        onClick = {
+                            val total = cm.messages.size + if (cm.busy.value) 1 else 0
+                            scope.launch { listState.animateScrollToItem((total - 1).coerceAtLeast(0)) }
+                        },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
+                    ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
                 }
-                if (!atBottom) SmallFloatingActionButton(
-                    onClick = {
-                        val total = cm.messages.size + if (cm.busy.value) 1 else 0
-                        scope.launch { listState.animateScrollToItem((total - 1).coerceAtLeast(0)) }
-                    },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
-                ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
             }
 
             // Slash-command autocomplete (goose's available commands).
@@ -722,9 +746,8 @@ fun ConfigPanel(
     Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
         for (id in CONFIG_IDS) byId[id]?.let { opt ->
             when (id) {
-                // Editable: goose only lists "featured" models + a "current" placeholder, so
-                // typing an exact slug (e.g. z-ai/glm-5.2) is the only way to pick many models.
-                "model" -> ModelField(opt, knownModels, onPick)
+                // Dropdown of goose's featured models + ones seen before for the current provider.
+                "model" -> ModelDropdown(opt, knownModels, onPick)
                 // Hide unconfigured providers unless the user opted into the full catalog.
                 "provider" -> ConfigDropdown(
                     if (showAllProviders) opt
@@ -740,41 +763,31 @@ fun ConfigPanel(
     }
 }
 
-/** Editable model field: type any model id or pick a featured/remembered one from the menu. */
+/** Model picker: a dropdown of goose's featured models + ones seen before for the CURRENT provider
+ *  (provider-scoped, so LocalAI and OpenRouter models never mix). Selection only — no free text. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModelField(opt: ConfigOption, knownModels: Set<String>, onPick: (String, String) -> Unit) {
-    var text by remember(opt.currentValue) { mutableStateOf(opt.currentValue) }
-    var menu by remember { mutableStateOf(false) }
-    val dirty = text.trim() != opt.currentValue && text.isNotBlank()
-    // goose's featured list + models we've seen before (so e.g. z-ai/glm-5.2 stays selectable).
+fun ModelDropdown(opt: ConfigOption, knownModels: Set<String>, onPick: (String, String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
     val featured = opt.choices.map { it.value }
     val entries = (featured + knownModels.filter { it !in featured }).distinct()
-    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+    fun labelFor(v: String) = if (v == "current") "Provider default"
+        else opt.choices.firstOrNull { it.value == v }?.label ?: v
+    ExposedDropdownMenuBox(
+        expanded = expanded, onExpandedChange = { expanded = it },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+    ) {
         OutlinedTextField(
-            value = text, onValueChange = { text = it }, singleLine = true,
+            value = labelFor(opt.currentValue.ifBlank { "current" }),
+            onValueChange = {}, readOnly = true, singleLine = true,
             label = { Text("model") },
-            placeholder = { Text("type a model id, e.g. z-ai/glm-5.2") },
-            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
-            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
-                onDone = { if (dirty) onPick("model", text.trim()) }),
-            trailingIcon = {
-                Row {
-                    if (dirty) IconButton(onClick = { onPick("model", text.trim()) }) {
-                        Icon(Icons.Filled.Check, contentDescription = "set model")
-                    }
-                    IconButton(onClick = { menu = true }) {
-                        Icon(Icons.Filled.ArrowDropDown, contentDescription = "model list")
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth()
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier.menuAnchor().fillMaxWidth()
         )
-        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             entries.forEach { v ->
-                val label = if (v == "current") "Provider default"
-                    else opt.choices.firstOrNull { it.value == v }?.label ?: v
-                DropdownMenuItem(text = { Text(label) },
-                    onClick = { menu = false; text = v; onPick("model", v) })
+                DropdownMenuItem(text = { Text(labelFor(v)) },
+                    onClick = { expanded = false; onPick("model", v) })
             }
         }
     }
@@ -871,6 +884,17 @@ private fun Markdownish(text: String) {
     RichText(modifier = Modifier.fillMaxWidth()) { Markdown(text) }
 }
 
+/** Long-press any message to copy its text. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun Modifier.copyOnLongPress(text: String): Modifier {
+    val clip = LocalClipboardManager.current
+    val ctx = LocalContext.current
+    return combinedClickable(onClick = {}, onLongClick = {
+        clip.setText(AnnotatedString(text)); Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+    })
+}
+
 @Composable
 private fun UserBubble(text: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
@@ -879,14 +903,14 @@ private fun UserBubble(text: String) {
             contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
             shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
             modifier = Modifier.widthIn(max = 320.dp)
-        ) { Box(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) { Markdownish(text) } }
+        ) { Box(Modifier.copyOnLongPress(text).padding(horizontal = 12.dp, vertical = 8.dp)) { Markdownish(text) } }
     }
 }
 
 @Composable
 private fun AssistantBubble(text: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Box(Modifier.padding(horizontal = 2.dp, vertical = 4.dp)) { Markdownish(text) }
+        Box(Modifier.copyOnLongPress(text).padding(horizontal = 2.dp, vertical = 4.dp)) { Markdownish(text) }
     }
 }
 
