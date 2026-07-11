@@ -47,6 +47,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import android.widget.Toast
@@ -209,7 +210,28 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
 
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Goose · ${cm.status.value}") },
+            title = {
+                val online = cm.online.value
+                val busy = cm.busy.value
+                val dot = when {
+                    online -> Color(0xFF3DDC84)                       // connected → green
+                    cm.status.value.contains("connect", true) ||
+                        cm.status.value.contains("load", true) -> Color(0xFFF5A623)  // connecting → amber
+                    else -> MaterialTheme.colorScheme.error          // offline → red
+                }
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.clickable(enabled = !online) { cm.connectSaved() }) {
+                    Surface(color = dot, shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
+                    Spacer(Modifier.width(8.dp))
+                    Text(when {
+                        online && busy -> "Goose · working…"
+                        online -> "Goose"
+                        cm.status.value.contains("connect", true) ||
+                            cm.status.value.contains("load", true) -> "Connecting…"
+                        else -> "Offline · tap to reconnect"
+                    })
+                }
+            },
             actions = {
                 IconButton(onClick = { cm.listSessions(); nav.navigate("sessions") }) {
                     Icon(Icons.Filled.History, contentDescription = "sessions")

@@ -217,8 +217,17 @@ class ConnectionManager private constructor(context: Context) {
     private fun lastAssistantText(): String =
         messages.lastOrNull { it.role == "assistant" }?.text ?: "Turn finished."
 
-    /** Interrupt the running turn. */
-    fun cancel() = client?.cancel()
+    /** Stop the running turn — reliably, even if goose is wedged mid-turn and won't honor the
+     *  polite ACP cancel. We send the cancel, free the UI immediately, then reconnect (resume):
+     *  reopening bumps the client generation so any late events from the stuck connection are
+     *  dropped, and the fresh client comes back idle. The streamed partial stays in the list. */
+    fun cancel() {
+        client?.cancel()
+        streamingRole = null
+        busy.value = false
+        pendingSends.clear()
+        if (store.hasKey()) open(resume = lastSessionId ?: store.lastSessionId, suppressReplay = true)
+    }
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
     fun compact() { busy.value = true; client?.sendPrompt("/compact") }
