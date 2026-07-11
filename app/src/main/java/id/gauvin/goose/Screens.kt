@@ -43,6 +43,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import android.widget.Toast
@@ -67,18 +69,36 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
     var host by remember { mutableStateOf(cm.store.host) }
     var port by remember { mutableStateOf(cm.store.port) }
     var key by remember { mutableStateOf("") }
+    var showKey by remember { mutableStateOf(false) }
     Scaffold(topBar = { TopAppBar(title = { Text("Connect to Goose") }) }) { pad ->
-        Column(Modifier.padding(pad).padding(16.dp).fillMaxWidth()) {
-            OutlinedTextField(host, { host = it }, label = { Text("host") }, singleLine = true,
-                modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(port, { port = it }, label = { Text("port") }, singleLine = true,
-                modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(key, { key = it }, label = { Text("X-Secret-Key") }, singleLine = true,
-                modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
+        Column(
+            Modifier.padding(pad).padding(24.dp).fillMaxWidth().verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(Modifier.height(16.dp))
+            Icon(Icons.Filled.Psychology, contentDescription = null,
+                modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(10.dp))
+            Text("Welcome to Goose", style = MaterialTheme.typography.headlineSmall)
+            Text("Connect to your self-hosted goosed over the tailnet.",
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline,
+                textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
+            Spacer(Modifier.height(28.dp))
+            OutlinedTextField(host, { host = it }, label = { Text("Host") },
+                supportingText = { Text("e.g. 192.168.1.5 or a Tailscale name") },
+                singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(port, { port = it }, label = { Text("Port") }, singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+            OutlinedTextField(key, { key = it }, label = { Text("Secret key") }, singleLine = true,
+                visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    TextButton(onClick = { showKey = !showKey }) { Text(if (showKey) "Hide" else "Show") }
+                },
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+            Spacer(Modifier.height(20.dp))
             Button(
                 onClick = { cm.connect(host.trim(), port.trim(), key.trim()); onConnected() },
-                enabled = key.isNotBlank(), modifier = Modifier.fillMaxWidth()
+                enabled = key.isNotBlank() && host.isNotBlank(), modifier = Modifier.fillMaxWidth()
             ) { Text("Connect") }
         }
     }
@@ -376,8 +396,17 @@ fun SessionsScreen(cm: ConnectionManager, nav: NavController) {
                 }
             }
             if (cm.sessions.value.isEmpty()) item {
-                Text("no saved sessions", style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(12.dp))
+                Column(Modifier.fillMaxWidth().padding(vertical = 56.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Filled.History, contentDescription = null,
+                        modifier = Modifier.size(44.dp), tint = MaterialTheme.colorScheme.outline)
+                    Spacer(Modifier.height(8.dp))
+                    Text("No past chats yet", style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.outline)
+                    Text("Start one above — it'll show here to resume later.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                        textAlign = TextAlign.Center)
+                }
             }
             items(cm.sessions.value) { s ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
