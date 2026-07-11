@@ -180,6 +180,17 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         val total = cm.messages.size + if (cm.busy.value) 1 else 0
         if (total > 0 && atBottom) listState.animateScrollToItem(total - 1)
     }
+    // Opening a session (esp. the Assistant): its history replays in asynchronously, so jump to the
+    // latest message and keep pinning to the bottom until the replay settles — never land at the top.
+    LaunchedEffect(cm.currentSession.value) {
+        var lastSize = -1; var stable = 0
+        while (stable < 4) {
+            val total = cm.messages.size + if (cm.busy.value) 1 else 0
+            if (total > 0 && total != lastSize) { listState.scrollToItem(total - 1); stable = 0 } else stable++
+            lastSize = total
+            kotlinx.coroutines.delay(90)
+        }
+    }
     // Speak the reply aloud when a turn finishes (busy true→false), if enabled.
     var wasBusy by remember { mutableStateOf(false) }
     LaunchedEffect(cm.busy.value) {
