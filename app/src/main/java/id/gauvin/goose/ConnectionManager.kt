@@ -28,6 +28,7 @@ class ConnectionManager private constructor(context: Context) {
 
     val messages = mutableStateListOf<ChatMessage>()
     val status = mutableStateOf("not connected")
+    val online = mutableStateOf(false)   // true between Ready and disconnect — for a UI status pill
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
     val busy = mutableStateOf(false)
@@ -230,7 +231,7 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun open(resume: String?, suppressReplay: Boolean) {
         client?.close()
-        live = false; connecting = true
+        live = false; connecting = true; online.value = false
         val url = "wss://${store.host}:${store.port}/acp"
         status.value = when {
             resume == null -> "connecting to $url"
@@ -254,7 +255,7 @@ class ConnectionManager private constructor(context: Context) {
         when (ev) {
             is AcpEvent.Status -> {
                 status.value = ev.text
-                if (ev.text == "disconnected") { live = false; connecting = false }
+                if (ev.text == "disconnected") { live = false; connecting = false; online.value = false }
             }
             is AcpEvent.Error -> {
                 messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false
@@ -296,7 +297,7 @@ class ConnectionManager private constructor(context: Context) {
                 }
             }
             is AcpEvent.Ready -> {
-                live = true; connecting = false
+                live = true; connecting = false; online.value = true
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
                 // Flush every queued send (bubbles were already added when queued).
                 while (pendingSends.isNotEmpty()) {

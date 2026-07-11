@@ -375,13 +375,34 @@ fun SessionsScreen(cm: ConnectionManager, nav: NavController) {
 
 // ---- Reusable settings building blocks --------------------------------------
 
-/** A titled group of settings rows. */
+/** A titled group of settings rows, grouped visually in a rounded card. */
 @Composable
 private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Text(title.uppercase(), style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(top = 22.dp, bottom = 6.dp))
-    Column(content = content)
+        modifier = Modifier.padding(start = 6.dp, top = 22.dp, bottom = 8.dp))
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), content = content)
+    }
+}
+
+/** A tappable settings row: label (+ optional subtitle) with a trailing chevron. */
+@Composable
+private fun SettingsNavRow(label: String, subtitle: String? = null, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline)
+        }
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
+            tint = MaterialTheme.colorScheme.outline)
+    }
 }
 
 /** Explanatory caption under a setting. */
@@ -429,53 +450,44 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
         Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
             .verticalScroll(rememberScrollState())) {
 
-            SettingsSection("Connection") {
-                OutlinedTextField(host, { host = it }, label = { Text("host") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(port, { port = it }, label = { Text("port") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                OutlinedTextField(newKey, { newKey = it }, label = { Text("replace X-Secret-Key (optional)") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = {
-                        val key = newKey.trim().ifBlank { cm.store.secretKey }
-                        cm.connect(host.trim(), port.trim(), key)
-                        nav.popBackStack()
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Save & reconnect") }
+            // Status header: connection + current model at a glance.
+            Spacer(Modifier.height(4.dp))
+            run {
+                val model = cm.config.value.firstOrNull { it.id == "model" }?.currentValue
+                    ?.takeIf { it.isNotBlank() && it != "current" } ?: "—"
+                val isOnline = cm.online.value
+                Card(shape = RoundedCornerShape(16.dp)) {
+                    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(if (isOnline) Icons.Filled.Check else Icons.Filled.Close, contentDescription = null,
+                            tint = if (isOnline) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(if (isOnline) "Connected" else cm.status.value.replaceFirstChar { it.uppercase() },
+                                style = MaterialTheme.typography.titleSmall)
+                            Text("${cm.store.host}:${cm.store.port}  ·  $model",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                        }
+                        if (!isOnline) TextButton(onClick = { cm.connectSaved() }) { Text("Connect") }
+                    }
+                }
             }
 
-            SettingsSection("Assistant") {
-                OutlinedButton(onClick = { nav.navigate("proactive") }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Proactive checks")
-                }
-                SettingCaption("Scheduled read-only check-ins that notify you when something needs attention.")
-                OutlinedButton(onClick = { nav.navigate("extensions") },
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
-                    Text("Manage extensions")
-                }
-                SettingCaption("Enable/disable goose's tools to control context per new chat.")
+            SettingsSection("Connection") {
+                OutlinedTextField(host, { host = it }, label = { Text("Host") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(port, { port = it }, label = { Text("Port") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                OutlinedTextField(newKey, { newKey = it }, label = { Text("Replace secret key (optional)") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                Button(onClick = {
+                    val key = newKey.trim().ifBlank { cm.store.secretKey }
+                    cm.connect(host.trim(), port.trim(), key); nav.popBackStack()
+                }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("Save & reconnect") }
+            }
+
+            SettingsSection("Voice") {
                 SettingsSwitchRow("Speak replies aloud", cm.speakReplies.value) { cm.setSpeakReplies(it) }
                 SettingCaption("Read each finished reply with text-to-speech.")
-                OutlinedButton(onClick = {
-                    runCatching {
-                        ctx.startActivity(android.content.Intent(
-                            android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
-                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
-                }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
-                    Text("Set Goose as device assistant")
-                }
-                SettingCaption("Then the assist gesture / power-button hold opens a voice-first " +
-                    "Goose. Hands-free voice runs read-only.")
-            }
-
-            SettingsSection("Models") {
-                SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
-                SettingCaption("Off shows only providers set up on your goose (openai, openrouter). " +
-                    "Turn on to pick from goose's full catalog.")
                 var vProv by remember { mutableStateOf(cm.store.voiceProvider) }
                 var vModel by remember { mutableStateOf(cm.store.voiceModel) }
                 OutlinedTextField(vProv, { vProv = it; cm.store.voiceProvider = it.trim() },
@@ -484,30 +496,46 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                 OutlinedTextField(vModel, { vModel = it; cm.store.voiceModel = it.trim() },
                     label = { Text("Voice model (optional)") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                SettingCaption("Run hands-free voice turns on a faster model to cut self-hosted " +
-                    "latency (e.g. provider \"openrouter\", model \"z-ai/glm-5.2\"). Blank = your chat model.")
+                SettingCaption("Hands-free voice can use a faster model to cut self-hosted latency " +
+                    "(e.g. openrouter / z-ai/glm-5.2). Blank = your chat model.")
+                HorizontalDivider(Modifier.padding(top = 8.dp))
+                SettingsNavRow("Set Goose as device assistant",
+                    "Assist gesture / power-button hold opens voice Goose (read-only).") {
+                    runCatching {
+                        ctx.startActivity(android.content.Intent(
+                            android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                }
             }
 
-            SettingsSection("Appearance") {
-                SettingsSwitchRow("Material You dynamic color", cm.dynamicColor.value) { cm.setDynamicColor(it) }
-                SettingCaption("Off uses the built-in goose-green palette.")
+            SettingsSection("Assistant") {
+                SettingsNavRow("Proactive checks",
+                    "Scheduled read-only check-ins that notify when something needs attention.") {
+                    nav.navigate("proactive")
+                }
+                HorizontalDivider()
+                SettingsNavRow("Manage extensions",
+                    "Enable/disable goose's tools to control context per new chat.") {
+                    nav.navigate("extensions")
+                }
             }
 
-            SettingsSection("Background") {
-                SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
-                SettingCaption("On: stay connected in the background (a persistent notification, more battery). " +
-                    "Off: connect while active; you still get a notification when a backgrounded turn finishes.")
+            SettingsSection("Models") {
+                SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
+                SettingCaption("Off shows only providers set up on your goose (openai, openrouter). " +
+                    "On lists goose's full catalog.")
             }
 
-            SettingsSection("Push") {
+            SettingsSection("Notifications & background") {
                 var pushOn by remember { mutableStateOf(cm.store.pushEnabled) }
-                SettingsSwitchRow("Push notifications (UnifiedPush)", pushOn) { on ->
+                SettingsSwitchRow("Push notifications", pushOn) { on ->
                     pushOn = on
                     val act = ctx.findActivity()
                     if (on && act != null) Push.enable(act) else Push.disable(ctx)
                 }
                 SettingCaption("Server-pushed briefings/alerts via your distributor (NextPush) — " +
-                    "no always-on socket, no FCM. Pick the distributor when prompted.")
+                    "no always-on socket, no FCM.")
                 val endpoint = cm.store.pushEndpoint
                 if (endpoint.isNotBlank()) {
                     SelectionContainer {
@@ -515,6 +543,15 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                             color = MaterialTheme.colorScheme.outline)
                     }
                 }
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
+                SettingCaption("On: stay connected in the background (persistent notification, more battery). " +
+                    "Off: connect while active; you still get a finished-turn notification.")
+            }
+
+            SettingsSection("Appearance") {
+                SettingsSwitchRow("Material You dynamic color", cm.dynamicColor.value) { cm.setDynamicColor(it) }
+                SettingCaption("Off uses the built-in goose-green palette.")
             }
 
             Spacer(Modifier.height(24.dp))
