@@ -62,7 +62,9 @@ class GoosePushService : PushService() {
         // the persistent "goose-assistant" thread id → tap lands in that ongoing chat.
         val notifier = Notifier(this)
         if (type == "turn") notifier.postReply(text, session) else {
-            SecureStore(this).lastBriefingAt = System.currentTimeMillis()   // for the Assistant status
+            SecureStore(this).apply {                       // feed the Assistant status card
+                lastBriefingAt = System.currentTimeMillis(); lastBriefingText = text
+            }
             notifier.postProactive(text, session)
         }
     }

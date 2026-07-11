@@ -108,6 +108,16 @@ class SecureStore(context: Context) {
         get() = cfg.getLong("last_briefing_at", 0L)
         set(v) = cfg.edit().putLong("last_briefing_at", v).apply()
 
+    /** The text of the last proactive briefing push — the day's headline, shown on the status card. */
+    var lastBriefingText: String
+        get() = cfg.getString("last_briefing_text", "") ?: ""
+        set(v) = cfg.edit().putString("last_briefing_text", v).apply()
+
+    /** Whether the one-time "this is your assistant" hint has been dismissed. */
+    var assistantHintSeen: Boolean
+        get() = cfg.getBoolean("assistant_hint_seen", false)
+        set(v) = cfg.edit().putBoolean("assistant_hint_seen", v).apply()
+
     /** Cached id of the goose-assistant thread so the app can land on it directly at startup. */
     var assistantSessionId: String?
         get() = cfg.getString("assistant_session", null)

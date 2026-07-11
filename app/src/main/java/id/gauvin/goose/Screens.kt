@@ -114,6 +114,7 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
 fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     val ctx = LocalContext.current
     var showConfig by remember { mutableStateOf(false) }
+    var hintDismissed by remember { mutableStateOf(cm.store.assistantHintSeen) }
     // rememberSaveable so a rotation/dark-mode recreate doesn't wipe the typed draft.
     var input by rememberSaveable { mutableStateOf("") }
     // Hoisted to ConnectionManager so picked images survive recreation (see draftAttachments).
@@ -253,6 +254,9 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     }) { pad ->
         Column(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
             if (cm.onAssistant) AssistantStatusCard(cm)
+            if (cm.onAssistant && !hintDismissed) AssistantHint {
+                hintDismissed = true; cm.store.assistantHintSeen = true
+            }
             ModelBar(cm.config.value, cm.usage.value, showConfig) { showConfig = !showConfig }
             if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
                 cm.configuredProviders, cm.knownModels.value, cm::setOption, cm::compact)
@@ -834,22 +838,46 @@ private fun relativeTime(iso: String): String = runCatching {
 @Composable
 private fun AssistantStatusCard(cm: ConnectionManager) {
     val last = cm.store.lastBriefingAt
-    val briefing = if (last > 0L) relativeTime(java.time.Instant.ofEpochMilli(last).toString()) else "none yet"
+    val ago = if (last > 0L) relativeTime(java.time.Instant.ofEpochMilli(last).toString()) else "none yet"
+    val headline = cm.store.lastBriefingText.trim()
     Surface(
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
     ) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Psychology, contentDescription = null, modifier = Modifier.size(22.dp))
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Icon(Icons.Filled.Psychology, contentDescription = null,
+                modifier = Modifier.size(22.dp).padding(top = 2.dp))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text("Assistant", style = MaterialTheme.typography.titleSmall)
-                Text("Watching · last briefing $briefing", style = MaterialTheme.typography.bodySmall)
+                Text("Watching · hourly 7 AM–10 PM · last briefing $ago",
+                    style = MaterialTheme.typography.bodySmall)
+                if (headline.isNotBlank()) Text(headline, style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp))
             }
+            Spacer(Modifier.width(8.dp))
             Surface(color = if (cm.online.value) Color(0xFF3DDC84) else MaterialTheme.colorScheme.error,
-                shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
+                shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp).padding(top = 4.dp)) {}
+        }
+    }
+}
+
+/** One-time hint on the assistant thread explaining what this privileged conversation is. */
+@Composable
+private fun AssistantHint(onDismiss: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Row(Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Your always-on assistant", style = MaterialTheme.typography.titleSmall)
+                Text("Briefings, alerts, and voice all land here. Let it act on your behalf in " +
+                    "Settings › Assistant › Assistant actions.", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, contentDescription = "dismiss") }
         }
     }
 }
