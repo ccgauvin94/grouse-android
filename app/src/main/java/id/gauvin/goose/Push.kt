@@ -61,7 +61,10 @@ class GoosePushService : PushService() {
         // Finished-turn alert → "Goose replied", tap deep-links to that session. Briefings carry
         // the persistent "goose-assistant" thread id → tap lands in that ongoing chat.
         val notifier = Notifier(this)
-        if (type == "turn") notifier.postReply(text, session) else notifier.postProactive(text, session)
+        if (type == "turn") notifier.postReply(text, session) else {
+            SecureStore(this).lastBriefingAt = System.currentTimeMillis()   // for the Assistant status
+            notifier.postProactive(text, session)
+        }
     }
 
     private fun parsePush(raw: String): Triple<String?, String?, String> = try {

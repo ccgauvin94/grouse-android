@@ -224,6 +224,8 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                     Surface(color = dot, shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
                     Spacer(Modifier.width(8.dp))
                     Text(when {
+                        cm.onAssistant && busy -> "Assistant · working…"
+                        cm.onAssistant -> "Assistant"
                         online && busy -> "Goose · working…"
                         online -> "Goose"
                         cm.status.value.contains("connect", true) ||
@@ -233,6 +235,10 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                 }
             },
             actions = {
+                IconButton(onClick = { cm.openAssistant() }) {
+                    Icon(Icons.Filled.Psychology, contentDescription = "assistant",
+                        tint = if (cm.onAssistant) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                }
                 IconButton(onClick = { cm.listSessions(); nav.navigate("sessions") }) {
                     Icon(Icons.Filled.History, contentDescription = "sessions")
                 }
@@ -246,6 +252,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         )
     }) { pad ->
         Column(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
+            if (cm.onAssistant) AssistantStatusCard(cm)
             ModelBar(cm.config.value, cm.usage.value, showConfig) { showConfig = !showConfig }
             if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
                 cm.configuredProviders, cm.knownModels.value, cm::setOption, cm::compact)
@@ -804,6 +811,30 @@ private fun relativeTime(iso: String): String = runCatching {
         else -> iso.take(10)
     }
 }.getOrElse { iso.take(16).replace('T', ' ') }
+
+/** Status header shown when the on-screen conversation is the privileged assistant thread. */
+@Composable
+private fun AssistantStatusCard(cm: ConnectionManager) {
+    val last = cm.store.lastBriefingAt
+    val briefing = if (last > 0L) relativeTime(java.time.Instant.ofEpochMilli(last).toString()) else "none yet"
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Psychology, contentDescription = null, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Assistant", style = MaterialTheme.typography.titleSmall)
+                Text("Watching · last briefing $briefing", style = MaterialTheme.typography.bodySmall)
+            }
+            Surface(color = if (cm.online.value) Color(0xFF3DDC84) else MaterialTheme.colorScheme.error,
+                shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
+        }
+    }
+}
 
 @Composable
 fun ConfigPanel(

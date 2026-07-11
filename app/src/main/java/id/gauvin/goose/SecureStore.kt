@@ -103,6 +103,11 @@ class SecureStore(context: Context) {
         get() = cfg.getString("last_session", null)
         set(v) = cfg.edit().putString("last_session", v).apply()
 
+    /** When the last proactive briefing push arrived (epoch millis) — shown on the Assistant status. */
+    var lastBriefingAt: Long
+        get() = cfg.getLong("last_briefing_at", 0L)
+        set(v) = cfg.edit().putLong("last_briefing_at", v).apply()
+
     // --- UnifiedPush ---
     var pushEnabled: Boolean
         get() = cfg.getBoolean("push_on", false)

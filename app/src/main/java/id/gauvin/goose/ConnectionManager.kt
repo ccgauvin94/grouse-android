@@ -31,6 +31,7 @@ class ConnectionManager private constructor(context: Context) {
     val online = mutableStateOf(false)   // true between Ready and disconnect — for a UI status pill
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
+    val currentSession = mutableStateOf<String?>(null)   // id of the session on screen (for the Assistant binding)
     val busy = mutableStateOf(false)
     val usage = mutableStateOf<AcpEvent.Usage?>(null)   // context window used/size + cost
     val commands = mutableStateOf<List<String>>(emptyList())
@@ -120,13 +121,28 @@ class ConnectionManager private constructor(context: Context) {
     fun listSessions() = client?.listSessions()
 
     fun openSession(sessionId: String) {
-        messages.clear(); lastSessionId = sessionId
+        messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
         open(resume = sessionId, suppressReplay = false)
     }
 
     fun newSession() {
-        messages.clear(); lastSessionId = null; config.value = emptyList()
+        messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
         open(resume = null, suppressReplay = false)
+    }
+
+    /** The persistent "goose-assistant" thread (briefings/proactive/voice land here), if it exists. */
+    fun assistantSessionId(): String? = sessions.value.firstOrNull { it.title == ASSISTANT_TITLE }?.sessionId
+
+    /** True when the on-screen conversation IS the privileged assistant thread. */
+    val onAssistant: Boolean get() = currentSession.value != null && currentSession.value == assistantSessionId()
+
+    @Volatile private var pendingOpenAssistant = false
+
+    /** Open the privileged assistant thread; if the session list isn't loaded yet, refresh it and
+     *  open as soon as it arrives (see the Sessions event handler). */
+    fun openAssistant() {
+        val id = assistantSessionId()
+        if (id != null) openSession(id) else { pendingOpenAssistant = true; listSessions() }
     }
 
     fun setOption(configId: String, value: String) {
@@ -308,13 +324,18 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Ready -> {
                 live = true; connecting = false; online.value = true
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
+                currentSession.value = ev.sessionId
+                client?.listSessions()   // so the Assistant thread can be resolved by title
                 // Flush every queued send (bubbles were already added when queued).
                 while (pendingSends.isNotEmpty()) {
                     val p = pendingSends.removeFirst()
                     client?.sendPrompt(p.text, p.images)
                 }
             }
-            is AcpEvent.Sessions -> sessions.value = ev.list
+            is AcpEvent.Sessions -> {
+                sessions.value = ev.list
+                if (pendingOpenAssistant) { pendingOpenAssistant = false; assistantSessionId()?.let { openSession(it) } }
+            }
             is AcpEvent.Commands -> commands.value = ev.names
             is AcpEvent.Permission -> {
                 permissions.add(ev)
@@ -335,6 +356,8 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     companion object {
+        /** Server-side name of the persistent assistant thread (see docker/llm/goose-recipes). */
+        const val ASSISTANT_TITLE = "goose-assistant"
         @Volatile private var instance: ConnectionManager? = null
         fun get(context: Context): ConnectionManager =
             instance ?: synchronized(this) {
