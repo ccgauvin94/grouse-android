@@ -135,7 +135,7 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
     }
 
     val nav = rememberNavController()
-    LaunchedEffect(Unit) { cm.connectSaved() }   // auto-connect once unlocked
+    LaunchedEffect(Unit) { cm.connectHome() }   // auto-connect + land on the Assistant thread
     // "New chat" from a shortcut/tile: start fresh and land on the chat screen.
     LaunchedEffect(cm.pendingNewChat.value) {
         if (cm.pendingNewChat.value && cm.configured) {

@@ -609,6 +609,24 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                     "Enable/disable goose's tools to control context per new chat.") {
                     nav.navigate("extensions")
                 }
+                HorizontalDivider()
+                // Privileged Assistant thread: user-chosen action policy.
+                var actions by remember { mutableStateOf(cm.store.assistantActions) }
+                var actMenu by remember { mutableStateOf(false) }
+                fun actLabel(v: String) = when (v) {
+                    "auto" -> "Auto-approve (trusted)"; "readonly" -> "Read-only"; else -> "Ask me each time"
+                }
+                Box {
+                    SettingsNavRow("Assistant actions", actLabel(actions)) { actMenu = true }
+                    DropdownMenu(expanded = actMenu, onDismissRequest = { actMenu = false }) {
+                        listOf("confirm", "auto", "readonly").forEach { v ->
+                            DropdownMenuItem(text = { Text(actLabel(v)) },
+                                onClick = { actions = v; cm.store.assistantActions = v; actMenu = false })
+                        }
+                    }
+                }
+                SettingCaption("How the privileged Assistant thread handles write/shell actions. " +
+                    "Other chats always ask; voice stays read-only.")
             }
 
             SettingsSection("Models") {

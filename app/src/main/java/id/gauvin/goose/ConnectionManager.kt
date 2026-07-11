@@ -105,6 +105,15 @@ class ConnectionManager private constructor(context: Context) {
     /** Connect using the already-saved host/port/key (post-unlock auto-connect). */
     fun connectSaved() { if (store.hasKey()) open(resume = null, suppressReplay = false) }
 
+    /** Startup: land directly on the privileged Assistant thread (its home). Uses the cached id to
+     *  resume it with no churn; on first run (no cache) connects fresh and opens it once the list
+     *  arrives. */
+    fun connectHome() {
+        if (!store.hasKey()) return
+        val a = store.assistantSessionId
+        if (a != null) openSession(a) else { pendingOpenAssistant = true; open(resume = null, suppressReplay = false) }
+    }
+
     /** Save new credentials and connect fresh (from the Connect screen). */
     fun connect(host: String, port: String, key: String) {
         store.host = host; store.port = port; store.secretKey = key
@@ -334,12 +343,26 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
+                assistantSessionId()?.let { store.assistantSessionId = it }   // cache for startup landing
                 if (pendingOpenAssistant) { pendingOpenAssistant = false; assistantSessionId()?.let { openSession(it) } }
             }
             is AcpEvent.Commands -> commands.value = ev.names
             is AcpEvent.Permission -> {
-                permissions.add(ev)
-                if (!appForeground) notifier.postApprovalNeeded(ev.title)
+                // The privileged Assistant thread honors the user's chosen action policy; every
+                // other conversation (and voice) always prompts. Voice already auto-denies via its
+                // own observer, so this only changes behaviour on the Assistant thread.
+                when (if (onAssistant) store.assistantActions else "confirm") {
+                    "auto" -> {   // trusted: approve without prompting (prefer allow-always)
+                        val allow = ev.options.firstOrNull { it.kind.contains("allow_always") }
+                            ?: ev.options.firstOrNull { it.kind.contains("allow") }
+                        client?.respondPermission(ev.toolCallId, allow?.optionId)
+                    }
+                    "readonly" -> client?.respondPermission(ev.toolCallId, null)   // deny writes/shell
+                    else -> {   // confirm: raise the approval sheet
+                        permissions.add(ev)
+                        if (!appForeground) notifier.postApprovalNeeded(ev.title)
+                    }
+                }
             }
         }
     }

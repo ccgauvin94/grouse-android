@@ -108,6 +108,16 @@ class SecureStore(context: Context) {
         get() = cfg.getLong("last_briefing_at", 0L)
         set(v) = cfg.edit().putLong("last_briefing_at", v).apply()
 
+    /** Cached id of the goose-assistant thread so the app can land on it directly at startup. */
+    var assistantSessionId: String?
+        get() = cfg.getString("assistant_session", null)
+        set(v) = cfg.edit().putString("assistant_session", v).apply()
+
+    /** How the privileged Assistant thread handles tool actions: confirm | auto | readonly. */
+    var assistantActions: String
+        get() = cfg.getString("assistant_actions", "confirm") ?: "confirm"
+        set(v) = cfg.edit().putString("assistant_actions", v).apply()
+
     // --- UnifiedPush ---
     var pushEnabled: Boolean
         get() = cfg.getBoolean("push_on", false)
