@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 
@@ -88,6 +89,15 @@ class ConnectionManager private constructor(context: Context) {
     private var lastSessionId: String? = null
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
 
+    // Voice: the voice sheet has a short lifecycle, so CM owns speaking the reply (it survives the
+    // sheet closing) and suppresses the finished-turn notification for voice turns. The turn can
+    // run on a faster voice model, restored afterwards.
+    @Volatile var voiceActive = false
+    @Volatile private var voiceReplyPending = false
+    @Volatile private var voiceModelActive = false
+    private var lastVoiceAt = 0L
+    private val voiceSpeaker by lazy { Speaker(appContext) }
+
     val configured: Boolean get() = store.hasKey()
 
     /** Connect using the already-saved host/port/key (post-unlock auto-connect). */
@@ -140,6 +150,35 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Send once connected — used by notification replies, which may arrive disconnected. */
     fun sendWhenReady(text: String) = send(text)
+
+    /** Send from the voice assistant: CM speaks the reply (so it survives the sheet closing),
+     *  the finished-turn notification is suppressed, and the turn optionally runs on the fast
+     *  voice model (restored afterwards). */
+    fun sendVoice(text: String) {
+        voiceReplyPending = true
+        lastVoiceAt = SystemClock.elapsedRealtime()
+        voiceSpeaker   // touch → start TTS init now so it's ready by turn-end
+        val vm = store.voiceModel
+        if (vm.isNotBlank() && live) {
+            voiceModelActive = true   // suppress persisting this transient model to store
+            store.voiceProvider.takeIf { it.isNotBlank() }?.let { client?.setConfigOption("provider", it) }
+            client?.setConfigOption("model", vm)
+        }
+        send(text)
+    }
+
+    /** True during and briefly after a voice turn — used to drop the server's finished-turn push. */
+    fun recentVoice(): Boolean =
+        voiceReplyPending || (SystemClock.elapsedRealtime() - lastVoiceAt) < 20_000
+
+    /** Restore the app's saved provider/model after a voice turn that swapped in the voice model. */
+    private fun restoreModel() {
+        if (!voiceModelActive) return
+        voiceModelActive = false
+        val saved = store.savedOptions(optionIds)
+        saved["provider"]?.let { client?.setConfigOption("provider", it) }
+        saved["model"]?.let { client?.setConfigOption("model", it) }
+    }
 
     fun setForeground(fg: Boolean) {
         appForeground = fg
@@ -219,14 +258,23 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Error -> {
                 messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false
+                if (voiceReplyPending) { voiceReplyPending = false; restoreModel() }
             }
             is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title)); streamingRole = null }
             is AcpEvent.Usage -> usage.value = ev
             is AcpEvent.Chart -> { messages.add(ChatMessage("chart", ev.spec)); streamingRole = null }
             is AcpEvent.TurnDone -> {
                 streamingRole = null; busy.value = false
-                // If push is on, the goose Stop hook nudges the phone — don't double-notify.
-                if (!appForeground && !store.pushEnabled) notifier.postReply(lastAssistantText())
+                if (voiceReplyPending) {
+                    // Voice turn: speak the reply here (survives the voice sheet closing) and do
+                    // NOT notify — the point of voice is to just talk back. Then restore the model.
+                    voiceReplyPending = false
+                    voiceSpeaker.speak(lastAssistantText())
+                    restoreModel()
+                } else if (!appForeground && !store.pushEnabled) {
+                    // If push is on, the goose Stop hook nudges the phone — don't double-notify.
+                    notifier.postReply(lastAssistantText())
+                }
                 if (!store.persistentConnection) stopService()
             }
             is AcpEvent.AgentChunk -> appendStream("assistant", ev.text)
@@ -235,8 +283,10 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) {
                 config.value = ev.options
                 // Persist the true current values so re-apply on reconnect can't drift
-                // (e.g. leave a LocalAI model selected after switching to openrouter).
-                ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
+                // (e.g. leave a LocalAI model selected after switching to openrouter). Skip while a
+                // transient voice model is applied, so it doesn't overwrite the app's saved model.
+                if (!voiceModelActive)
+                    ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
                 // Remember real model slugs (goose only lists featured models + "current").
                 ev.options.firstOrNull { it.id == "model" }?.currentValue?.let { m ->
                     if (m.isNotBlank() && m != "current" && m !in store.knownModels) {

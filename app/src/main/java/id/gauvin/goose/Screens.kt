@@ -476,6 +476,16 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                 SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
                 SettingCaption("Off shows only providers set up on your goose (openai, openrouter). " +
                     "Turn on to pick from goose's full catalog.")
+                var vProv by remember { mutableStateOf(cm.store.voiceProvider) }
+                var vModel by remember { mutableStateOf(cm.store.voiceModel) }
+                OutlinedTextField(vProv, { vProv = it; cm.store.voiceProvider = it.trim() },
+                    label = { Text("Voice provider (optional)") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                OutlinedTextField(vModel, { vModel = it; cm.store.voiceModel = it.trim() },
+                    label = { Text("Voice model (optional)") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                SettingCaption("Run hands-free voice turns on a faster model to cut self-hosted " +
+                    "latency (e.g. provider \"openrouter\", model \"z-ai/glm-5.2\"). Blank = your chat model.")
             }
 
             SettingsSection("Appearance") {

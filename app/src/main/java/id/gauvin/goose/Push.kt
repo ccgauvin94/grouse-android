@@ -56,6 +56,8 @@ class GoosePushService : PushService() {
         // A "turn" nudge fires for EVERY goose turn (Desktop too). Only surface it when it's this
         // phone's own session — drop other clients' turns.
         if (type == "turn" && session != null && session != cm.store.lastSessionId) return
+        // During a voice interaction the assistant speaks the reply itself — don't also notify.
+        if (type == "turn" && cm.recentVoice()) return
         // Finished-turn alert → "Goose replied", tap deep-links to that session. Briefings carry
         // the persistent "goose-assistant" thread id → tap lands in that ongoing chat.
         val notifier = Notifier(this)

@@ -76,6 +76,16 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("speak_replies", false)
         set(v) = cfg.edit().putBoolean("speak_replies", v).apply()
 
+    // --- Voice assistant model override ---
+    // Self-hosted latency is painful for voice, so a voice turn can run on a faster (cloud) model
+    // just for that turn, then restore. Blank model = use the session's current model.
+    var voiceProvider: String
+        get() = cfg.getString("voice_provider", "") ?: ""
+        set(v) = cfg.edit().putString("voice_provider", v).apply()
+    var voiceModel: String
+        get() = cfg.getString("voice_model", "") ?: ""
+        set(v) = cfg.edit().putString("voice_model", v).apply()
+
     /** Last opened session, so a notification reply after process death can resume it. */
     var lastSessionId: String?
         get() = cfg.getString("last_session", null)
