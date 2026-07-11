@@ -45,6 +45,8 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import android.widget.Toast
@@ -411,12 +413,18 @@ fun SessionsScreen(cm: ConnectionManager, nav: NavController) {
             items(cm.sessions.value) { s ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                     .clickable { cm.openSession(s.sessionId); nav.popBackStack() }) {
-                    Column(Modifier.padding(14.dp)) {
-                        Text(s.title.ifBlank { s.sessionId }, style = MaterialTheme.typography.titleMedium)
-                        Spacer(Modifier.height(2.dp))
-                        val when_ = s.updatedAt.take(16).replace('T', ' ')
-                        val bits = listOf("${s.messageCount} msgs", s.model, when_).filter { it.isNotBlank() }
-                        Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.bodySmall)
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Spacer(Modifier.height(2.dp))
+                            val bits = listOf("${s.messageCount} msgs", s.model, relativeTime(s.updatedAt))
+                                .filter { it.isNotBlank() }
+                            Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.outline)
                     }
                 }
             }
@@ -746,7 +754,9 @@ fun ModelBar(options: List<ConfigOption>, usage: AcpEvent.Usage?, expanded: Bool
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
             }
             Spacer(Modifier.width(6.dp))
-            Text(if (expanded) "▲" else "▼", style = MaterialTheme.typography.bodyMedium)
+            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null,
+                modifier = Modifier.rotate(if (expanded) 180f else 0f),
+                tint = MaterialTheme.colorScheme.outline)
         }
     }
 }
@@ -756,6 +766,22 @@ private fun fmtTokens(n: Int): String = when {
     n >= 1_000 -> "${n / 1000}k"
     else -> "$n"
 }
+
+/** "2h ago" style timestamp from goose's ISO updatedAt; falls back to the raw value. */
+private fun relativeTime(iso: String): String = runCatching {
+    val inst = runCatching { java.time.Instant.parse(iso) }
+        .recoverCatching { java.time.OffsetDateTime.parse(iso).toInstant() }
+        .recoverCatching { java.time.LocalDateTime.parse(iso).toInstant(java.time.ZoneOffset.UTC) }
+        .getOrThrow()
+    val secs = java.time.Duration.between(inst, java.time.Instant.now()).seconds
+    when {
+        secs < 60 -> "just now"
+        secs < 3600 -> "${secs / 60}m ago"
+        secs < 86400 -> "${secs / 3600}h ago"
+        secs < 604800 -> "${secs / 86400}d ago"
+        else -> iso.take(10)
+    }
+}.getOrElse { iso.take(16).replace('T', ' ') }
 
 @Composable
 fun ConfigPanel(
