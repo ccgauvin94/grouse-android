@@ -155,14 +155,10 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     var showVisionWarn by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     // "At bottom" = the last item is visible; drives autoscroll + the jump-to-bottom button.
+    // With reverseLayout the bottom is index 0; we're at the bottom when it's fully shown.
     val atBottom by remember {
         derivedStateOf {
-            val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()
-            // At bottom only when the LAST item is present AND its bottom edge is within the
-            // viewport — otherwise a tall final message reads as "at bottom" while at its top.
-            last == null || (last.index >= info.totalItemsCount - 1 &&
-                last.offset + last.size <= info.viewportEndOffset + 2)
+            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         }
     }
 
@@ -177,23 +173,14 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         reallySend()
     }
 
-    // Follow new content only when already pinned to the bottom (don't yank the user up-scroll).
+    // Stay pinned to the bottom (index 0) as messages stream in / arrive — unless the user scrolled up.
     val lastLen = cm.messages.lastOrNull()?.text?.length ?: 0
     LaunchedEffect(cm.messages.size, lastLen, cm.busy.value) {
-        val total = cm.messages.size + if (cm.busy.value) 1 else 0
-        if (total > 0 && atBottom) listState.animateScrollToItem(total - 1, Int.MAX_VALUE)
+        if (atBottom) listState.animateScrollToItem(0)
     }
-    // Opening a session (esp. the Assistant): its history replays in asynchronously, so jump to the
-    // latest message and keep pinning to the bottom until the replay settles — never land at the top.
-    LaunchedEffect(cm.currentSession.value) {
-        var lastSize = -1; var stable = 0
-        while (stable < 4) {
-            val total = cm.messages.size + if (cm.busy.value) 1 else 0
-            if (total > 0 && total != lastSize) { listState.scrollToItem(total - 1, Int.MAX_VALUE); stable = 0 } else stable++
-            lastSize = total
-            kotlinx.coroutines.delay(90)
-        }
-    }
+    // Opening/switching a session: snap to the bottom (index 0). reverseLayout keeps it pinned
+    // as history replays in.
+    LaunchedEffect(cm.currentSession.value) { listState.scrollToItem(0) }
     // Speak the reply aloud when a turn finishes (busy true→false), if enabled.
     var wasBusy by remember { mutableStateOf(false) }
     LaunchedEffect(cm.busy.value) {
@@ -292,15 +279,15 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                             color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
                     }
                 } else {
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                        items(cm.messages) { m -> MessageBubble(m) }
+                    // reverseLayout: index 0 renders at the BOTTOM. Typing indicator first (very
+                    // bottom), then messages newest→oldest upward. Bottom is always index 0, so
+                    // "open at bottom", "jump to bottom", and streaming-stays-pinned are trivial.
+                    LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.fillMaxSize()) {
                         if (cm.busy.value) item { TypingIndicator() }
+                        items(cm.messages.asReversed()) { m -> MessageBubble(m) }
                     }
                     if (!atBottom) SmallFloatingActionButton(
-                        onClick = {
-                            val total = cm.messages.size + if (cm.busy.value) 1 else 0
-                            scope.launch { listState.animateScrollToItem((total - 1).coerceAtLeast(0), Int.MAX_VALUE) }
-                        },
+                        onClick = { scope.launch { listState.animateScrollToItem(0) } },
                         modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
                     ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
                 }
