@@ -52,26 +52,19 @@ class ConnectionManager private constructor(context: Context) {
     val extensions = mutableStateOf<List<ExtInfo>>(emptyList())
     val extensionsBusy = mutableStateOf(false)
 
-    private val io = java.util.concurrent.Executors.newSingleThreadExecutor()
-    private fun extApi() = ExtensionsApi("https://${store.host}:${store.port}", store.secretKey)
-
-    /** Fetch the extension list (GET /config/extensions). */
+    /** Fetch the extension list over ACP (agent-global). Reply lands as AcpEvent.Extensions.
+     *  goose ≥1.42 dropped goosed's REST /config/extensions; this uses the ACP method instead. */
     fun loadExtensions() {
+        val c = client ?: run { extensions.value = emptyList(); extensionsBusy.value = false; return }
         extensionsBusy.value = true
-        io.execute {
-            val list = runCatching { extApi().list() }.getOrDefault(emptyList())
-            main.post { extensions.value = list; extensionsBusy.value = false }
-        }
+        c.listExtensions()
     }
 
-    /** Enable/disable an extension globally (affects new chats). */
+    /** Enable/disable an extension globally (affects new chats); the reply refreshes the list. */
     fun toggleExtension(e: ExtInfo, enabled: Boolean) {
+        val c = client ?: return
         extensionsBusy.value = true
-        io.execute {
-            runCatching { extApi().set(e, enabled) }
-            val list = runCatching { extApi().list() }.getOrDefault(emptyList())
-            main.post { extensions.value = list; extensionsBusy.value = false }
-        }
+        c.setExtensionEnabled(e.configKey, enabled)
     }
 
     // Providers actually set up on this goose (config.yaml `providers:` with configured:true).
@@ -347,6 +340,7 @@ class ConnectionManager private constructor(context: Context) {
                 if (pendingOpenAssistant) { pendingOpenAssistant = false; assistantSessionId()?.let { openSession(it) } }
             }
             is AcpEvent.Commands -> commands.value = ev.names
+            is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }
             is AcpEvent.Permission -> {
                 // The privileged Assistant thread honors the user's chosen action policy; every
                 // other conversation (and voice) always prompts. Voice already auto-denies via its

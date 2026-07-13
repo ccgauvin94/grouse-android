@@ -32,6 +32,15 @@ data class SessionInfo(
     val model: String,
 )
 
+/** One goose extension from the ACP `config/extensions/list` method (goose ≥1.42). */
+data class ExtInfo(
+    val name: String,
+    val enabled: Boolean,
+    val type: String,
+    val description: String,
+    val configKey: String,   // key in config.yaml; used by config/extensions/set-enabled
+)
+
 /** Events surfaced from the ACP connection to the UI layer. */
 sealed interface AcpEvent {
     data class Status(val text: String) : AcpEvent
@@ -44,6 +53,7 @@ sealed interface AcpEvent {
     data class Config(val options: List<ConfigOption>) : AcpEvent
     data class Ready(val sessionId: String) : AcpEvent
     data class Sessions(val list: List<SessionInfo>) : AcpEvent
+    data class Extensions(val list: List<ExtInfo>) : AcpEvent
     data class Commands(val names: List<String>) : AcpEvent
     data class Usage(val used: Int, val size: Int, val cost: Double, val currency: String) : AcpEvent
     data class Chart(val spec: String) : AcpEvent   // Chart.js-shaped JSON from autovisualiser
@@ -101,6 +111,17 @@ class AcpClient(
     fun listSessions() = rpc("session/list", buildJsonObject {
         putJsonObject("_meta") { putJsonArray("types") { add("user"); add("acp") } }
     })
+
+    /** List configured extensions (agent-global). Reply arrives as AcpEvent.Extensions.
+     *  Replaces goosed's old GET /config/extensions — that REST endpoint is gone from
+     *  `goose serve`; extension config is now an ACP method over this same socket. */
+    fun listExtensions() = rpc("_goose/unstable/config/extensions/list", buildJsonObject {})
+
+    /** Enable/disable a configured extension (affects new sessions); refreshes the list on reply. */
+    fun setExtensionEnabled(configKey: String, enabled: Boolean) =
+        rpc("_goose/unstable/config/extensions/set-enabled", buildJsonObject {
+            put("configKey", configKey); put("enabled", enabled)
+        })
 
     /** Change a session config knob; server replies with the refreshed configOptions. */
     fun setConfigOption(configId: String, value: String) {
@@ -237,6 +258,9 @@ class AcpClient(
                 onEvent(AcpEvent.Config(parseConfig(result)))   // reflects this session's model
             }
             "session/list" -> onEvent(AcpEvent.Sessions(parseSessions(result)))
+            "_goose/unstable/config/extensions/list" -> onEvent(AcpEvent.Extensions(parseExtensions(result)))
+            // After a toggle, re-list so the UI reflects the new enabled state.
+            "_goose/unstable/config/extensions/set-enabled" -> listExtensions()
             "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))
             "session/set_mode" -> {}
             "session/prompt" ->
@@ -286,6 +310,23 @@ class AcpClient(
                 updatedAt = o["updatedAt"]?.jsonPrimitive?.contentOrNull ?: "",
                 messageCount = meta?.get("messageCount")?.jsonPrimitive?.intOrNull ?: 0,
                 model = meta?.get("modelId")?.jsonPrimitive?.contentOrNull ?: "",
+            )
+        }
+    }
+
+    /** Parse the config/extensions/list reply: {extensions:[{extension:{name,type,description}, enabled, configKey}]}. */
+    private fun parseExtensions(result: JsonObject?): List<ExtInfo> {
+        val arr = result?.get("extensions") as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val ext = o["extension"] as? JsonObject ?: return@mapNotNull null
+            val name = ext["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            ExtInfo(
+                name = name,
+                enabled = o["enabled"]?.jsonPrimitive?.booleanOrNull ?: false,
+                type = ext["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                description = ext["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                configKey = o["configKey"]?.jsonPrimitive?.contentOrNull ?: name,
             )
         }
     }

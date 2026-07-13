@@ -776,7 +776,7 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
                     HorizontalDivider()
                 }
                 if (cm.extensions.value.isEmpty() && !cm.extensionsBusy.value) item {
-                    Text("Couldn't load extensions. This needs the full goose agent server (:3284).",
+                    Text("Couldn't load extensions — make sure you're connected to goose.",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(16.dp))
                 }
