@@ -259,6 +259,10 @@ class ConnectionManager private constructor(context: Context) {
     private fun open(resume: String?, suppressReplay: Boolean) {
         client?.close()
         live = false; connecting = true; online.value = false
+        // A new client can't receive the old client's TurnDone, so clear turn state here.
+        // Otherwise a hung/dropped turn leaves busy=true and every new chat + reconnect
+        // inherits a stuck "goose is thinking…" with nothing sent.
+        busy.value = false; streamingRole = null
         val url = "wss://${store.host}:${store.port}/acp"
         status.value = when {
             resume == null -> "connecting to $url"
