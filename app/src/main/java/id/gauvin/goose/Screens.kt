@@ -159,7 +159,10 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         derivedStateOf {
             val info = listState.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull()
-            last == null || last.index >= info.totalItemsCount - 1
+            // At bottom only when the LAST item is present AND its bottom edge is within the
+            // viewport — otherwise a tall final message reads as "at bottom" while at its top.
+            last == null || (last.index >= info.totalItemsCount - 1 &&
+                last.offset + last.size <= info.viewportEndOffset + 2)
         }
     }
 
@@ -178,7 +181,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     val lastLen = cm.messages.lastOrNull()?.text?.length ?: 0
     LaunchedEffect(cm.messages.size, lastLen, cm.busy.value) {
         val total = cm.messages.size + if (cm.busy.value) 1 else 0
-        if (total > 0 && atBottom) listState.animateScrollToItem(total - 1)
+        if (total > 0 && atBottom) listState.animateScrollToItem(total - 1, Int.MAX_VALUE)
     }
     // Opening a session (esp. the Assistant): its history replays in asynchronously, so jump to the
     // latest message and keep pinning to the bottom until the replay settles — never land at the top.
@@ -186,7 +189,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         var lastSize = -1; var stable = 0
         while (stable < 4) {
             val total = cm.messages.size + if (cm.busy.value) 1 else 0
-            if (total > 0 && total != lastSize) { listState.scrollToItem(total - 1); stable = 0 } else stable++
+            if (total > 0 && total != lastSize) { listState.scrollToItem(total - 1, Int.MAX_VALUE); stable = 0 } else stable++
             lastSize = total
             kotlinx.coroutines.delay(90)
         }
@@ -268,7 +271,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
             if (cm.onAssistant && !hintDismissed) AssistantHint {
                 hintDismissed = true; cm.store.assistantHintSeen = true
             }
-            ModelBar(cm.config.value, cm.usage.value, showConfig) { showConfig = !showConfig }
+            // Model/mode picker opens from the Tune button in the top bar (no always-on bar).
             if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
                 cm.configuredProviders, cm.knownModels.value, cm::setOption, cm::compact)
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -296,7 +299,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                     if (!atBottom) SmallFloatingActionButton(
                         onClick = {
                             val total = cm.messages.size + if (cm.busy.value) 1 else 0
-                            scope.launch { listState.animateScrollToItem((total - 1).coerceAtLeast(0)) }
+                            scope.launch { listState.animateScrollToItem((total - 1).coerceAtLeast(0), Int.MAX_VALUE) }
                         },
                         modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
                     ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
@@ -850,7 +853,6 @@ private fun relativeTime(iso: String): String = runCatching {
 private fun AssistantStatusCard(cm: ConnectionManager) {
     val last = cm.store.lastBriefingAt
     val ago = if (last > 0L) relativeTime(java.time.Instant.ofEpochMilli(last).toString()) else "none yet"
-    val headline = cm.store.lastBriefingText.trim()
     Surface(
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -865,9 +867,6 @@ private fun AssistantStatusCard(cm: ConnectionManager) {
                 Text("Assistant", style = MaterialTheme.typography.titleSmall)
                 Text("Watching · hourly 7 AM–10 PM · last briefing $ago",
                     style = MaterialTheme.typography.bodySmall)
-                if (headline.isNotBlank()) Text(headline, style = MaterialTheme.typography.bodySmall,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 4.dp))
             }
             Spacer(Modifier.width(8.dp))
             Surface(color = if (cm.online.value) Color(0xFF3DDC84) else MaterialTheme.colorScheme.error,
