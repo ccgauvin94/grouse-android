@@ -114,6 +114,18 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
 fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     val ctx = LocalContext.current
     var showConfig by remember { mutableStateOf(false) }
+    var showSchedule by remember { mutableStateOf(false) }
+    // Assistant health from last-briefing recency (briefings run hourly 7 AM–10 PM). Green = fresh,
+    // yellow = late, red = stale/never. Overnight the gap grows to ~9h and that's still healthy.
+    val lastBriefing = cm.store.lastBriefingAt
+    val briefingAgo = if (lastBriefing > 0)
+        relativeTime(java.time.Instant.ofEpochMilli(lastBriefing).toString()) else "none yet"
+    val briefingAgeMin = if (lastBriefing > 0) (System.currentTimeMillis() - lastBriefing) / 60000 else Long.MAX_VALUE
+    val briefingActiveHrs = java.time.ZonedDateTime.now().hour in 7..22
+    val briefingHealthy = lastBriefing > 0 &&
+        (if (briefingActiveHrs) briefingAgeMin <= 90 else briefingAgeMin <= 12 * 60)
+    val briefingLate = lastBriefing > 0 && !briefingHealthy &&
+        (if (briefingActiveHrs) briefingAgeMin <= 180 else briefingAgeMin <= 15 * 60)
     var hintDismissed by remember { mutableStateOf(cm.store.assistantHintSeen) }
     // rememberSaveable so a rotation/dark-mode recreate doesn't wipe the typed draft.
     var input by rememberSaveable { mutableStateOf("") }
@@ -210,6 +222,28 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         dismissButton = { TextButton(onClick = { showVisionWarn = false }) { Text("Cancel") } },
     )
 
+    if (showSchedule) AlertDialog(
+        onDismissRequest = { showSchedule = false },
+        confirmButton = { TextButton(onClick = { showSchedule = false }) { Text("Close") } },
+        title = { Text("Assistant briefings") },
+        text = {
+            Column {
+                Text("Runs hourly, 7 AM–10 PM.")
+                Spacer(Modifier.height(6.dp))
+                Text("Last briefing: $briefingAgo")
+                Text("Status: " + when {
+                    briefingHealthy -> "up to date"
+                    briefingLate -> "running late"
+                    lastBriefing <= 0L -> "no briefings yet"
+                    else -> "not updating"
+                })
+                Spacer(Modifier.height(8.dp))
+                Text("Schedule is managed on the server.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            }
+        },
+    )
+
     Scaffold(topBar = {
         TopAppBar(
             title = {
@@ -237,9 +271,18 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                 }
             },
             actions = {
-                IconButton(onClick = { cm.openAssistant() }) {
-                    Icon(Icons.Filled.Psychology, contentDescription = "assistant",
-                        tint = if (cm.onAssistant) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                IconButton(onClick = { if (cm.onAssistant) showSchedule = true else cm.openAssistant() }) {
+                    val dot = when {
+                        briefingHealthy -> Color(0xFF3DDC84)                     // fresh → green
+                        briefingLate -> Color(0xFFF5A623)                        // late → amber
+                        else -> MaterialTheme.colorScheme.error                  // stale/never → red
+                    }
+                    Box {
+                        Icon(Icons.Filled.Psychology, contentDescription = "assistant",
+                            tint = if (cm.onAssistant) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                        Surface(color = dot, shape = RoundedCornerShape(50),
+                            modifier = Modifier.size(9.dp).align(Alignment.TopEnd)) {}
+                    }
                 }
                 IconButton(onClick = { cm.listSessions(); nav.navigate("sessions") }) {
                     Icon(Icons.Filled.History, contentDescription = "sessions")
@@ -254,7 +297,6 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
         )
     }) { pad ->
         Column(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
-            if (cm.onAssistant) AssistantStatusCard(cm)
             if (cm.onAssistant && !hintDismissed) AssistantHint {
                 hintDismissed = true; cm.store.assistantHintSeen = true
             }
@@ -835,32 +877,6 @@ private fun relativeTime(iso: String): String = runCatching {
     }
 }.getOrElse { iso.take(16).replace('T', ' ') }
 
-/** Status header shown when the on-screen conversation is the privileged assistant thread. */
-@Composable
-private fun AssistantStatusCard(cm: ConnectionManager) {
-    val last = cm.store.lastBriefingAt
-    val ago = if (last > 0L) relativeTime(java.time.Instant.ofEpochMilli(last).toString()) else "none yet"
-    Surface(
-        color = MaterialTheme.colorScheme.primaryContainer,
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
-    ) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-            Icon(Icons.Filled.Psychology, contentDescription = null,
-                modifier = Modifier.size(22.dp).padding(top = 2.dp))
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text("Assistant", style = MaterialTheme.typography.titleSmall)
-                Text("Watching · hourly 7 AM–10 PM · last briefing $ago",
-                    style = MaterialTheme.typography.bodySmall)
-            }
-            Spacer(Modifier.width(8.dp))
-            Surface(color = if (cm.online.value) Color(0xFF3DDC84) else MaterialTheme.colorScheme.error,
-                shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp).padding(top = 4.dp)) {}
-        }
-    }
-}
 
 /** One-time hint on the assistant thread explaining what this privileged conversation is. */
 @Composable
