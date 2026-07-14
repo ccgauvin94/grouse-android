@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "goose-android"
+rootProject.name = "grouse-android"
 include(":app")

@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import android.os.Build
 import androidx.biometric.BiometricManager
@@ -31,7 +31,7 @@ object Biometric {
             }
         )
         val info = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Unlock Goose")
+            .setTitle("Unlock Grouse")
             .setSubtitle("Authenticate to reach your agent")
             .setAllowedAuthenticators(AUTH)
             .apply {

@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import android.content.Context
 import android.content.SharedPreferences

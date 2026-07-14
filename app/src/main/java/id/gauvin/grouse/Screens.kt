@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import android.content.Context
 import android.net.Uri
@@ -76,7 +76,7 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
     var port by remember { mutableStateOf(cm.store.port) }
     var key by remember { mutableStateOf("") }
     var showKey by remember { mutableStateOf(false) }
-    Scaffold(topBar = { TopAppBar(title = { Text("Connect to Goose") }) }) { pad ->
+    Scaffold(topBar = { TopAppBar(title = { Text("Connect to Grouse") }) }) { pad ->
         Column(
             Modifier.padding(pad).padding(24.dp).fillMaxWidth().verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -85,7 +85,7 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
             Icon(Icons.Filled.Psychology, contentDescription = null,
                 modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(10.dp))
-            Text("Welcome to Goose", style = MaterialTheme.typography.headlineSmall)
+            Text("Welcome to Grouse", style = MaterialTheme.typography.headlineSmall)
             Text("Connect to your self-hosted goosed over the tailnet.",
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline,
                 textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
@@ -265,8 +265,8 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                     Text(when {
                         cm.onAssistant && busy -> "Assistant · working…"
                         cm.onAssistant -> "Assistant"
-                        online && busy -> "Goose · working…"
-                        online -> "Goose"
+                        online && busy -> "Grouse · working…"
+                        online -> "Grouse"
                         cm.status.value.contains("connect", true) ||
                             cm.status.value.contains("load", true) -> "Connecting…"
                         else -> "Offline · tap to reconnect"
@@ -639,8 +639,8 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                 SettingCaption("Hands-free voice can use a faster model to cut self-hosted latency " +
                     "(e.g. openrouter / z-ai/glm-5.2). Blank = your chat model.")
                 HorizontalDivider(Modifier.padding(top = 8.dp))
-                SettingsNavRow("Set Goose as device assistant",
-                    "Assist gesture / power-button hold opens voice Goose (read-only).") {
+                SettingsNavRow("Set Grouse as device assistant",
+                    "Assist gesture / power-button hold opens voice Grouse (read-only).") {
                     runCatching {
                         ctx.startActivity(android.content.Intent(
                             android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)

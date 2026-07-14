@@ -1,4 +1,4 @@
-package id.gauvin.goose.ui.theme
+package id.gauvin.grouse.ui.theme
 
 import androidx.compose.material3.Typography
 

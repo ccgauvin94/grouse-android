@@ -1,4 +1,4 @@
-package id.gauvin.goose.ui.theme
+package id.gauvin.grouse.ui.theme
 
 import android.app.Activity
 import android.os.Build

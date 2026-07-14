@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:sessionService="id.gauvin.goose.GooseVoiceSessionService"
-    android:recognitionService="id.gauvin.goose.GooseRecognitionService"
+    android:sessionService="id.gauvin.grouse.GooseVoiceSessionService"
+    android:recognitionService="id.gauvin.grouse.GooseRecognitionService"
     android:supportsAssist="true" />

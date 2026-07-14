@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import android.content.Context
 import android.graphics.Color
@@ -111,7 +111,7 @@ class GooseVoiceSession(context: Context) : VoiceInteractionSession(context) {
         card.post { card.translationY = card.height.toFloat(); card.animate().translationY(0f).setDuration(180).start() }
         observe()
         if (!cm.configured) {
-            statusView.text = "Open Goose and connect first"
+            statusView.text = "Open Grouse and connect first"
             micButton.text = "Close"; micButton.setOnClickListener { hide() }
             return
         }
@@ -131,14 +131,14 @@ class GooseVoiceSession(context: Context) : VoiceInteractionSession(context) {
                         "error" -> "Error: ${last.text}"
                         else -> cm.messages.lastOrNull { it.role == "assistant" }?.text ?: "(no response)"
                     }
-                    statusView.text = "Goose"
+                    statusView.text = "Grouse"
                     micButton.text = "🎤  Ask a follow-up"
                 }
             }
         }
         scope.launch {
             snapshotFlow { cm.messages.lastOrNull { it.role == "assistant" }?.text ?: "" }.collect { streamed ->
-                if (awaitingReply && streamed.isNotBlank()) { statusView.text = "Goose"; gooseView.text = streamed }
+                if (awaitingReply && streamed.isNotBlank()) { statusView.text = "Grouse"; gooseView.text = streamed }
             }
         }
         scope.launch {

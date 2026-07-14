@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "id.gauvin.goose"
+    namespace = "id.gauvin.grouse"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "id.gauvin.goose"
+        applicationId = "id.gauvin.grouse"
         minSdk = 26
         targetSdk = 34
         versionCode = 1

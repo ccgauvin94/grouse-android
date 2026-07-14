@@ -42,7 +42,7 @@
                 <data android:mimeType="image/*" />
             </intent-filter>
             <intent-filter>
-                <action android:name="id.gauvin.goose.NEW_CHAT" />
+                <action android:name="id.gauvin.grouse.NEW_CHAT" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <meta-data
@@ -70,7 +70,7 @@
             android:name=".ReplyReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="id.gauvin.goose.action.REPLY" />
+                <action android:name="id.gauvin.grouse.action.REPLY" />
             </intent-filter>
         </receiver>
 

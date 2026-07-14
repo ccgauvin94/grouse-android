@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import okhttp3.OkHttpClient
 import java.security.SecureRandom

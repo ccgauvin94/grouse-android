@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import android.app.Activity
 import android.content.Context
@@ -58,7 +58,7 @@ class GoosePushService : PushService() {
         if (type == "turn" && session != null && session != cm.store.lastSessionId) return
         // During a voice interaction the assistant speaks the reply itself — don't also notify.
         if (type == "turn" && cm.recentVoice()) return
-        // Finished-turn alert → "Goose replied", tap deep-links to that session. Briefings carry
+        // Finished-turn alert → "Grouse replied", tap deep-links to that session. Briefings carry
         // the persistent "goose-assistant" thread id → tap lands in that ongoing chat.
         val notifier = Notifier(this)
         if (type == "turn") notifier.postReply(text, session) else {

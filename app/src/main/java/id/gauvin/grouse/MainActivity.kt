@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import android.Manifest
 import android.content.Intent
@@ -29,7 +29,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import id.gauvin.goose.ui.theme.GooseTheme
+import id.gauvin.grouse.ui.theme.GooseTheme
 
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,9 +67,9 @@ class MainActivity : FragmentActivity() {
     }
 
     companion object {
-        const val ACTION_NEW_CHAT = "id.gauvin.goose.NEW_CHAT"
-        const val ACTION_OPEN_SESSION = "id.gauvin.goose.OPEN_SESSION"
-        const val EXTRA_SESSION_ID = "id.gauvin.goose.extra.SESSION_ID"
+        const val ACTION_NEW_CHAT = "id.gauvin.grouse.NEW_CHAT"
+        const val ACTION_OPEN_SESSION = "id.gauvin.grouse.OPEN_SESSION"
+        const val EXTRA_SESSION_ID = "id.gauvin.grouse.extra.SESSION_ID"
     }
 }
 
@@ -174,7 +174,7 @@ fun LockScreen(error: String?, onUnlock: () -> Unit) {
             Icon(Icons.Filled.Lock, contentDescription = null, modifier = Modifier.size(48.dp),
                 tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(10.dp))
-            Text("Goose is locked", style = MaterialTheme.typography.titleMedium)
+            Text("Grouse is locked", style = MaterialTheme.typography.titleMedium)
             if (error != null) {
                 Spacer(Modifier.height(4.dp))
                 Text(error, style = MaterialTheme.typography.bodySmall,

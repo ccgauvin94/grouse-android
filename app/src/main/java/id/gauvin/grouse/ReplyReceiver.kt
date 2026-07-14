@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import android.app.NotificationManager
 import android.content.BroadcastReceiver

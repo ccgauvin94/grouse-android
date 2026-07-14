@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import kotlinx.serialization.json.*
 import okhttp3.*

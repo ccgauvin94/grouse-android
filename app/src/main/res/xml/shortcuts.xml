@@ -7,8 +7,8 @@
         android:shortcutShortLabel="@string/new_chat"
         android:shortcutLongLabel="@string/new_chat_long">
         <intent
-            android:action="id.gauvin.goose.NEW_CHAT"
-            android:targetPackage="id.gauvin.goose"
-            android:targetClass="id.gauvin.goose.MainActivity" />
+            android:action="id.gauvin.grouse.NEW_CHAT"
+            android:targetPackage="id.gauvin.grouse"
+            android:targetClass="id.gauvin.grouse.MainActivity" />
     </shortcut>
 </shortcuts>

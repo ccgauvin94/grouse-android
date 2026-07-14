@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import android.app.Application
 import androidx.lifecycle.DefaultLifecycleObserver

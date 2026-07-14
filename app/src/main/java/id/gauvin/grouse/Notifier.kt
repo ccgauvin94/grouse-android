@@ -1,4 +1,4 @@
-package id.gauvin.goose
+package id.gauvin.grouse
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -15,7 +15,7 @@ import androidx.core.app.RemoteInput
 class Notifier(context: Context) {
     private val app = context.applicationContext
     private val nm = app.getSystemService(NotificationManager::class.java)
-    private val goosePerson = Person.Builder().setName("Goose").setKey("goose").build()
+    private val goosePerson = Person.Builder().setName("Grouse").setKey("goose").build()
     private val youPerson = Person.Builder().setName("You").setKey("you").build()
 
     init {
@@ -46,7 +46,7 @@ class Notifier(context: Context) {
     fun ongoing(text: String): Notification =
         NotificationCompat.Builder(app, CH_ONGOING)
             .setSmallIcon(R.drawable.ic_stat_goose)
-            .setContentTitle("Goose")
+            .setContentTitle("Grouse")
             .setContentText(text)
             .setContentIntent(openApp())
             .setOngoing(true)
@@ -92,13 +92,13 @@ class Notifier(context: Context) {
 
     /** Turn finished while backgrounded: show the reply, tap deep-links to its session. */
     fun postReply(text: String, sessionId: String? = null) =
-        postReplyable("Goose replied", text, 1, ID_ALERT, sessionId)
+        postReplyable("Grouse replied", text, 1, ID_ALERT, sessionId)
 
     /** goose is blocked on a tool approval while backgrounded. */
     fun postApprovalNeeded(tool: String) {
         val n = NotificationCompat.Builder(app, CH_ALERT)
             .setSmallIcon(R.drawable.ic_stat_goose)
-            .setContentTitle("Goose needs approval")
+            .setContentTitle("Grouse needs approval")
             .setContentText("Allow “$tool”? Open to decide.")
             .setContentIntent(openApp())
             .setAutoCancel(true)
@@ -108,7 +108,7 @@ class Notifier(context: Context) {
 
     /** A proactive briefing; tap deep-links to the persistent goose-assistant thread. */
     fun postProactive(text: String, sessionId: String? = null) =
-        postReplyable("Goose briefing", text, 2, ID_PROACTIVE, sessionId)
+        postReplyable("Grouse briefing", text, 2, ID_PROACTIVE, sessionId)
 
     fun cancelAlert() = nm.cancel(ID_ALERT)
 
@@ -124,8 +124,8 @@ class Notifier(context: Context) {
         const val ID_ALERT = 2
         const val ID_PROACTIVE = 3
         const val KEY_REPLY = "goose_reply_text"
-        const val ACTION_REPLY = "id.gauvin.goose.action.REPLY"
-        const val ACTION_MARK_READ = "id.gauvin.goose.action.MARK_READ"
-        const val EXTRA_NOTIF_ID = "id.gauvin.goose.extra.NOTIF_ID"
+        const val ACTION_REPLY = "id.gauvin.grouse.action.REPLY"
+        const val ACTION_MARK_READ = "id.gauvin.grouse.action.MARK_READ"
+        const val EXTRA_NOTIF_ID = "id.gauvin.grouse.extra.NOTIF_ID"
     }
 }
