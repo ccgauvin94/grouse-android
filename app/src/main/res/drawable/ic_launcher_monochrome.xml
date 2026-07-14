@@ -1,17 +1,12 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <!-- Single-color goose silhouette for themed (monochrome) icons; system tints it. -->
-    <group android:scaleX="1.05" android:scaleY="1.05" android:pivotX="54" android:pivotY="54">
-        <path android:fillColor="#000000"
-            android:pathData="M30,70 a24,22 0 1,0 48,0 a24,22 0 1,0 -48,0 Z" />
-        <path android:fillColor="#000000"
-            android:pathData="M50,60 C50,44 58,34 66,32 C72,31 75,36 71,41 C66,48 60,54 60,64 Z" />
-        <path android:fillColor="#000000"
-            android:pathData="M62,30 a9,9 0 1,0 18,0 a9,9 0 1,0 -18,0 Z" />
-        <path android:fillColor="#000000"
-            android:pathData="M79,27 l11,2 l-10,6 Z" />
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Single-color grouse silhouette for themed (monochrome) icons; system tints it. -->
+    <group android:translateY="2">
+        <path android:fillColor="#000000" android:pathData="M30,56 L10,42 L24,68 Z" />
+        <path android:fillColor="#000000" android:pathData="M24,63 a26,23 0 1,0 52,0 a26,23 0 1,0 -52,0 Z" />
+        <path android:fillColor="#000000" android:pathData="M55,53 L64,42 L79,53 L72,63 Z" />
+        <path android:fillColor="#000000" android:pathData="M60,45 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0 Z" />
+        <path android:fillColor="#000000" android:pathData="M80,43 l12,3 l-11,5 Z" />
     </group>
 </vector>

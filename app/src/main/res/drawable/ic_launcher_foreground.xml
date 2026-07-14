@@ -1,24 +1,17 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <!-- Goose: round body + S-neck + head + beak, sitting in the adaptive safe zone. -->
-    <group android:scaleX="1.05" android:scaleY="1.05" android:pivotX="54" android:pivotY="54">
-        <!-- body -->
-        <path android:fillColor="#FFFFFF"
-            android:pathData="M30,70 a24,22 0 1,0 48,0 a24,22 0 1,0 -48,0 Z" />
-        <!-- neck -->
-        <path android:fillColor="#FFFFFF"
-            android:pathData="M50,60 C50,44 58,34 66,32 C72,31 75,36 71,41 C66,48 60,54 60,64 Z" />
-        <!-- head -->
-        <path android:fillColor="#FFFFFF"
-            android:pathData="M62,30 a9,9 0 1,0 18,0 a9,9 0 1,0 -18,0 Z" />
-        <!-- beak -->
-        <path android:fillColor="#F2B01E"
-            android:pathData="M79,27 l11,2 l-10,6 Z" />
-        <!-- eye (negative space) -->
-        <path android:fillColor="#4C662B"
-            android:pathData="M70,28 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0 Z" />
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Grouse (gruvbox): plump body, short neck, small head with the red eyebrow-comb,
+         stubby upswept tail. eye + folded-wing are filled with the bg color (#282828) as
+         negative space, so they read as cut-outs against the adaptive background layer. -->
+    <group android:translateY="2">
+        <path android:fillColor="#ebdbb2" android:pathData="M30,56 L10,42 L24,68 Z" />
+        <path android:fillColor="#ebdbb2" android:pathData="M24,63 a26,23 0 1,0 52,0 a26,23 0 1,0 -52,0 Z" />
+        <path android:fillColor="#ebdbb2" android:pathData="M55,53 L64,42 L79,53 L72,63 Z" />
+        <path android:fillColor="#ebdbb2" android:pathData="M60,45 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0 Z" />
+        <path android:fillColor="#282828" android:pathData="M39,56 C52,51 65,57 70,68 C58,64 48,65 39,66 Z" />
+        <path android:fillColor="#fabd2f" android:pathData="M80,43 l12,3 l-11,5 Z" />
+        <path android:fillColor="#fb4934" android:pathData="M62,37 q4,-6 10,-3 q-3,3 -8,4 Z" />
+        <path android:fillColor="#282828" android:pathData="M65.6,45 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0 Z" />
     </group>
 </vector>
