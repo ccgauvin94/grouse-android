@@ -57,6 +57,8 @@ sealed interface AcpEvent {
     data class Commands(val names: List<String>) : AcpEvent
     data class Usage(val used: Int, val size: Int, val cost: Double, val currency: String) : AcpEvent
     data class Chart(val spec: String) : AcpEvent   // Chart.js-shaped JSON from autovisualiser
+    /** Reply to a config read: the requested key and its string value (empty if unset). */
+    data class ServerConfig(val key: String, val value: String) : AcpEvent
     data class Permission(
         val toolCallId: String, val title: String, val detail: String, val options: List<PermOption>,
     ) : AcpEvent
@@ -80,6 +82,7 @@ class AcpClient(
     private val nextId = AtomicInteger(1)
     // Touched from both the main thread (outbound rpc) and the OkHttp WS thread (responses).
     private val pending = ConcurrentHashMap<Int, String>()      // request id -> method we sent
+    private val pendingConfigKeys = ConcurrentHashMap<Int, String>()  // config/read id -> key
     private var sessionId: String? = null
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     // Outstanding tool-approval requests: toolCallId -> the JSON-RPC id we must answer.
@@ -121,6 +124,29 @@ class AcpClient(
     fun setExtensionEnabled(configKey: String, enabled: Boolean) =
         rpc("_goose/unstable/config/extensions/set-enabled", buildJsonObject {
             put("configKey", configKey); put("enabled", enabled)
+        })
+
+    /** Read a global goose config value (e.g. GOOSE_FAST_MODEL). Reply arrives as
+     *  AcpEvent.ServerConfig. These live in goose's config.yaml, NOT per-session — so the
+     *  value only takes effect for NEW sessions/tasks, and an env var of the same name in the
+     *  container would override it (we moved GOOSE_FAST_MODEL out of .env.goose for this). */
+    fun readConfig(key: String): Int {
+        val id = rpc("_goose/unstable/config/read", buildJsonObject { put("key", key) })
+        pendingConfigKeys[id] = key   // the read reply doesn't echo the key; recover it here
+        return id
+    }
+
+    /** Upsert a global goose config value; server replies empty, so we re-read to confirm. */
+    fun upsertConfig(key: String, value: String) =
+        rpc("_goose/unstable/config/upsert", buildJsonObject {
+            put("key", key); put("value", value)
+        })
+
+    /** Rename a session (sets its title). Used by the assistant-thread reset: the old thread is
+     *  renamed aside and a fresh one is renamed to "goose-assistant". Server replies empty. */
+    fun renameSession(targetSessionId: String, title: String) =
+        rpc("_goose/unstable/session/rename", buildJsonObject {
+            put("sessionId", targetSessionId); put("title", title)
         })
 
     /** Change a session config knob; server replies with the refreshed configOptions. */
@@ -261,6 +287,21 @@ class AcpClient(
             "_goose/unstable/config/extensions/list" -> onEvent(AcpEvent.Extensions(parseExtensions(result)))
             // After a toggle, re-list so the UI reflects the new enabled state.
             "_goose/unstable/config/extensions/set-enabled" -> listExtensions()
+            "_goose/unstable/config/read" -> {
+                // The reply doesn't echo the key, so recover it from the request we cached.
+                val key = pendingConfigKeys.remove(id) ?: return
+                val v = result?.get("value")
+                val s = when (v) {
+                    is JsonPrimitive -> v.contentOrNull ?: ""
+                    null -> ""
+                    else -> v.toString()
+                }
+                onEvent(AcpEvent.ServerConfig(key, s))
+            }
+            // Upsert returns empty; nothing to reflect (the caller re-reads if it wants confirmation).
+            "_goose/unstable/config/upsert" -> {}
+            // Rename returns empty; the caller re-lists sessions to see the new title.
+            "_goose/unstable/session/rename" -> {}
             "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))
             "session/set_mode" -> {}
             "session/prompt" ->

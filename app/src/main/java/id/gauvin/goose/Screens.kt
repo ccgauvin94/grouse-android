@@ -34,7 +34,10 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -674,12 +677,51 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                 }
                 SettingCaption("How the privileged Assistant thread handles write/shell actions. " +
                     "Other chats always ask; voice stays read-only.")
+                HorizontalDivider()
+                // Reset the assistant thread (rename-aside + recreate) — for when it jams.
+                var confirmReset by remember { mutableStateOf(false) }
+                SettingsNavRow("Reset assistant thread",
+                    "Start a fresh conversation. The old one is kept, renamed aside.") {
+                    confirmReset = true
+                }
+                if (confirmReset) AlertDialog(
+                    onDismissRequest = { confirmReset = false },
+                    title = { Text("Reset assistant thread?") },
+                    text = { Text("Your current assistant conversation is renamed aside (history " +
+                        "preserved) and a fresh empty thread takes its place. Use this if the " +
+                        "assistant has stopped responding.") },
+                    confirmButton = { TextButton(onClick = {
+                        confirmReset = false; cm.resetAssistant(); nav.popBackStack()
+                    }) { Text("Reset") } },
+                    dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
+                )
             }
 
             SettingsSection("Models") {
                 SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
                 SettingCaption("Off shows only providers set up on your goose (openai, openrouter). " +
                     "On lists goose's full catalog.")
+                HorizontalDivider()
+                // App-editable global goose settings (config.yaml over ACP). Loaded on entry.
+                LaunchedEffect(cm.online.value) { if (cm.online.value) cm.loadServerConfig() }
+                var ctxLimit by remember { mutableStateOf("") }
+                LaunchedEffect(cm.serverContextLimit.value) {
+                    if (cm.serverContextLimit.value.isNotBlank()) ctxLimit = cm.serverContextLimit.value
+                }
+                OutlinedTextField(
+                    value = ctxLimit, onValueChange = { ctxLimit = it.filter(Char::isDigit) },
+                    label = { Text("Context limit (tokens)") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    trailingIcon = {
+                        val cur = cm.serverContextLimit.value
+                        if (ctxLimit.isNotBlank() && ctxLimit != cur)
+                            TextButton(onClick = { cm.setServerConfig("GOOSE_CONTEXT_LIMIT", ctxLimit) }) { Text("Save") }
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                SettingCaption("goose's working window before it compacts. Keep it BELOW the model's " +
+                    "context size (leave room to reply) — and the fast model must be at least this " +
+                    "big to compact. Takes effect on new chats. Fast model: " +
+                    cm.serverFastModel.value.ifBlank { "—" } + ".")
             }
 
             SettingsSection("Notifications & background") {
@@ -707,6 +749,20 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             SettingsSection("Appearance") {
                 SettingsSwitchRow("Material You dynamic color", cm.dynamicColor.value) { cm.setDynamicColor(it) }
                 SettingCaption("Off uses the built-in goose-green palette.")
+            }
+
+            SettingsSection("Security") {
+                val bioAvailable = remember { ctx.findActivity()?.let {
+                    it is androidx.fragment.app.FragmentActivity && Biometric.available(it) } ?: false }
+                var bioLock by remember { mutableStateOf(cm.store.biometricLock) }
+                SettingsSwitchRow("Require biometric unlock", bioLock && bioAvailable) { on ->
+                    bioLock = on; cm.store.biometricLock = on
+                }
+                SettingCaption(if (bioAvailable)
+                    "Off by default. When on, opening the app (or reconnecting with the saved key) " +
+                    "needs your fingerprint/face or device PIN. Takes effect next launch."
+                else "No biometric or device credential is enrolled on this device, so the lock " +
+                    "can't be enabled.")
             }
 
             Spacer(Modifier.height(24.dp))

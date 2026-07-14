@@ -147,6 +147,45 @@ class ConnectionManager private constructor(context: Context) {
         if (id != null) openSession(id) else { pendingOpenAssistant = true; listSessions() }
     }
 
+    // --- Assistant-thread reset (rename-aside + recreate) ---
+    @Volatile private var pendingAssistantRename = false
+
+    /** Reset the privileged assistant thread: rename the current one aside (history kept — it
+     *  becomes "goose-assistant-archived-<yyyymmdd>", so deliver.sh's name-grep and the app's
+     *  title match both stop resolving it), then open a fresh session which is renamed to
+     *  ASSISTANT_TITLE once it's live (see the Ready handler). Used when the thread jams (e.g.
+     *  context overflow). Cheap: no server-side deletion. */
+    fun resetAssistant() {
+        val old = assistantSessionId()
+        if (old != null) {
+            client?.renameSession(old, "$ASSISTANT_TITLE-archived-${archiveStamp()}")
+        }
+        store.assistantSessionId = null
+        pendingAssistantRename = true
+        newSession()   // fresh session/new; renamed to ASSISTANT_TITLE in the Ready branch
+    }
+
+    /** yyyymmdd from the wall clock, only for a human-readable archived-thread suffix. */
+    private fun archiveStamp(): String =
+        java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(java.util.Date())
+
+    // --- Server-side goose config (global config.yaml, edited over ACP) ---
+    /** Current server values, populated by loadServerConfig(); empty until read. */
+    val serverContextLimit = mutableStateOf("")
+    val serverFastModel = mutableStateOf("")
+
+    /** Read the app-editable global goose settings so Settings can show current values. */
+    fun loadServerConfig() {
+        client?.readConfig("GOOSE_CONTEXT_LIMIT")
+        client?.readConfig("GOOSE_FAST_MODEL")
+    }
+
+    /** Upsert a global goose setting (takes effect for NEW sessions/tasks), then re-read to confirm. */
+    fun setServerConfig(key: String, value: String) {
+        client?.upsertConfig(key, value)
+        client?.readConfig(key)
+    }
+
     fun setOption(configId: String, value: String) {
         store.saveOption(configId, value)
         client?.setConfigOption(configId, value)
@@ -322,8 +361,19 @@ class ConnectionManager private constructor(context: Context) {
                 // Remember real model slugs PER PROVIDER (goose only lists featured + "current"),
                 // then expose only the current provider's models so LocalAI/OpenRouter don't mix.
                 val provider = ev.options.firstOrNull { it.id == "provider" }?.currentValue ?: ""
-                ev.options.firstOrNull { it.id == "model" }?.currentValue?.let { m ->
-                    if (m.isNotBlank() && m != "current") store.addKnownModel(provider, m)
+                val modelOpt = ev.options.firstOrNull { it.id == "model" }
+                modelOpt?.currentValue?.let { m ->
+                    if (m.isNotBlank() && m != "current") {
+                        // Guard the provider/model pairing: during a provider switch goose can emit
+                        // a Config where `provider` already flipped but `model` is still the old
+                        // provider's slug, which would poison the wrong bucket (OpenRouter slugs
+                        // leaking into openai's list). Only record when the slug's shape matches the
+                        // provider's featured models — OpenRouter = "vendor/slug", LocalAI = bare.
+                        val featuredSlashed = modelOpt.choices.map { it.value }
+                            .firstOrNull { it != "current" }?.contains("/")
+                        if (featuredSlashed == null || featuredSlashed == m.contains("/"))
+                            store.addKnownModel(provider, m)
+                    }
                 }
                 knownModels.value = if (provider.isNotBlank()) store.knownModels(provider) else emptySet()
             }
@@ -331,6 +381,13 @@ class ConnectionManager private constructor(context: Context) {
                 live = true; connecting = false; online.value = true
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
                 currentSession.value = ev.sessionId
+                // Finishing an assistant reset: name this fresh session so both the app (title
+                // match) and deliver.sh (name-grep) resolve it as the assistant thread again.
+                if (pendingAssistantRename) {
+                    pendingAssistantRename = false
+                    client?.renameSession(ev.sessionId, ASSISTANT_TITLE)
+                    store.assistantSessionId = ev.sessionId
+                }
                 client?.listSessions()   // so the Assistant thread can be resolved by title
                 // Flush every queued send (bubbles were already added when queued).
                 while (pendingSends.isNotEmpty()) {
@@ -342,6 +399,12 @@ class ConnectionManager private constructor(context: Context) {
                 sessions.value = ev.list
                 assistantSessionId()?.let { store.assistantSessionId = it }   // cache for startup landing
                 if (pendingOpenAssistant) { pendingOpenAssistant = false; assistantSessionId()?.let { openSession(it) } }
+            }
+            is AcpEvent.ServerConfig -> {
+                when (ev.key) {
+                    "GOOSE_CONTEXT_LIMIT" -> serverContextLimit.value = ev.value
+                    "GOOSE_FAST_MODEL" -> serverFastModel.value = ev.value
+                }
             }
             is AcpEvent.Commands -> commands.value = ev.names
             is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }

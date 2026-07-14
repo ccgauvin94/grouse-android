@@ -75,8 +75,9 @@ class MainActivity : FragmentActivity() {
 
 @Composable
 fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
-    // Lock the app behind biometrics whenever a key is stored and an authenticator is enrolled.
-    val needsLock = remember { cm.configured && Biometric.available(activity) }
+    // Lock the app behind biometrics only when the user has opted in (Settings › Security,
+    // default off) AND a key is stored AND an authenticator is enrolled.
+    val needsLock = remember { cm.store.biometricLock && cm.configured && Biometric.available(activity) }
     // Plain `remember` (NOT rememberSaveable): a saved `unlocked=true` would survive process death
     // and let the app reopen without a prompt. Any recreation must re-lock.
     var unlocked by remember { mutableStateOf(!needsLock) }

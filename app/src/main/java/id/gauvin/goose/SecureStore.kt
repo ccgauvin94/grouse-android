@@ -59,6 +59,21 @@ class SecureStore(context: Context) {
                 .remove("known_models")
                 .apply()
         }
+        // One-time sanitize: a provider-switch race let OpenRouter slugs ("vendor/model") get
+        // recorded under non-OpenRouter buckets and vice-versa, so the openai picker listed
+        // OpenRouter models. A "/"-shaped slug is always a routed cloud model; a bare name is
+        // never an OpenRouter id. Purge the mismatches from every known_models_* bucket.
+        if (!cfg.getBoolean("known_models_sanitized", false)) {
+            val edit = cfg.edit()
+            cfg.all.keys.filter { it.startsWith("known_models_") }.forEach { key ->
+                val provider = key.removePrefix("known_models_")
+                val cur = cfg.getStringSet(key, emptySet()) ?: emptySet()
+                val cleaned = if (provider == "openrouter") cur.filter { it.contains("/") }
+                              else cur.filterNot { it.contains("/") }
+                if (cleaned.size != cur.size) edit.putStringSet(key, HashSet(cleaned))
+            }
+            edit.putBoolean("known_models_sanitized", true).apply()
+        }
     }
 
     var host: String
@@ -72,6 +87,14 @@ class SecureStore(context: Context) {
     var dynamicColor: Boolean
         get() = cfg.getBoolean("dynamic_color", true)
         set(v) = cfg.edit().putBoolean("dynamic_color", v).apply()
+
+    /** Gate app open / stored-key reconnect behind a biometric (or device-credential) prompt.
+     *  Default OFF — the transport is tailnet-only and the lock is friction most users don't
+     *  want; opt in from Settings › Security. Only takes effect when the device actually has an
+     *  authenticator enrolled (Biometric.available). */
+    var biometricLock: Boolean
+        get() = cfg.getBoolean("biometric_lock", false)
+        set(v) = cfg.edit().putBoolean("biometric_lock", v).apply()
 
     /** Keep a foreground connection alive even when idle (opt-in; costs battery). */
     var persistentConnection: Boolean
