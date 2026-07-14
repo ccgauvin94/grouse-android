@@ -16,7 +16,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Goose"
+        android:theme="@style/Theme.Grouse"
         android:usesCleartextTraffic="true">
         <meta-data
             android:name="com.google.android.gms.car.application"
