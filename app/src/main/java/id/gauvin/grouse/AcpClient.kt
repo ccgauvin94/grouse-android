@@ -131,8 +131,16 @@ class AcpClient(
      *  value only takes effect for NEW sessions/tasks, and an env var of the same name in the
      *  container would override it (we moved GOOSE_FAST_MODEL out of .env.goose for this). */
     fun readConfig(key: String): Int {
-        val id = rpc("_goose/unstable/config/read", buildJsonObject { put("key", key) })
-        pendingConfigKeys[id] = key   // the read reply doesn't echo the key; recover it here
+        // Record the key -> id mapping BEFORE the frame goes out: the reply doesn't echo the key,
+        // and on a LAN/localhost goosed the response can land before a put-after-send would run,
+        // dropping the reply. Mirror rpc()'s id/pending bookkeeping so ordering is guaranteed.
+        val id = nextId.getAndIncrement()
+        pending[id] = "_goose/unstable/config/read"
+        pendingConfigKeys[id] = key
+        ws?.send(buildJsonObject {
+            put("jsonrpc", "2.0"); put("id", id); put("method", "_goose/unstable/config/read")
+            putJsonObject("params") { put("key", key) }
+        }.toString())
         return id
     }
 
@@ -252,6 +260,7 @@ class AcpClient(
     private fun response(id: Int?, result: JsonObject?, error: JsonElement?) {
         val method = id?.let { pending.remove(it) }   // ConcurrentHashMap rejects a null key
         if (error != null && error !is JsonNull) {
+            id?.let { pendingConfigKeys.remove(it) }   // an errored config/read never reaches its dispatch — clean its key map so it can't leak
             // A stale/expired session can't be resumed — fall back to a fresh one.
             if (method == "session/load") { replaying = false; startNewSession(); return }
             onEvent(AcpEvent.Error("$method: $error")); return

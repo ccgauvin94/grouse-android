@@ -705,8 +705,11 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
                 // App-editable global goose settings (config.yaml over ACP). Loaded on entry.
                 LaunchedEffect(cm.online.value) { if (cm.online.value) cm.loadServerConfig() }
                 var ctxLimit by remember { mutableStateOf("") }
+                // Seed the field from the server value only while it's still empty — once loaded (or
+                // the user starts typing) a later async config/read reply must not clobber the input.
                 LaunchedEffect(cm.serverContextLimit.value) {
-                    if (cm.serverContextLimit.value.isNotBlank()) ctxLimit = cm.serverContextLimit.value
+                    if (cm.serverContextLimit.value.isNotBlank() && ctxLimit.isBlank())
+                        ctxLimit = cm.serverContextLimit.value
                 }
                 OutlinedTextField(
                     value = ctxLimit, onValueChange = { ctxLimit = it.filter(Char::isDigit) },
@@ -752,17 +755,21 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             }
 
             SettingsSection("Security") {
-                val bioAvailable = remember { ctx.findActivity()?.let {
-                    it is androidx.fragment.app.FragmentActivity && Biometric.available(it) } ?: false }
+                // Recomputed each recomposition (NOT remembered) so enrolling a biometric while the
+                // screen is open reflects immediately. Only affects the caption, not the toggle.
+                val bioAvailable = ctx.findActivity()
+                    ?.let { it is androidx.fragment.app.FragmentActivity && Biometric.available(it) } ?: false
                 var bioLock by remember { mutableStateOf(cm.store.biometricLock) }
-                SettingsSwitchRow("Require biometric unlock", bioLock && bioAvailable) { on ->
+                // The switch shows and controls the REAL stored value (not ANDed with availability),
+                // so it can always be turned back off — and turning it on when no authenticator is
+                // enrolled is harmless (the lock only engages when Biometric.available is true).
+                SettingsSwitchRow("Require biometric unlock", bioLock) { on ->
                     bioLock = on; cm.store.biometricLock = on
                 }
-                SettingCaption(if (bioAvailable)
-                    "Off by default. When on, opening the app (or reconnecting with the saved key) " +
-                    "needs your fingerprint/face or device PIN. Takes effect next launch."
-                else "No biometric or device credential is enrolled on this device, so the lock " +
-                    "can't be enabled.")
+                SettingCaption("Off by default. When on, opening the app (or reconnecting with the " +
+                    "saved key) needs your fingerprint/face or device PIN; takes effect next launch." +
+                    if (!bioAvailable) " (No authenticator is enrolled on this device yet, so it " +
+                        "won't engage until you add one.)" else "")
             }
 
             Spacer(Modifier.height(24.dp))

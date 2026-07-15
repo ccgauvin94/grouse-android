@@ -60,17 +60,19 @@ class SecureStore(context: Context) {
                 .apply()
         }
         // One-time sanitize: a provider-switch race let OpenRouter slugs ("vendor/model") get
-        // recorded under non-OpenRouter buckets and vice-versa, so the openai picker listed
-        // OpenRouter models. A "/"-shaped slug is always a routed cloud model; a bare name is
-        // never an OpenRouter id. Purge the mismatches from every known_models_* bucket.
+        // recorded under openai and vice-versa, so the openai picker listed OpenRouter models.
+        // Only the two providers whose slug shape is KNOWN are touched — openai ids are bare,
+        // OpenRouter ids are "vendor/model" — so a third provider whose ids legitimately contain
+        // "/" (some OpenAI-compatible gateways) is never purged. Snapshot keys before editing.
         if (!cfg.getBoolean("known_models_sanitized", false)) {
             val edit = cfg.edit()
-            cfg.all.keys.filter { it.startsWith("known_models_") }.forEach { key ->
-                val provider = key.removePrefix("known_models_")
-                val cur = cfg.getStringSet(key, emptySet()) ?: emptySet()
-                val cleaned = if (provider == "openrouter") cur.filter { it.contains("/") }
-                              else cur.filterNot { it.contains("/") }
-                if (cleaned.size != cur.size) edit.putStringSet(key, HashSet(cleaned))
+            cfg.getStringSet("known_models_openai", emptySet())?.let { cur ->
+                val cleaned = cur.filterNot { it.contains("/") }
+                if (cleaned.size != cur.size) edit.putStringSet("known_models_openai", HashSet(cleaned))
+            }
+            cfg.getStringSet("known_models_openrouter", emptySet())?.let { cur ->
+                val cleaned = cur.filter { it.contains("/") }
+                if (cleaned.size != cur.size) edit.putStringSet("known_models_openrouter", HashSet(cleaned))
             }
             edit.putBoolean("known_models_sanitized", true).apply()
         }

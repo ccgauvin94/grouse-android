@@ -147,22 +147,36 @@ class ConnectionManager private constructor(context: Context) {
         if (id != null) openSession(id) else { pendingOpenAssistant = true; listSessions() }
     }
 
-    // --- Assistant-thread reset (rename-aside + recreate) ---
-    @Volatile private var pendingAssistantRename = false
+    // --- Assistant-thread reset / (re)create ---
+    // The reset is bound to the SPECIFIC connection generation it opens (resetGen), so an
+    // unrelated Ready — e.g. the user tapping another chat before the fresh session connects —
+    // can never be mistaken for the reset's session and wrongly renamed to ASSISTANT_TITLE
+    // (which would grant that chat the privileged auto-approve policy). Both renames run on that
+    // one live socket in order, so nothing is lost to a close race. If a different open()
+    // supersedes the pending reset, it's abandoned cleanly (see open()).
+    private var resetGen = -1                 // clientGen of the reset-initiated connect
+    private var resetOldId: String? = null    // thread to archive once the fresh one is live (null = create-only)
 
-    /** Reset the privileged assistant thread: rename the current one aside (history kept — it
-     *  becomes "goose-assistant-archived-<yyyymmdd>", so deliver.sh's name-grep and the app's
-     *  title match both stop resolving it), then open a fresh session which is renamed to
-     *  ASSISTANT_TITLE once it's live (see the Ready handler). Used when the thread jams (e.g.
-     *  context overflow). Cheap: no server-side deletion. */
+    /** Reset the privileged assistant thread: archive the current one (history kept — renamed to
+     *  "goose-assistant-archived-<yyyymmdd>", so deliver.sh's name-grep and the app's title match
+     *  stop resolving it) and stand up a fresh empty one. Both renames happen on the fresh
+     *  session's live socket in the Ready handler. Used when the thread jams (e.g. context
+     *  overflow). No server-side deletion. Safe offline — it simply no-ops until reconnected. */
     fun resetAssistant() {
-        val old = assistantSessionId()
-        if (old != null) {
-            client?.renameSession(old, "$ASSISTANT_TITLE-archived-${archiveStamp()}")
-        }
+        // Prefer the authoritative cached id over the (possibly stale) title lookup.
+        val old = store.assistantSessionId ?: assistantSessionId()
         store.assistantSessionId = null
-        pendingAssistantRename = true
-        newSession()   // fresh session/new; renamed to ASSISTANT_TITLE in the Ready branch
+        store.lastSessionId = null            // don't let a fallback reconnect resume the old thread
+        beginAssistantThread(old)
+    }
+
+    /** Open a fresh session that will become the ASSISTANT_TITLE thread once live. `archiveOld`,
+     *  if non-null, is renamed aside first (reset); null just creates a new assistant thread
+     *  (recovery when none exists). Binds to the connection generation this open() creates. */
+    private fun beginAssistantThread(archiveOld: String?) {
+        resetOldId = archiveOld
+        resetGen = clientGen + 1              // the gen newSession()'s open() is about to create
+        newSession()
     }
 
     /** yyyymmdd from the wall clock, only for a human-readable archived-thread suffix. */
@@ -296,6 +310,12 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun open(resume: String?, suppressReplay: Boolean) {
+        // If a reset/create-assistant is pending but THIS open() isn't the one it scheduled
+        // (clientGen+1 != resetGen), a different navigation superseded it — abandon it so a later
+        // unrelated Ready can't complete a stale rename.
+        if (resetOldId != null || resetGen >= 0) {
+            if (clientGen + 1 != resetGen) { resetOldId = null; resetGen = -1 }
+        }
         client?.close()
         live = false; connecting = true; online.value = false
         // A new client can't receive the old client's TurnDone, so clear turn state here.
@@ -381,10 +401,16 @@ class ConnectionManager private constructor(context: Context) {
                 live = true; connecting = false; online.value = true
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
                 currentSession.value = ev.sessionId
-                // Finishing an assistant reset: name this fresh session so both the app (title
-                // match) and deliver.sh (name-grep) resolve it as the assistant thread again.
-                if (pendingAssistantRename) {
-                    pendingAssistantRename = false
+                // Finishing an assistant reset/create: only when THIS Ready is the reset's own
+                // fresh session (its connection generation matches resetGen). Archive the old
+                // thread first (if any), then name this one so both the app (title match) and
+                // deliver.sh (name-grep) resolve it as the assistant thread. Both renames run
+                // here, on this one live socket, in order — nothing is lost to a close race.
+                if (resetGen == clientGen) {
+                    val old = resetOldId
+                    resetOldId = null; resetGen = -1
+                    if (old != null && old != ev.sessionId)
+                        client?.renameSession(old, "$ASSISTANT_TITLE-archived-${archiveStamp()}")
                     client?.renameSession(ev.sessionId, ASSISTANT_TITLE)
                     store.assistantSessionId = ev.sessionId
                 }
@@ -398,7 +424,13 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
                 assistantSessionId()?.let { store.assistantSessionId = it }   // cache for startup landing
-                if (pendingOpenAssistant) { pendingOpenAssistant = false; assistantSessionId()?.let { openSession(it) } }
+                if (pendingOpenAssistant) {
+                    pendingOpenAssistant = false
+                    val id = assistantSessionId()
+                    // If no assistant thread exists (e.g. an interrupted reset, or a fresh box),
+                    // recreate one instead of silently no-oping so openAssistant() can never dead-end.
+                    if (id != null) openSession(id) else beginAssistantThread(null)
+                }
             }
             is AcpEvent.ServerConfig -> {
                 when (ev.key) {
