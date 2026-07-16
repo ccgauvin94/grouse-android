@@ -466,6 +466,11 @@ fun SessionsScreen(cm: ConnectionManager, nav: NavController) {
         )
     }) { pad ->
         LazyColumn(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
+            // History shows only ordinary chats. The privileged assistant thread — and its
+            // archived/overflow siblings (all titled "goose-assistant*") — are reached solely via
+            // the Assistant button, never listed here, so they don't clutter or get opened as a
+            // normal chat (which would bypass the assistant's action policy).
+            val history = cm.sessions.value.filterNot { it.title.startsWith(ConnectionManager.ASSISTANT_TITLE) }
             item {
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                     .clickable { cm.newSession(); nav.popBackStack() }) {
@@ -476,7 +481,7 @@ fun SessionsScreen(cm: ConnectionManager, nav: NavController) {
                     }
                 }
             }
-            if (cm.sessions.value.isEmpty()) item {
+            if (history.isEmpty()) item {
                 Column(Modifier.fillMaxWidth().padding(vertical = 56.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Filled.History, contentDescription = null,
@@ -489,7 +494,7 @@ fun SessionsScreen(cm: ConnectionManager, nav: NavController) {
                         textAlign = TextAlign.Center)
                 }
             }
-            items(cm.sessions.value) { s ->
+            items(history) { s ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                     .clickable { cm.openSession(s.sessionId); nav.popBackStack() }) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
