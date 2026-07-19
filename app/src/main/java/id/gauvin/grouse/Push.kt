@@ -49,23 +49,23 @@ class GoosePushService : PushService() {
         val raw = String(message.content).trim()
         if (raw.isEmpty()) return
         val cm = ConnectionManager.get(this)
-        // Suppress when the app is foregrounded — you're already watching.
-        if (cm.isForeground) return
-        // Envelope {type,session,text}; plain text falls back to always-show (e.g. proactive briefings).
+        // Envelope {type,session,text}; plain text (no type) is treated as a briefing.
         val (type, session, text) = parsePush(raw)
-        // A "turn" nudge fires for EVERY goose turn (Desktop too). Only surface it when it's this
-        // phone's own session — drop other clients' turns.
-        if (type == "turn" && session != null && session != cm.store.lastSessionId) return
-        // During a voice interaction the assistant speaks the reply itself — don't also notify.
-        if (type == "turn" && cm.recentVoice()) return
-        // Finished-turn alert → "Grouse replied", tap deep-links to that session. Briefings carry
-        // the persistent "goose-assistant" thread id → tap lands in that ongoing chat.
-        val notifier = Notifier(this)
-        if (type == "turn") notifier.postReply(text, session) else {
-            SecureStore(this).apply {                       // feed the Assistant status card
-                lastBriefingAt = System.currentTimeMillis(); lastBriefingText = text
-            }
-            notifier.postProactive(text, session)
+        if (type == "turn") {
+            // Finished-turn nudge (fires for every goose turn, Desktop too). Skip when you're
+            // already watching (foreground), when it's another client's session, or right after a
+            // voice turn (the assistant already spoke). Tap deep-links to that session.
+            if (cm.isForeground) return
+            if (session != null && session != cm.store.lastSessionId) return
+            if (cm.recentVoice()) return
+            Notifier(this).postReply(text, session)
+        } else {
+            // Briefing/proactive: ALWAYS record for the Assistant status/dialog — even when
+            // foreground, or a briefing that lands while you're in the app is lost and the dialog
+            // wrongly reads "none yet" (that bug is why test pushes "didn't arrive"). Only raise a
+            // notification when backgrounded. Tap lands in the persistent goose-assistant thread.
+            SecureStore(this).apply { lastBriefingAt = System.currentTimeMillis(); lastBriefingText = text }
+            if (!cm.isForeground) Notifier(this).postProactive(text, session)
         }
     }
 
