@@ -163,7 +163,6 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
         composable("sessions") { SessionsScreen(cm, nav) }
         composable("settings") { SettingsScreen(cm, nav) }
         composable("extensions") { ExtensionsScreen(cm, nav) }
-        composable("proactive") { ProactiveScreen(cm, nav) }
     }
 }
 

@@ -168,19 +168,6 @@ class SecureStore(context: Context) {
         get() = cfg.getString("push_registry", "") ?: ""
         set(v) = cfg.edit().putString("push_registry", v).apply()
 
-    // --- Proactive assistant ---
-    var proactiveEnabled: Boolean
-        get() = cfg.getBoolean("proactive_on", false)
-        set(v) = cfg.edit().putBoolean("proactive_on", v).apply()
-
-    var proactiveTime: String   // HH:mm, 24h
-        get() = cfg.getString("proactive_time", "08:00") ?: "08:00"
-        set(v) = cfg.edit().putString("proactive_time", v).apply()
-
-    var proactivePrompt: String
-        get() = cfg.getString("proactive_prompt", null) ?: DEFAULT_PROACTIVE_PROMPT
-        set(v) = cfg.edit().putString("proactive_prompt", v).apply()
-
     /** Real model slugs we've seen active, scoped PER PROVIDER (goose hides non-featured models
      *  like z-ai/glm-5.2). Provider-scoping stops LocalAI models leaking into the OpenRouter list
      *  and vice-versa. */
@@ -204,12 +191,4 @@ class SecureStore(context: Context) {
         set(v) = secure.edit().putString("key", v).apply()
 
     fun hasKey(): Boolean = secretKey.isNotBlank()
-
-    companion object {
-        const val DEFAULT_PROACTIVE_PROMPT =
-            "Check my calendar, email, and tasks for the next several hours. Tell me anything " +
-            "urgent or that needs my attention — briefly, as a few bullet points. Do NOT take any " +
-            "actions or change anything; only read and report. If nothing needs my attention, " +
-            "reply with exactly: All clear."
-    }
 }

@@ -258,19 +258,32 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                         cm.status.value.contains("load", true) -> Color(0xFFF5A623)  // connecting → amber
                     else -> MaterialTheme.colorScheme.error          // offline → red
                 }
-                Row(verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable(enabled = !online) { cm.connectSaved() }) {
-                    Surface(color = dot, shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
-                    Spacer(Modifier.width(8.dp))
-                    Text(when {
-                        cm.onAssistant && busy -> "Assistant · working…"
-                        cm.onAssistant -> "Assistant"
-                        online && busy -> "Grouse · working…"
-                        online -> "Grouse"
-                        cm.status.value.contains("connect", true) ||
-                            cm.status.value.contains("load", true) -> "Connecting…"
-                        else -> "Offline · tap to reconnect"
-                    })
+                val usage = cm.usage.value
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable(enabled = !online) { cm.connectSaved() }) {
+                        Surface(color = dot, shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
+                        Spacer(Modifier.width(8.dp))
+                        Text(when {
+                            cm.onAssistant && busy -> "Assistant · working…"
+                            cm.onAssistant -> "Assistant"
+                            online && busy -> "Grouse · working…"
+                            online -> "Grouse"
+                            cm.status.value.contains("connect", true) ||
+                                cm.status.value.contains("load", true) -> "Connecting…"
+                            else -> "Offline · tap to reconnect"
+                        })
+                    }
+                    // Context window used/size, so you can see how full the conversation is
+                    // (goose compacts around the limit). Appears once the first turn reports usage.
+                    if (usage != null && usage.size > 0) {
+                        val pct = (usage.used * 100 / usage.size).coerceIn(0, 100)
+                        Text("${fmtTokens(usage.used)} / ${fmtTokens(usage.size)} · ${pct}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (pct >= 90) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.padding(start = 18.dp))
+                    }
                 }
             },
             actions = {
@@ -655,11 +668,6 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             }
 
             SettingsSection("Assistant") {
-                SettingsNavRow("Proactive checks",
-                    "Scheduled read-only check-ins that notify when something needs attention.") {
-                    nav.navigate("proactive")
-                }
-                HorizontalDivider()
                 SettingsNavRow("Manage extensions",
                     "Enable/disable goose's tools to control context per new chat.") {
                     nav.navigate("extensions")
@@ -778,58 +786,6 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
             }
 
             Spacer(Modifier.height(24.dp))
-        }
-    }
-}
-
-// ---- Proactive assistant ----------------------------------------------------
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ProactiveScreen(cm: ConnectionManager, nav: NavController) {
-    val ctx = LocalContext.current
-    val store = cm.store
-    var enabled by remember { mutableStateOf(store.proactiveEnabled) }
-    var time by remember { mutableStateOf(store.proactiveTime) }
-    var prompt by remember { mutableStateOf(store.proactivePrompt) }
-
-    fun save() {
-        store.proactiveEnabled = enabled
-        store.proactiveTime = time.trim()
-        store.proactivePrompt = prompt
-        ProactiveScheduler.reschedule(ctx)
-    }
-
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text("Proactive assistant") },
-            navigationIcon = {
-                IconButton(onClick = { nav.popBackStack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
-                }
-            }
-        )
-    }) { pad ->
-        Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
-            Text("goose checks in on a schedule and notifies you only when something needs " +
-                "attention. Runs read-only in the background — it can look, not act.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Enabled", Modifier.weight(1f))
-                Switch(checked = enabled, onCheckedChange = { enabled = it })
-            }
-            OutlinedTextField(time, { time = it }, label = { Text("Time (HH:MM, 24h)") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(prompt, { prompt = it }, label = { Text("Briefing prompt") },
-                minLines = 4, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = { save() }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
-            OutlinedButton(onClick = { save(); ProactiveScheduler.runNow(ctx) },
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) { Text("Run now (test)") }
-            Text("A test run may take a minute; you'll get a notification if there's something to report.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
-                modifier = Modifier.padding(top = 6.dp))
         }
     }
 }
