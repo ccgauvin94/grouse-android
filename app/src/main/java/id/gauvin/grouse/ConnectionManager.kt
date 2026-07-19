@@ -8,7 +8,7 @@ import android.os.SystemClock
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 
-data class ChatMessage(val role: String, val text: String)
+data class ChatMessage(val role: String, val text: String, val images: List<ImageBlock> = emptyList())
 
 /**
  * Process-scoped owner of the ACP connection + chat state. A singleton (not a ViewModel) so
@@ -206,8 +206,10 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun send(text: String, images: List<ImageBlock> = emptyList()) {
-        val label = if (images.isEmpty()) text else "$text  [📎 ${images.size}]".trim()
-        messages.add(ChatMessage("user", label)); streamingRole = null; busy.value = true
+        // Keep the images ON the message so the bubble renders the actual thumbnail(s), not a
+        // "[📎 N]" placeholder. (Live-session only — a session reloaded from the server replays
+        // text; images aren't reconstructed from the replayed content blocks.)
+        messages.add(ChatMessage("user", text, images)); streamingRole = null; busy.value = true
         startService()   // keep the socket alive if the user backgrounds mid-turn
         if (live) {
             client?.sendPrompt(text, images)

@@ -34,7 +34,11 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.text.input.KeyboardType
@@ -1013,7 +1017,7 @@ fun ConfigDropdown(opt: ConfigOption, onPick: (String, String) -> Unit) {
 @Composable
 fun MessageBubble(m: ChatMessage) {
     when (m.role) {
-        "user" -> UserBubble(m.text)
+        "user" -> UserBubble(m)
         "thought" -> ThoughtBubble(m.text)
         "tool" -> ToolChip(m.text)
         "error" -> ErrorBubble(m.text)
@@ -1087,16 +1091,35 @@ private fun Modifier.copyOnLongPress(text: String): Modifier {
 }
 
 @Composable
-private fun UserBubble(text: String) {
+private fun UserBubble(m: ChatMessage) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
         Surface(
             color = MaterialTheme.colorScheme.primaryContainer,
             contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
             shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
             modifier = Modifier.widthIn(max = 320.dp)
-        ) { Box(Modifier.copyOnLongPress(text).padding(horizontal = 12.dp, vertical = 8.dp)) { Markdownish(text) } }
+        ) {
+            Column(Modifier.copyOnLongPress(m.text).padding(horizontal = 6.dp, vertical = 6.dp)) {
+                m.images.forEach { img ->
+                    val bmp = remember(img.dataB64) { decodeImageBlock(img.dataB64) }
+                    if (bmp != null) Image(
+                        bitmap = bmp, contentDescription = "attached image",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.padding(bottom = if (m.text.isNotBlank()) 6.dp else 0.dp)
+                            .heightIn(max = 220.dp).clip(RoundedCornerShape(10.dp)))
+                }
+                if (m.text.isNotBlank())
+                    Box(Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) { Markdownish(m.text) }
+            }
+        }
     }
 }
+
+/** Decode an ImageBlock's base64 (NO_WRAP) payload to an ImageBitmap for the chat bubble. */
+private fun decodeImageBlock(b64: String): androidx.compose.ui.graphics.ImageBitmap? = try {
+    val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+} catch (e: Exception) { null }
 
 @Composable
 private fun AssistantBubble(text: String) {
