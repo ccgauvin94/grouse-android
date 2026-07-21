@@ -35,12 +35,14 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -958,8 +960,10 @@ fun ConfigPanel(
     }
 }
 
-/** Model picker: a dropdown of goose's featured models + ones seen before for the CURRENT provider
- *  (provider-scoped, so LocalAI and OpenRouter models never mix). Selection only — no free text. */
+/** Model picker: an EDITABLE combobox. Pick from goose's featured models + ones seen before for the
+ *  CURRENT provider (provider-scoped, so LocalAI and OpenRouter never mix), OR type any model id.
+ *  Free text is needed for OpenRouter slugs goose doesn't "feature" (e.g. poolside/laguna-s-2.1) and
+ *  for local LocalAI model names — a typed id is sent straight through config/upsert on IME-done. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModelDropdown(opt: ConfigOption, knownModels: Set<String>, onPick: (String, String) -> Unit) {
@@ -968,21 +972,33 @@ fun ModelDropdown(opt: ConfigOption, knownModels: Set<String>, onPick: (String, 
     val entries = (featured + knownModels.filter { it !in featured }).distinct()
     fun labelFor(v: String) = if (v == "current") "Provider default"
         else opt.choices.firstOrNull { it.value == v }?.label ?: v
+    // The raw model id, editable. Re-seeds whenever the active model changes elsewhere. Blank means
+    // "provider default" (goose's config.yaml model for the provider).
+    var text by remember(opt.currentValue) { mutableStateOf(opt.currentValue) }
+    val suggestions = entries.filter { it != text && (text.isBlank() || it.contains(text, ignoreCase = true)) }
+    fun commit(v: String) { expanded = false; text = if (v == "current") "" else v; onPick("model", v) }
     ExposedDropdownMenuBox(
         expanded = expanded, onExpandedChange = { expanded = it },
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
     ) {
         OutlinedTextField(
-            value = labelFor(opt.currentValue.ifBlank { "current" }),
-            onValueChange = {}, readOnly = true, singleLine = true,
+            value = text,
+            onValueChange = { text = it; expanded = true },
+            singleLine = true,
             label = { Text("model") },
+            placeholder = { Text("Provider default — or type a model id") },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = {
+                val v = text.trim(); commit(if (v.isEmpty()) "current" else v)
+            }),
             modifier = Modifier.menuAnchor().fillMaxWidth()
         )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            entries.forEach { v ->
-                DropdownMenuItem(text = { Text(labelFor(v)) },
-                    onClick = { expanded = false; onPick("model", v) })
+        if (suggestions.isNotEmpty()) {
+            ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                suggestions.forEach { v ->
+                    DropdownMenuItem(text = { Text(labelFor(v)) }, onClick = { commit(v) })
+                }
             }
         }
     }
