@@ -75,6 +75,27 @@ class ConnectionManager private constructor(context: Context) {
         c.listExtensions()
     }
 
+    // Session-scoped profile apply awaiting its listSessionExtensions reply: (sessionId, desired set).
+    private var pendingProfileApply: Pair<String, Set<String>>? = null
+
+    /** Apply `kind`'s configured extension profile (if the user enabled one) to session `sessionId`:
+     *  list its current extensions, diff against the stored desired set, add/remove via the
+     *  SESSION-SCOPED API (never toggleExtension's global one -- that would touch every other open
+     *  session too). Applies once, at session-open time -- matches how goose's own config-driven
+     *  initial extension set already works; editing a profile in Settings doesn't retroactively
+     *  touch already-open sessions (same convention as the "changes apply to new chats" caption on
+     *  the Extensions screen). */
+    private fun applyExtensionProfile(sessionId: String, kind: SessionKind) {
+        val key = kind.name.lowercase()
+        if (!store.profileEnabled(key)) return
+        pendingProfileApply = sessionId to store.profileExtensions(key)
+        // The diff (SessionExtensions handler below) needs extensions.value (the global catalog,
+        // for each name's raw/bundled) populated -- it's normally only loaded lazily when the
+        // Extensions screen opens. If it's empty, fetch it first; the Extensions handler continues
+        // the flow into listSessionExtensions() once it lands.
+        if (extensions.value.isEmpty()) client?.listExtensions() else client?.listSessionExtensions()
+    }
+
     /** Enable/disable an extension globally (affects new chats); the reply refreshes the list. */
     fun toggleExtension(e: ExtInfo, enabled: Boolean) {
         val c = client ?: return
@@ -100,6 +121,9 @@ class ConnectionManager private constructor(context: Context) {
     // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
     private var pendingOpenCwd: String = "/state"
+    // The kind resolved for the in-flight open() -- consumed once by applyExtensionProfile in the
+    // Ready handler (same "Ready carries neither cwd nor kind" gap as above).
+    private var pendingSessionKind: SessionKind = SessionKind.CHAT
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
 
     // Voice: the voice sheet has a short lifecycle, so CM owns speaking the reply (it survives the
@@ -122,7 +146,8 @@ class ConnectionManager private constructor(context: Context) {
     fun connectHome() {
         if (!store.hasKey()) return
         val a = store.assistantSessionId
-        if (a != null) openSession(a) else { pendingOpenAssistant = true; open(resume = null, suppressReplay = false) }
+        if (a != null) openSession(a, knownKind = SessionKind.ASSISTANT)
+        else { pendingOpenAssistant = true; open(resume = null, suppressReplay = false) }
     }
 
     /** Save new credentials and connect fresh (from the Connect screen). */
@@ -140,14 +165,19 @@ class ConnectionManager private constructor(context: Context) {
 
     fun listSessions() = client?.listSessions()
 
-    fun openSession(sessionId: String) {
+    fun openSession(sessionId: String, knownKind: SessionKind? = null) {
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
-        open(resume = sessionId, suppressReplay = false)
+        // A caller resuming a session it already has cached (e.g. connectHome's assistant shortcut)
+        // can pass knownKind to skip the sessions.value lookup, which may not be populated yet on a
+        // cold start; open() falls back to that lookup (then CHAT) when knownKind is null.
+        val kind = knownKind ?: sessions.value.firstOrNull { it.sessionId == sessionId }
+            ?.let { ConnectionManager.sessionKind(it) }
+        open(resume = sessionId, suppressReplay = false, kind = kind)
     }
 
-    fun newSession(cwd: String = "/state") {
+    fun newSession(cwd: String = "/state", kind: SessionKind = SessionKind.CHAT) {
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
-        open(resume = null, suppressReplay = false, cwd = cwd)
+        open(resume = null, suppressReplay = false, cwd = cwd, kind = kind)
     }
 
     /** A Code session: scoped to a project directory under the server's /workspace bind mount
@@ -157,7 +187,7 @@ class ConnectionManager private constructor(context: Context) {
         val clean = project.trim().trim('/')
         require(clean.isNotEmpty() && !clean.contains("..")) { "invalid project name" }
         store.addRecentWorkspaceProject(clean)
-        newSession(cwd = "/workspace/$clean")
+        newSession(cwd = "/workspace/$clean", kind = SessionKind.CODE)
     }
 
     /** The persistent "goose-assistant" thread (briefings/proactive/voice land here), if it exists. */
@@ -172,7 +202,8 @@ class ConnectionManager private constructor(context: Context) {
      *  open as soon as it arrives (see the Sessions event handler). */
     fun openAssistant() {
         val id = assistantSessionId()
-        if (id != null) openSession(id) else { pendingOpenAssistant = true; listSessions() }
+        if (id != null) openSession(id, knownKind = SessionKind.ASSISTANT)
+        else { pendingOpenAssistant = true; listSessions() }
     }
 
     // --- Assistant-thread reset / (re)create ---
@@ -204,7 +235,7 @@ class ConnectionManager private constructor(context: Context) {
     private fun beginAssistantThread(archiveOld: String?) {
         resetOldId = archiveOld
         resetGen = clientGen + 1              // the gen newSession()'s open() is about to create
-        newSession()
+        newSession(kind = SessionKind.ASSISTANT)
     }
 
     /** yyyymmdd from the wall clock, only for a human-readable archived-thread suffix. */
@@ -343,7 +374,7 @@ class ConnectionManager private constructor(context: Context) {
         permissions.remove(p)
     }
 
-    private fun open(resume: String?, suppressReplay: Boolean, cwd: String? = null) {
+    private fun open(resume: String?, suppressReplay: Boolean, cwd: String? = null, kind: SessionKind? = null) {
         // If a reset/create-assistant is pending but THIS open() isn't the one it scheduled
         // (clientGen+1 != resetGen), a different navigation superseded it — abandon it so a later
         // unrelated Ready can't complete a stale rename.
@@ -372,6 +403,10 @@ class ConnectionManager private constructor(context: Context) {
             sessions.value.firstOrNull { it.sessionId == resume }?.cwd?.takeIf { it.isNotBlank() }
                 ?: store.lastSessionCwd
         pendingOpenCwd = resolvedCwd
+        // Same idea as cwd, but kind only gates an OPT-IN, default-off extension profile -- a wrong
+        // guess here just means a profile doesn't apply until the session is reopened with the list
+        // loaded, never a correctness bug, so a plain CHAT fallback (not a persisted one) is fine.
+        pendingSessionKind = kind ?: SessionKind.CHAT
         // Tag this client's events with a generation; a just-closed client still fires
         // onClosed/onFailure asynchronously and its stale "disconnected" must not flip us offline
         // after the new client is already live.
@@ -460,6 +495,7 @@ class ConnectionManager private constructor(context: Context) {
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
                 store.lastSessionCwd = pendingOpenCwd   // Ready itself carries no cwd -- see open()
                 currentSession.value = ev.sessionId
+                applyExtensionProfile(ev.sessionId, pendingSessionKind)
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Archive the old
                 // thread first (if any), then name this one so both the app (title match) and
@@ -488,7 +524,7 @@ class ConnectionManager private constructor(context: Context) {
                     val id = assistantSessionId()
                     // If no assistant thread exists (e.g. an interrupted reset, or a fresh box),
                     // recreate one instead of silently no-oping so openAssistant() can never dead-end.
-                    if (id != null) openSession(id) else beginAssistantThread(null)
+                    if (id != null) openSession(id, knownKind = SessionKind.ASSISTANT) else beginAssistantThread(null)
                 }
             }
             is AcpEvent.ServerConfig -> {
@@ -498,7 +534,23 @@ class ConnectionManager private constructor(context: Context) {
                 }
             }
             is AcpEvent.Commands -> commands.value = ev.names
-            is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }
+            is AcpEvent.Extensions -> {
+                extensions.value = ev.list; extensionsBusy.value = false
+                // Continue an applyExtensionProfile() that was waiting on the catalog to populate.
+                pendingProfileApply?.let { client?.listSessionExtensions() }
+            }
+            is AcpEvent.SessionExtensions -> {
+                val (sid, desired) = pendingProfileApply ?: return
+                if (sid != ev.sessionId) return   // stale reply for a since-superseded session
+                pendingProfileApply = null
+                val current = ev.names.toSet()
+                for (name in desired - current)
+                    extensions.value.firstOrNull { it.name == name }?.let { client?.addSessionExtension(it.raw) }
+                for (name in current - desired) {
+                    val ext = extensions.value.firstOrNull { it.name == name }
+                    if (ext == null || !ext.bundled) client?.removeSessionExtension(name)   // never strip a core extension
+                }
+            }
             is AcpEvent.Permission -> {
                 // The privileged Assistant thread honors the user's chosen action policy; every
                 // other conversation (and voice) always prompts. Voice already auto-denies via its

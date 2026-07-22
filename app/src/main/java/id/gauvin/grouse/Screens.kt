@@ -667,6 +667,39 @@ private fun SettingsSwitchRow(label: String, checked: Boolean, onChange: (Boolea
     }
 }
 
+/** One Assistant/Chat/Code row in "Session extension profiles": a toggle for whether this kind uses
+ *  a custom tool set at all, expanding into a per-extension checklist reusing the same catalog
+ *  ExtensionsScreen already fetches (cm.extensions.value). Toggling a tool live-applies immediately
+ *  -- no separate Save step, matching this screen's other settings. */
+@Composable
+private fun SessionProfileRow(cm: ConnectionManager, key: String, label: String) {
+    var enabled by remember { mutableStateOf(cm.store.profileEnabled(key)) }
+    var selected by remember { mutableStateOf(cm.store.profileExtensions(key)) }
+    Column {
+        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, Modifier.weight(1f))
+            Switch(checked = enabled, onCheckedChange = { enabled = it; cm.store.setProfileEnabled(key, it) })
+        }
+        if (enabled) {
+            Column(Modifier.fillMaxWidth().padding(start = 8.dp, bottom = 6.dp)) {
+                if (cm.extensions.value.isEmpty())
+                    Text("loading extensions…", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline)
+                cm.extensions.value.forEach { e ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(e.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Switch(checked = e.name in selected, onCheckedChange = { on ->
+                            selected = if (on) selected + e.name else selected - e.name
+                            cm.store.setProfileExtensions(key, selected)
+                        })
+                    }
+                }
+            }
+        }
+        HorizontalDivider()
+    }
+}
+
 /** Unwrap the hosting Activity from a Compose context (needed for the UnifiedPush distributor picker). */
 private fun Context.findActivity(): android.app.Activity? {
     var c = this
@@ -794,6 +827,15 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     }) { Text("Reset") } },
                     dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
                 )
+            }
+
+            SettingsSection("Session extension profiles") {
+                SettingCaption("Give Assistant/Chat/Code sessions different default tools. Applies " +
+                    "when a session of that kind is opened -- not retroactively to ones already open.")
+                LaunchedEffect(Unit) { if (cm.extensions.value.isEmpty()) cm.loadExtensions() }
+                SessionProfileRow(cm, "assistant", "Assistant")
+                SessionProfileRow(cm, "chat", "Chat")
+                SessionProfileRow(cm, "code", "Code")
             }
 
             SettingsSection("Models") {

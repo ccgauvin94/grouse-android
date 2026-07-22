@@ -147,6 +147,16 @@ class SecureStore(context: Context) {
         cfg.edit().putString("recent_workspace_projects", next.joinToString("\n")).apply()
     }
 
+    // --- Per-session-type extension profiles (Assistant/Chat/Code) ---
+    // `kind` is a lowercase string key ("assistant"/"chat"/"code") -- simplest option for 3 fixed
+    // values, avoids a SessionKind<->prefs-key mapping layer. Default OFF: zero behavior change
+    // until the user configures one in Settings.
+    fun profileEnabled(kind: String): Boolean = cfg.getBoolean("profile_${kind}_on", false)
+    fun setProfileEnabled(kind: String, v: Boolean) = cfg.edit().putBoolean("profile_${kind}_on", v).apply()
+    fun profileExtensions(kind: String): Set<String> = cfg.getStringSet("profile_${kind}_ext", emptySet()) ?: emptySet()
+    fun setProfileExtensions(kind: String, names: Set<String>) =
+        cfg.edit().putStringSet("profile_${kind}_ext", HashSet(names)).apply()
+
     /** When the last proactive briefing push arrived (epoch millis) — shown on the Assistant status. */
     var lastBriefingAt: Long
         get() = cfg.getLong("last_briefing_at", 0L)

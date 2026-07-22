@@ -42,6 +42,14 @@ data class ExtInfo(
     val type: String,
     val description: String,
     val configKey: String,   // key in config.yaml; used by config/extensions/set-enabled
+    // Core/required -- never offered for removal by a per-session extension profile (safety guard;
+    // goose's own tagged-union extension config shape isn't hand-reconstructed anywhere else, so
+    // this is parsed from the same server-sent object it guards).
+    val bundled: Boolean = false,
+    // The verbatim "extension" object from config/extensions/list, forwarded as-is to
+    // session/extensions/add -- both deserialize to the same server-side type, so there's no need
+    // to hand-reconstruct goose's Builtin/Platform/Mcp extension-config union client-side.
+    val raw: JsonObject = JsonObject(emptyMap()),
 )
 
 /** Events surfaced from the ACP connection to the UI layer. */
@@ -57,6 +65,9 @@ sealed interface AcpEvent {
     data class Ready(val sessionId: String) : AcpEvent
     data class Sessions(val list: List<SessionInfo>) : AcpEvent
     data class Extensions(val list: List<ExtInfo>) : AcpEvent
+    /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
+     *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
+    data class SessionExtensions(val sessionId: String, val names: List<String>) : AcpEvent
     data class Commands(val names: List<String>) : AcpEvent
     data class Usage(val used: Int, val size: Int, val cost: Double, val currency: String) : AcpEvent
     data class Chart(val spec: String) : AcpEvent   // Chart.js-shaped JSON from autovisualiser
@@ -138,6 +149,33 @@ class AcpClient(
         rpc("_goose/unstable/config/extensions/set-enabled", buildJsonObject {
             put("configKey", configKey); put("enabled", enabled)
         })
+
+    // --- Session-scoped extensions (a DIFFERENT, session-local API from config/extensions/* above:
+    // that one writes config.yaml and affects every session; this one mutates only ONE session's own
+    // extension_data, so per-session-type profiles can't fight over shared global state). Used for
+    // "which tools does this session type get" -- see ConnectionManager.applyExtensionProfile. ---
+
+    /** List the CURRENT session's enabled extensions. Reply arrives as AcpEvent.SessionExtensions. */
+    fun listSessionExtensions() {
+        val sid = sessionId ?: return
+        rpc("_goose/unstable/session/extensions/list", buildJsonObject { put("sessionId", sid) })
+    }
+
+    /** Enable one extension for just the current session. `extension` is the verbatim "extension"
+     *  object from an ExtInfo.raw (config/extensions/list) -- forwarded as-is, not reconstructed. */
+    fun addSessionExtension(extension: JsonObject) {
+        val sid = sessionId ?: return
+        rpc("_goose/unstable/session/extensions/add", buildJsonObject {
+            put("sessionId", sid); put("extension", extension)
+        })
+    }
+
+    fun removeSessionExtension(name: String) {
+        val sid = sessionId ?: return
+        rpc("_goose/unstable/session/extensions/remove", buildJsonObject {
+            put("sessionId", sid); put("name", name)
+        })
+    }
 
     /** Read a global goose config value (e.g. GOOSE_FAST_MODEL). Reply arrives as
      *  AcpEvent.ServerConfig. These live in goose's config.yaml, NOT per-session — so the
@@ -319,6 +357,19 @@ class AcpClient(
             "_goose/unstable/config/extensions/list" -> onEvent(AcpEvent.Extensions(parseExtensions(result)))
             // After a toggle, re-list so the UI reflects the new enabled state.
             "_goose/unstable/config/extensions/set-enabled" -> listExtensions()
+            // Session-scoped (a session's OWN extension_data, not the global catalog above). The
+            // array elements ARE the extension objects (goose's tagged union carries `name` at the
+            // top level), unlike config/extensions/list's {extension:{...}, enabled, configKey} wrap.
+            "_goose/unstable/session/extensions/list" -> {
+                val names = (result?.get("extensions") as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                }
+                sessionId?.let { onEvent(AcpEvent.SessionExtensions(it, names)) }
+            }
+            // add/remove reply empty -- ConnectionManager's diff-and-apply already knows the target
+            // state, so there's nothing to re-fetch (unlike the global toggle above).
+            "_goose/unstable/session/extensions/add" -> {}
+            "_goose/unstable/session/extensions/remove" -> {}
             "_goose/unstable/config/read" -> {
                 // The reply doesn't echo the key, so recover it from the request we cached.
                 val key = pendingConfigKeys.remove(id) ?: return
@@ -401,6 +452,8 @@ class AcpClient(
                 type = ext["type"]?.jsonPrimitive?.contentOrNull ?: "",
                 description = ext["description"]?.jsonPrimitive?.contentOrNull ?: "",
                 configKey = o["configKey"]?.jsonPrimitive?.contentOrNull ?: name,
+                bundled = ext["bundled"]?.jsonPrimitive?.booleanOrNull ?: false,
+                raw = ext,
             )
         }
     }
