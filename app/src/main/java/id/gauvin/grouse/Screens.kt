@@ -13,6 +13,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -195,9 +197,12 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
     }
 
     // Stay pinned to the bottom (index 0) as messages stream in / arrive — unless the user scrolled up.
-    val lastLen = cm.messages.lastOrNull()?.text?.length ?: 0
-    LaunchedEffect(cm.messages.size, lastLen, cm.busy.value) {
-        if (atBottom) listState.animateScrollToItem(0)
+    // Driven off snapshotFlow so per-token text growth doesn't recompose the whole ChatScreen (this
+    // used to read the last message's length in the composable body). Instant scrollToItem avoids
+    // restarting a scroll animation on every token.
+    LaunchedEffect(listState) {
+        snapshotFlow { cm.messages.size to (cm.messages.lastOrNull()?.text?.length ?: 0) }
+            .collect { if (atBottom) listState.scrollToItem(0) }
     }
     // Opening/switching a session: snap to the bottom (index 0). reverseLayout keeps it pinned
     // as history replays in.
@@ -348,7 +353,12 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                     // "open at bottom", "jump to bottom", and streaming-stays-pinned are trivial.
                     LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.fillMaxSize()) {
                         if (cm.busy.value) item { TypingIndicator() }
-                        items(cm.messages.asReversed()) { m -> MessageBubble(m) }
+                        // key on the stable message id so the streaming bubble is reused (not rebuilt)
+                        // as its text grows; i==0 is the newest message → mark it streaming so it renders
+                        // as plain text until the turn finishes (skips the per-token Markdown re-parse).
+                        itemsIndexed(cm.messages.asReversed(), key = { _, m -> m.id }) { i, m ->
+                            MessageBubble(m, streaming = i == 0 && cm.busy.value && m.role == "assistant")
+                        }
                     }
                     if (!atBottom) SmallFloatingActionButton(
                         onClick = { scope.launch { listState.animateScrollToItem(0) } },
@@ -1031,14 +1041,14 @@ fun ConfigDropdown(opt: ConfigOption, onPick: (String, String) -> Unit) {
 // ---- Message bubbles --------------------------------------------------------
 
 @Composable
-fun MessageBubble(m: ChatMessage) {
+fun MessageBubble(m: ChatMessage, streaming: Boolean = false) {
     when (m.role) {
         "user" -> UserBubble(m)
         "thought" -> ThoughtBubble(m.text)
         "tool" -> ToolChip(m.text)
         "error" -> ErrorBubble(m.text)
         "chart" -> ChartView(m.text)
-        else -> AssistantBubble(m.text)
+        else -> AssistantBubble(m.text, streaming)
     }
 }
 
@@ -1138,9 +1148,13 @@ private fun decodeImageBlock(b64: String): androidx.compose.ui.graphics.ImageBit
 } catch (e: Exception) { null }
 
 @Composable
-private fun AssistantBubble(text: String) {
+private fun AssistantBubble(text: String, streaming: Boolean = false) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Box(Modifier.copyOnLongPress(text).padding(horizontal = 2.dp, vertical = 4.dp)) { Markdownish(text) }
+        Box(Modifier.copyOnLongPress(text).padding(horizontal = 2.dp, vertical = 4.dp)) {
+            // Plain text while streaming — re-parsing the growing Markdown every token is O(n²).
+            // The bubble re-renders once with full Markdown when the turn finishes.
+            if (streaming) Text(text) else Markdownish(text)
+        }
     }
 }
 

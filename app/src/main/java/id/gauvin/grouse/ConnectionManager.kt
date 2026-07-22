@@ -8,7 +8,15 @@ import android.os.SystemClock
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 
-data class ChatMessage(val role: String, val text: String, val images: List<ImageBlock> = emptyList())
+private val chatMessageSeq = java.util.concurrent.atomic.AtomicLong(0)
+/** Stable per-message id so the chat LazyColumn keys on identity, not position. copy() preserves it,
+ *  so the streaming message keeps the same id as its text grows → its composition is reused, not rebuilt. */
+data class ChatMessage(
+    val role: String,
+    val text: String,
+    val images: List<ImageBlock> = emptyList(),
+    val id: Long = chatMessageSeq.getAndIncrement(),
+)
 
 /**
  * Process-scoped owner of the ACP connection + chat state. A singleton (not a ViewModel) so
