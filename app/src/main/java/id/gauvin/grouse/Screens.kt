@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -19,15 +20,18 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Psychology
@@ -122,7 +126,7 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(cm: ConnectionManager, nav: NavController) {
+fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     val ctx = LocalContext.current
     var showConfig by remember { mutableStateOf(false) }
     var showSchedule by remember { mutableStateOf(false) }
@@ -309,28 +313,28 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                     }
                 }
             },
+            navigationIcon = {
+                IconButton(onClick = onOpenDrawer) { Icon(Icons.Filled.Menu, contentDescription = "menu") }
+            },
             actions = {
-                IconButton(onClick = { if (cm.onAssistant) showSchedule = true else cm.openAssistant() }) {
+                // Assistant/Sessions/Settings are now drawer items — this icon's navigation role
+                // moved there. On the Assistant thread itself it stays as the page-local briefing-
+                // health indicator (opens the schedule dialog); off it, there's nothing to show here.
+                if (cm.onAssistant) IconButton(onClick = { showSchedule = true }) {
                     val dot = when {
                         briefingHealthy -> Color(0xFF3DDC84)                     // fresh → green
                         briefingLate -> Color(0xFFF5A623)                        // late → amber
                         else -> MaterialTheme.colorScheme.error                  // stale/never → red
                     }
                     Box {
-                        Icon(Icons.Filled.Psychology, contentDescription = "assistant",
-                            tint = if (cm.onAssistant) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                        Icon(Icons.Filled.Psychology, contentDescription = "assistant status",
+                            tint = MaterialTheme.colorScheme.primary)
                         Surface(color = dot, shape = RoundedCornerShape(50),
                             modifier = Modifier.size(9.dp).align(Alignment.TopEnd)) {}
                     }
                 }
-                IconButton(onClick = { cm.listSessions(); nav.navigate("sessions") }) {
-                    Icon(Icons.Filled.History, contentDescription = "sessions")
-                }
                 IconButton(onClick = { showConfig = !showConfig }) {
                     Icon(Icons.Filled.Tune, contentDescription = "model")
-                }
-                IconButton(onClick = { nav.navigate("settings") }) {
-                    Icon(Icons.Filled.Settings, contentDescription = "settings")
                 }
             }
         )
@@ -504,58 +508,68 @@ private fun prettyOption(raw: String) = when (raw) {
 
 // ---- Sessions ---------------------------------------------------------------
 
+/** goose has no session tags — Chat and Code are the same list filtered by sessionKind() (title for
+ *  Assistant, cwd for Code, see ConnectionManager.sessionKind). Peer drawer destination, so
+ *  navigation is explicit (navigate to "chat"), not popBackStack — this screen may be reached
+ *  directly from the drawer without a "chat" entry below it on the back stack. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionsScreen(cm: ConnectionManager, nav: NavController) {
+fun SessionListScreen(cm: ConnectionManager, nav: NavController, kind: SessionKind, onOpenDrawer: () -> Unit) {
     LaunchedEffect(Unit) { cm.listSessions() }
+    var showNewCode by remember { mutableStateOf(false) }
+    fun goToChat() = nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+    if (showNewCode) NewCodeSessionDialog(
+        recents = cm.store.recentWorkspaceProjects(),
+        onCreate = { project -> showNewCode = false; cm.newCodeSession(project); goToChat() },
+        onDismiss = { showNewCode = false },
+    )
+    val isCode = kind == SessionKind.CODE
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Sessions") },
+            title = { Text(if (isCode) "Code" else "Chat") },
             navigationIcon = {
-                IconButton(onClick = { nav.popBackStack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
-                }
+                IconButton(onClick = onOpenDrawer) { Icon(Icons.Filled.Menu, contentDescription = "menu") }
             }
         )
     }) { pad ->
         LazyColumn(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
-            // History shows only ordinary chats. The privileged assistant thread — and its
-            // archived/overflow siblings (all titled "goose-assistant*") — are reached solely via
-            // the Assistant button, never listed here, so they don't clutter or get opened as a
-            // normal chat (which would bypass the assistant's action policy).
-            val history = cm.sessions.value.filterNot { it.title.startsWith(ConnectionManager.ASSISTANT_TITLE) }
+            val list = cm.sessions.value.filter { ConnectionManager.sessionKind(it) == kind }
             item {
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .clickable { cm.newSession(); nav.popBackStack() }) {
+                    .clickable { if (isCode) showNewCode = true else { cm.newSession(); goToChat() } }) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Add, contentDescription = null)
                         Spacer(Modifier.width(10.dp))
-                        Text("New chat", style = MaterialTheme.typography.titleMedium)
+                        Text(if (isCode) "New Code session" else "New chat", style = MaterialTheme.typography.titleMedium)
                     }
                 }
             }
-            if (history.isEmpty()) item {
+            if (list.isEmpty()) item {
                 Column(Modifier.fillMaxWidth().padding(vertical = 56.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Filled.History, contentDescription = null,
+                    Icon(if (isCode) Icons.Filled.Code else Icons.Filled.History, contentDescription = null,
                         modifier = Modifier.size(44.dp), tint = MaterialTheme.colorScheme.outline)
                     Spacer(Modifier.height(8.dp))
-                    Text("No past chats yet", style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.outline)
-                    Text("Start one above — it'll show here to resume later.",
+                    Text(if (isCode) "No Code sessions yet" else "No past chats yet",
+                        style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.outline)
+                    Text(if (isCode) "Start one above — scoped to a project under /workspace."
+                         else "Start one above — it'll show here to resume later.",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
                         textAlign = TextAlign.Center)
                 }
             }
-            items(history) { s ->
+            items(list) { s ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .clickable { cm.openSession(s.sessionId); nav.popBackStack() }) {
+                    .clickable { cm.openSession(s.sessionId); goToChat() }) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Spacer(Modifier.height(2.dp))
-                            val bits = listOf("${s.messageCount} msgs", s.model, relativeTime(s.updatedAt))
+                            // Code rows lead with the project folder (basename of cwd) so sessions in
+                            // the same project are recognizable at a glance.
+                            val project = s.cwd.removePrefix("/workspace/").takeIf { isCode && it.isNotBlank() }
+                            val bits = listOfNotNull(project, "${s.messageCount} msgs", s.model, relativeTime(s.updatedAt))
                                 .filter { it.isNotBlank() }
                             Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -567,6 +581,40 @@ fun SessionsScreen(cm: ConnectionManager, nav: NavController) {
             }
         }
     }
+}
+
+/** No ACP directory-listing method exists (confirmed — Desktop's own "Choose directory" picker is
+ *  native OS file access on the desktop machine, nothing to reuse remotely), so this is text-entry
+ *  + a recents list, not a picker — designating a session as Code IS picking its project. */
+@Composable
+private fun NewCodeSessionDialog(recents: List<String>, onCreate: (String) -> Unit, onDismiss: () -> Unit) {
+    var project by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New Code session") },
+        text = {
+            Column {
+                Text("Project folder under /workspace on the server.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(project, { project = it }, singleLine = true,
+                    placeholder = { Text("e.g. goose-android") }, modifier = Modifier.fillMaxWidth())
+                if (recents.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text("Recent", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                    Spacer(Modifier.height(4.dp))
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        recents.forEach { r -> AssistChip(onClick = { project = r }, label = { Text(r) }) }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onCreate(project.trim()) }, enabled = project.isNotBlank()) { Text("Create") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 // ---- Settings ---------------------------------------------------------------
@@ -628,7 +676,7 @@ private fun Context.findActivity(): android.app.Activity? {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
+fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Unit) {
     val ctx = LocalContext.current
     var host by remember { mutableStateOf(cm.store.host) }
     var port by remember { mutableStateOf(cm.store.port) }
@@ -639,9 +687,7 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController) {
         TopAppBar(
             title = { Text("Settings") },
             navigationIcon = {
-                IconButton(onClick = { nav.popBackStack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
-                }
+                IconButton(onClick = onOpenDrawer) { Icon(Icons.Filled.Menu, contentDescription = "menu") }
             }
         )
     }) { pad ->

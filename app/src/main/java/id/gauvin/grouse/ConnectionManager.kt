@@ -8,6 +8,9 @@ import android.os.SystemClock
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 
+/** The three drawer session categories. See ConnectionManager.sessionKind(). */
+enum class SessionKind { ASSISTANT, CHAT, CODE }
+
 private val chatMessageSeq = java.util.concurrent.atomic.AtomicLong(0)
 /** Stable per-message id so the chat LazyColumn keys on identity, not position. copy() preserves it,
  *  so the streaming message keeps the same id as its text grows → its composition is reused, not rebuilt. */
@@ -94,6 +97,9 @@ class ConnectionManager private constructor(context: Context) {
     private var live = false
     private var connecting = false
     private var lastSessionId: String? = null
+    // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
+    // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
+    private var pendingOpenCwd: String = "/state"
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
 
     // Voice: the voice sheet has a short lifecycle, so CM owns speaking the reply (it survives the
@@ -139,9 +145,19 @@ class ConnectionManager private constructor(context: Context) {
         open(resume = sessionId, suppressReplay = false)
     }
 
-    fun newSession() {
+    fun newSession(cwd: String = "/state") {
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
-        open(resume = null, suppressReplay = false)
+        open(resume = null, suppressReplay = false, cwd = cwd)
+    }
+
+    /** A Code session: scoped to a project directory under the server's /workspace bind mount
+     *  (the user's ~/dev) instead of the default /state. This IS the "designation" -- goose has no
+     *  tags/labels, so cwd is the native, protocol-level signal sessionKind() reads back later. */
+    fun newCodeSession(project: String) {
+        val clean = project.trim().trim('/')
+        require(clean.isNotEmpty() && !clean.contains("..")) { "invalid project name" }
+        store.addRecentWorkspaceProject(clean)
+        newSession(cwd = "/workspace/$clean")
     }
 
     /** The persistent "goose-assistant" thread (briefings/proactive/voice land here), if it exists. */
@@ -327,7 +343,7 @@ class ConnectionManager private constructor(context: Context) {
         permissions.remove(p)
     }
 
-    private fun open(resume: String?, suppressReplay: Boolean) {
+    private fun open(resume: String?, suppressReplay: Boolean, cwd: String? = null) {
         // If a reset/create-assistant is pending but THIS open() isn't the one it scheduled
         // (clientGen+1 != resetGen), a different navigation superseded it — abandon it so a later
         // unrelated Ready can't complete a stale rename.
@@ -347,6 +363,15 @@ class ConnectionManager private constructor(context: Context) {
             else -> "loading session…"
         }
         val saved = store.savedOptions(optionIds)
+        // Resolve the cwd for this open(): an explicit param wins (new session creation always
+        // knows its own target); otherwise, for a resume, prefer the cached SessionInfo's cwd
+        // (sessions.value, if already loaded) and fall back to the last-persisted cwd for a cold
+        // start before any session/list round-trip has happened. session/load's cwd param SILENTLY
+        // REWRITES the session's working_dir if wrong, so this must be right, not just "close enough".
+        val resolvedCwd = cwd ?: if (resume == null) "/state" else
+            sessions.value.firstOrNull { it.sessionId == resume }?.cwd?.takeIf { it.isNotBlank() }
+                ?: store.lastSessionCwd
+        pendingOpenCwd = resolvedCwd
         // Tag this client's events with a generation; a just-closed client still fires
         // onClosed/onFailure asynchronously and its stale "disconnected" must not flip us offline
         // after the new client is already live.
@@ -354,6 +379,8 @@ class ConnectionManager private constructor(context: Context) {
         client = AcpClient(url, store.secretKey) { ev -> main.post { if (gen == clientGen) onEvent(ev) } }.also {
             it.desiredOptions = if (resume == null) saved else emptyMap()
             it.resumeSessionId = resume
+            it.resumeCwd = resolvedCwd
+            it.desiredCwd = resolvedCwd
             it.suppressReplay = suppressReplay
             it.connect()
         }
@@ -431,6 +458,7 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Ready -> {
                 live = true; connecting = false; online.value = true
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
+                store.lastSessionCwd = pendingOpenCwd   // Ready itself carries no cwd -- see open()
                 currentSession.value = ev.sessionId
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Archive the old
@@ -505,6 +533,14 @@ class ConnectionManager private constructor(context: Context) {
     companion object {
         /** Server-side name of the persistent assistant thread (see docker/llm/goose-recipes). */
         const val ASSISTANT_TITLE = "goose-assistant"
+        /** goose has no session tags/labels -- cwd is the native signal. A Code session is simply
+         *  one scoped under /workspace (the server's ~/dev bind mount); everything else on the
+         *  default /state is Chat, unless its title marks it as the privileged Assistant thread. */
+        fun sessionKind(s: SessionInfo): SessionKind = when {
+            s.title == ASSISTANT_TITLE -> SessionKind.ASSISTANT
+            s.cwd.startsWith("/workspace") -> SessionKind.CODE
+            else -> SessionKind.CHAT
+        }
         @Volatile private var instance: ConnectionManager? = null
         fun get(context: Context): ConnectionManager =
             instance ?: synchronized(this) {

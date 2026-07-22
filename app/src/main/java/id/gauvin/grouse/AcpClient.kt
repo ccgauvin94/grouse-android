@@ -30,6 +30,9 @@ data class SessionInfo(
     val updatedAt: String,
     val messageCount: Int,
     val model: String,
+    // The session's server-side working directory (goose containers: /state by default). A Code
+    // session is one scoped under /workspace instead — see ConnectionManager.sessionKind().
+    val cwd: String = "",
 )
 
 /** One goose extension from the ACP `config/extensions/list` method (goose ≥1.42). */
@@ -99,6 +102,13 @@ class AcpClient(
 
     /** If set, resume this server-side session (session/load) instead of a fresh session/new. */
     var resumeSessionId: String? = null
+    /** The cwd to resume `resumeSessionId` with (session/load). Must match the session's actual
+     *  working_dir -- session/load's cwd param silently REWRITES working_dir if it differs, so
+     *  passing the wrong value here would un-scope a Code session back to whatever's passed. */
+    var resumeCwd: String = "/state"
+    /** The cwd for a brand-new session (session/new) when resumeSessionId is null. "/state" for
+     *  Chat/Assistant; "/workspace/<project>" for a Code session. */
+    var desiredCwd: String = "/state"
     /** On a silent background reconnect the UI still holds the transcript — drop the replay. */
     var suppressReplay = false
     // True between sending session/load and its response (i.e. while history replays).
@@ -281,7 +291,11 @@ class AcpClient(
                     replaying = true
                     rpc("session/load", buildJsonObject {
                         put("sessionId", resume)
-                        put("cwd", "/state")
+                        // session/load's cwd SILENTLY REWRITES the session's working_dir if it
+                        // differs from what's stored server-side -- must be the session's real cwd
+                        // (resumeCwd, set by the caller from the cached SessionInfo) or a Code
+                        // session would get un-scoped back to /state on every reconnect.
+                        put("cwd", resumeCwd)
                         putJsonArray("mcpServers") {}
                     })
                 } else startNewSession()
@@ -328,9 +342,9 @@ class AcpClient(
     }
 
     private fun startNewSession() = rpc("session/new", buildJsonObject {
-        // cwd must exist INSIDE the goose_acp container (not the host).
-        // /state is bind-mounted + writable + persistent.
-        put("cwd", "/state")
+        // cwd must exist INSIDE the goose container (not the host). /state is bind-mounted +
+        // writable + persistent (Chat/Assistant); /workspace/<project> for a Code session.
+        put("cwd", desiredCwd)
         putJsonArray("mcpServers") {}
     })
 
@@ -369,6 +383,7 @@ class AcpClient(
                 updatedAt = o["updatedAt"]?.jsonPrimitive?.contentOrNull ?: "",
                 messageCount = meta?.get("messageCount")?.jsonPrimitive?.intOrNull ?: 0,
                 model = meta?.get("modelId")?.jsonPrimitive?.contentOrNull ?: "",
+                cwd = o["cwd"]?.jsonPrimitive?.contentOrNull ?: "",
             )
         }
     }

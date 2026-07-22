@@ -12,11 +12,21 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.core.content.IntentCompat
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,8 +38,10 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import id.gauvin.grouse.ui.theme.GooseTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -155,14 +167,69 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
             }
         }
     }
-    NavHost(nav, startDestination = if (cm.configured) "chat" else "connect") {
-        composable("connect") {
-            ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
+
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val drawerScope = rememberCoroutineScope()
+    val backStack by nav.currentBackStackEntryAsState()
+    val route = backStack?.destination?.route
+    fun closeDrawer() = drawerScope.launch { drawerState.close() }
+    fun openDrawer() = drawerScope.launch { drawerState.open() }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        // No drawer on the onboarding screen, and not once it's mid-swipe-away from "connect" either
+        // -- gate strictly on being past onboarding.
+        gesturesEnabled = cm.configured && route != "connect",
+        drawerContent = {
+            ModalDrawerSheet {
+                Column(Modifier.fillMaxHeight().padding(vertical = 12.dp)) {
+                    NavigationDrawerItem(
+                        label = { Text("Assistant") },
+                        icon = { Icon(Icons.Filled.Psychology, contentDescription = null) },
+                        selected = route == "chat" && cm.onAssistant,
+                        onClick = {
+                            closeDrawer(); cm.openAssistant()
+                            nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                    NavigationDrawerItem(
+                        label = { Text("Chat") },
+                        icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null) },
+                        selected = route == "sessions_chat" || (route == "chat" && !cm.onAssistant),
+                        onClick = { closeDrawer(); nav.navigate("sessions_chat") { launchSingleTop = true } },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                    NavigationDrawerItem(
+                        label = { Text("Code") },
+                        icon = { Icon(Icons.Filled.Code, contentDescription = null) },
+                        selected = route == "sessions_code",
+                        onClick = { closeDrawer(); nav.navigate("sessions_code") { launchSingleTop = true } },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                    Spacer(Modifier.weight(1f))
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    NavigationDrawerItem(
+                        label = { Text("Settings") },
+                        icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+                        selected = route == "settings",
+                        onClick = { closeDrawer(); nav.navigate("settings") { launchSingleTop = true } },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                }
+            }
+        },
+    ) {
+        NavHost(nav, startDestination = if (cm.configured) "chat" else "connect") {
+            composable("connect") {
+                ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
+            }
+            composable("chat") { ChatScreen(cm, onOpenDrawer = ::openDrawer) }
+            composable("sessions_chat") { SessionListScreen(cm, nav, SessionKind.CHAT, onOpenDrawer = ::openDrawer) }
+            composable("sessions_code") { SessionListScreen(cm, nav, SessionKind.CODE, onOpenDrawer = ::openDrawer) }
+            composable("settings") { SettingsScreen(cm, nav, onOpenDrawer = ::openDrawer) }
+            composable("extensions") { ExtensionsScreen(cm, nav) }
         }
-        composable("chat") { ChatScreen(cm, nav) }
-        composable("sessions") { SessionsScreen(cm, nav) }
-        composable("settings") { SettingsScreen(cm, nav) }
-        composable("extensions") { ExtensionsScreen(cm, nav) }
     }
 }
 

@@ -128,6 +128,25 @@ class SecureStore(context: Context) {
         get() = cfg.getString("last_session", null)
         set(v) = cfg.edit().putString("last_session", v).apply()
 
+    /** The cwd lastSessionId was opened with — a cold-start fallback for resolving a resume's cwd
+     *  before any session/list round-trip has populated the in-memory cache (see
+     *  ConnectionManager.open()). Wrong here just means a stale-cwd guess, never a crash. */
+    var lastSessionCwd: String
+        get() = cfg.getString("last_session_cwd", "/state") ?: "/state"
+        set(v) = cfg.edit().putString("last_session_cwd", v).apply()
+
+    /** Recently used /workspace project names for the "New Code session" dialog, most-recent-first,
+     *  capped at 10. A delimited string (not a StringSet) because order matters here — unlike
+     *  knownModels, which doesn't care about recency. */
+    fun recentWorkspaceProjects(): List<String> =
+        (cfg.getString("recent_workspace_projects", "") ?: "").split("\n").filter { it.isNotBlank() }
+
+    fun addRecentWorkspaceProject(name: String) {
+        val cur = recentWorkspaceProjects().filterNot { it == name }
+        val next = (listOf(name) + cur).take(10)
+        cfg.edit().putString("recent_workspace_projects", next.joinToString("\n")).apply()
+    }
+
     /** When the last proactive briefing push arrived (epoch millis) — shown on the Assistant status. */
     var lastBriefingAt: Long
         get() = cfg.getLong("last_briefing_at", 0L)
