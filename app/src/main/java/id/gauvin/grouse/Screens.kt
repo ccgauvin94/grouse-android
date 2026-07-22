@@ -353,11 +353,23 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                     // "open at bottom", "jump to bottom", and streaming-stays-pinned are trivial.
                     LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.fillMaxSize()) {
                         if (cm.busy.value) item { TypingIndicator() }
-                        // key on the stable message id so the streaming bubble is reused (not rebuilt)
-                        // as its text grows; i==0 is the newest message → mark it streaming so it renders
-                        // as plain text until the turn finishes (skips the per-token Markdown re-parse).
-                        itemsIndexed(cm.messages.asReversed(), key = { _, m -> m.id }) { i, m ->
-                            MessageBubble(m, streaming = i == 0 && cm.busy.value && m.role == "assistant")
+                        // Consecutive tool calls collapse into one dropdown (goose often fires a run of
+                        // 5-10 shell/read calls back to back — a wall of individual chips otherwise).
+                        // Grouped on the forward list so adjacency is chronological, then reversed for
+                        // display like the flat list was. NOT remembered on messages.size: the streaming
+                        // assistant message updates via .copy() (new object, same id, size unchanged), so
+                        // a size-keyed cache would go stale mid-stream. Grouping is O(#messages) — cheap.
+                        val grouped = groupChatItems(cm.messages).asReversed()
+                        // key on the stable id of the group's first message so a growing tool-call run
+                        // (or the streaming assistant bubble) reuses its composition instead of rebuilding;
+                        // i==0 is the newest item → mark an assistant Msg streaming so it renders as plain
+                        // text until the turn finishes (skips the per-token Markdown re-parse).
+                        itemsIndexed(grouped, key = { _, item -> item.firstId }) { i, item ->
+                            when (item) {
+                                is ChatItem.Tools -> ToolChipGroup(item.items)
+                                is ChatItem.Msg -> MessageBubble(
+                                    item.m, streaming = i == 0 && cm.busy.value && item.m.role == "assistant")
+                            }
                         }
                     }
                     if (!atBottom) SmallFloatingActionButton(
@@ -1181,6 +1193,75 @@ private fun ThoughtBubble(text: String) {
             Text(text, style = MaterialTheme.typography.bodySmall.copy(fontStyle = FontStyle.Italic),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 24.dp, bottom = 4.dp))
+        }
+    }
+}
+
+/** A run of consecutive same-role messages for display: a lone message, or 2+ consecutive tool
+ *  calls collapsed into one dropdown (goose often fires 5-10 shell/read calls back to back — a
+ *  wall of individual chips otherwise, see the "grouping" ask). */
+private sealed interface ChatItem {
+    val firstId: Long
+    data class Msg(val m: ChatMessage) : ChatItem { override val firstId get() = m.id }
+    data class Tools(val items: List<ChatMessage>) : ChatItem { override val firstId get() = items.first().id }
+}
+
+/** Walk messages in chronological order, merging consecutive role=="tool" runs of 2+ into one
+ *  ChatItem.Tools; everything else (including a lone tool call) stays a ChatItem.Msg. */
+private fun groupChatItems(messages: List<ChatMessage>): List<ChatItem> {
+    val out = mutableListOf<ChatItem>()
+    var i = 0
+    while (i < messages.size) {
+        val m = messages[i]
+        if (m.role == "tool") {
+            var j = i + 1
+            while (j < messages.size && messages[j].role == "tool") j++
+            out += if (j - i > 1) ChatItem.Tools(messages.subList(i, j).toList()) else ChatItem.Msg(m)
+            i = j
+        } else {
+            out += ChatItem.Msg(m); i++
+        }
+    }
+    return out
+}
+
+/** ACP tool titles look like "shell · ls -laR /some/long/path". Split into a short badge label
+ *  and the (often long) detail, so a collapsed group header can show just the label. */
+private fun splitToolTitle(title: String): Pair<String, String> {
+    val idx = title.indexOf(" · ")
+    return if (idx >= 0) title.take(idx) to title.substring(idx + 3) else title to ""
+}
+
+/** Collapsed: one chip, "N× <tool>" (or "N tool calls" for a mixed run). Tap to expand into the
+ *  individual calls, oldest first, each rendered like a normal ToolChip. */
+@Composable
+private fun ToolChipGroup(items: List<ChatMessage>) {
+    var expanded by remember { mutableStateOf(false) }
+    val names = items.map { splitToolTitle(it.text).first }.distinct()
+    val label = if (names.size == 1) "${items.size}× ${names[0]}" else "${items.size} tool calls"
+    Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.clickable { expanded = !expanded }
+        ) {
+            Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (expanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null, modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.outline
+                )
+                Spacer(Modifier.width(2.dp))
+                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(label, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        AnimatedVisibility(expanded) {
+            Column(Modifier.padding(start = 20.dp, top = 2.dp)) {
+                items.forEach { ToolChip(it.text) }
+            }
         }
     }
 }
