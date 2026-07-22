@@ -445,7 +445,14 @@ class AcpClient(
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
             val ext = o["extension"] as? JsonObject ?: return@mapNotNull null
-            val name = ext["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            // type=mcp extensions (nextcloud, kagi, fastmail, Fetch -- anything backed by an actual
+            // MCP server) carry their name NESTED at extension.server.name, not the top-level
+            // extension.name that builtin/platform types use. Missing this silently dropped every
+            // MCP extension from the list (confirmed live: nextcloud/kagi/fastmail/Fetch all lack a
+            // top-level name). Check both.
+            val name = ext["name"]?.jsonPrimitive?.contentOrNull
+                ?: (ext["server"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                ?: return@mapNotNull null
             ExtInfo(
                 name = name,
                 enabled = o["enabled"]?.jsonPrimitive?.booleanOrNull ?: false,
