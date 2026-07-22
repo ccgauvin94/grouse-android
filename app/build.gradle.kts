@@ -20,6 +20,11 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Sideload build: sign with the debug keystore so the release APK installs OVER the
+            // debug app (same signature, no uninstall) and needs no separate keystore. The point is
+            // isDebuggable=false — that's what removes Compose's debug-mode jank (debug builds skip
+            // ART optimization and run Compose instrumented). Not for Play, ideal for personal use.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {
