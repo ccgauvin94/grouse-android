@@ -285,9 +285,21 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
                             else -> "Offline · tap to reconnect"
                         })
                     }
-                    // Context window used/size, so you can see how full the conversation is
-                    // (goose compacts around the limit). Appears once the first turn reports usage.
-                    if (usage != null && usage.size > 0) {
+                    // Compacting (manual /compact or a server-triggered auto-compact) takes priority
+                    // over the usage line — it's transient and explains why the numbers are about to
+                    // change. INDETERMINATE: the protocol only ever sends text status lines, never a
+                    // numeric percentage, so there's no real fraction to show.
+                    if (cm.compacting.value) {
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(start = 18.dp, top = 2.dp)) {
+                            LinearProgressIndicator(modifier = Modifier.width(40.dp).height(3.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Compacting…", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                    } else if (usage != null && usage.size > 0) {
+                        // Context window used/size, so you can see how full the conversation is
+                        // (goose compacts around the limit). Appears once the first turn reports usage.
                         val pct = (usage.used * 100 / usage.size).coerceIn(0, 100)
                         Text("${fmtTokens(usage.used)} / ${fmtTokens(usage.size)} · ${pct}%",
                             style = MaterialTheme.typography.labelSmall,
@@ -329,7 +341,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController) {
             }
             // Model/mode picker opens from the Tune button in the top bar (no always-on bar).
             if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
-                cm.configuredProviders, cm.knownModels.value, cm::setOption, cm::compact)
+                cm.configuredProviders, cm.knownModels.value, cm::setOption, cm::compact, cm.compacting.value)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (cm.messages.isEmpty() && !cm.busy.value) {
                     Column(
@@ -955,6 +967,7 @@ fun ConfigPanel(
     knownModels: Set<String>,
     onPick: (String, String) -> Unit,
     onCompact: () -> Unit,
+    compacting: Boolean = false,
 ) {
     if (options.isEmpty()) {
         Text("loading model options…", style = MaterialTheme.typography.bodySmall,
@@ -975,8 +988,13 @@ fun ConfigPanel(
                 else -> ConfigDropdown(opt, onPick)
             }
         }
-        OutlinedButton(onClick = onCompact, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
-            Text("Compact conversation")
+        OutlinedButton(onClick = onCompact, enabled = !compacting,
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            if (compacting) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(if (compacting) "Compacting…" else "Compact conversation")
         }
         HorizontalDivider(Modifier.padding(top = 8.dp))
     }

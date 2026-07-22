@@ -57,6 +57,9 @@ sealed interface AcpEvent {
     data class Commands(val names: List<String>) : AcpEvent
     data class Usage(val used: Int, val size: Int, val cost: Double, val currency: String) : AcpEvent
     data class Chart(val spec: String) : AcpEvent   // Chart.js-shaped JSON from autovisualiser
+    /** A goose-custom status line (currently: compaction progress/notice text). Substring-matched
+     *  by the consumer — see ConnectionManager.onEvent. */
+    data class CompactionStatus(val message: String) : AcpEvent
     /** Reply to a config read: the requested key and its string value (empty if unset). */
     data class ServerConfig(val key: String, val value: String) : AcpEvent
     data class Permission(
@@ -223,6 +226,12 @@ class AcpClient(
                 put("protocolVersion", 1)
                 putJsonObject("clientCapabilities") {
                     putJsonObject("fs") { put("readTextFile", false); put("writeTextFile", false) }
+                    // Opt into goose's custom notifications (currently: compaction status lines).
+                    // Purely additive — the standard usage_update still always fires regardless,
+                    // so this can't regress anything already working.
+                    putJsonObject("_meta") {
+                        putJsonObject("goose") { put("customNotifications", true) }
+                    }
                 }
             })
         }
@@ -392,12 +401,29 @@ class AcpClient(
     }
 
     private fun notification(method: String, params: JsonObject?) {
-        if (method != "session/update") return
-        // Silent reconnect: the UI already holds the transcript, so drop the replay.
-        if (replaying && suppressReplay) return
+        when (method) {
+            "session/update" -> standardUpdate(params)
+            "_goose/unstable/session/update" -> gooseUpdate(params)
+        }
+    }
+
+    private fun gooseUpdate(params: JsonObject?) {
         val update = params?.get("update") as? JsonObject ?: return
+        if (update["sessionUpdate"]?.jsonPrimitive?.contentOrNull != "status_message") return
+        val status = update["status"] as? JsonObject ?: return
+        val msg = status["message"]?.jsonPrimitive?.contentOrNull ?: return
+        onEvent(AcpEvent.CompactionStatus(msg))
+    }
+
+    private fun standardUpdate(params: JsonObject?) {
+        val update = params?.get("update") as? JsonObject ?: return
+        val tag = update["sessionUpdate"]?.jsonPrimitive?.contentOrNull
+        // Silent reconnect: the UI already holds the transcript, so drop the replay — EXCEPT
+        // usage_update, which can be the only signal a suppressed-replay reconnect gets that a
+        // trailing usage number changed; dropping it blanket-style left the top bar stale.
+        if (tag != "usage_update" && replaying && suppressReplay) return
         fun text() = (update["content"] as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
-        when (update["sessionUpdate"]?.jsonPrimitive?.contentOrNull) {
+        when (tag) {
             // user_message_chunk only appears during a session/load replay (live prompts aren't echoed).
             "user_message_chunk" -> text()?.let { onEvent(AcpEvent.UserChunk(it)) }
             "agent_message_chunk" -> text()?.let { onEvent(AcpEvent.AgentChunk(it)) }

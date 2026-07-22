@@ -42,6 +42,10 @@ class ConnectionManager private constructor(context: Context) {
     val currentSession = mutableStateOf<String?>(null)   // id of the session on screen (for the Assistant binding)
     val busy = mutableStateOf(false)
     val usage = mutableStateOf<AcpEvent.Usage?>(null)   // context window used/size + cost
+    // True while compaction (manual /compact or server-triggered auto-compact) is running. The
+    // protocol only ever sends discrete text status lines, never a numeric percentage, so this
+    // drives an INDETERMINATE indicator, not a real progress fraction.
+    val compacting = mutableStateOf(false)
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
     // Handed in by OS entry points (share sheet, shortcut, tile), consumed by the UI.
@@ -311,7 +315,11 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
-    fun compact() { busy.value = true; client?.sendPrompt("/compact") }
+    fun compact() {
+        busy.value = true
+        compacting.value = true   // client-initiated: don't wait for the server's own status echo
+        client?.sendPrompt("/compact")
+    }
 
     /** Answer the given approval request; null optionId denies (cancelled). */
     fun answerPermission(p: AcpEvent.Permission, optionId: String?) {
@@ -359,13 +367,26 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Error -> {
                 messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false
+                compacting.value = false   // safety net: a dropped/garbled status must never stick
                 if (voiceReplyPending) { voiceReplyPending = false; restoreModel() }
             }
             is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title)); streamingRole = null }
             is AcpEvent.Usage -> usage.value = ev
+            is AcpEvent.CompactionStatus -> {
+                // Substring match on goose's own status copy — see agents/agent.rs (aaif-goose/goose,
+                // commit 1e03bbb5): Notice "Exceeded auto-compact threshold... Performing
+                // auto-compaction...", Progress "goose is compacting the conversation...", Notice
+                // "Compaction complete". Both start and end lines are type Notice, so "notice vs
+                // progress" can't gate the indicator — the text itself is the only stable signal. If
+                // a future goose upgrade rewords these, this just stops firing (fails safe: no
+                // spinner, never a wrong one) — re-check against that file after a server bump.
+                val m = ev.message.lowercase()
+                if (m.contains("compact")) compacting.value = true
+                if (m.contains("complete") || m.contains("error")) compacting.value = false
+            }
             is AcpEvent.Chart -> { messages.add(ChatMessage("chart", ev.spec)); streamingRole = null }
             is AcpEvent.TurnDone -> {
-                streamingRole = null; busy.value = false
+                streamingRole = null; busy.value = false; compacting.value = false
                 if (voiceReplyPending) {
                     // Voice turn: speak the reply here (survives the voice sheet closing) and do
                     // NOT notify — the point of voice is to just talk back. Then restore the model.
