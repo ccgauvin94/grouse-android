@@ -130,6 +130,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     val ctx = LocalContext.current
     var showConfig by remember { mutableStateOf(false) }
     var showSchedule by remember { mutableStateOf(false) }
+    var showTools by remember { mutableStateOf(false) }
     // Assistant health from last-briefing recency (briefings run hourly 7 AM–10 PM). Green = fresh,
     // yellow = late, red = stale/never. Overnight the gap grows to ~9h and that's still healthy.
     val lastBriefing = cm.store.lastBriefingAt
@@ -229,6 +230,11 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
 
     cm.permissions.firstOrNull()?.let { req ->
         PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
+    }
+
+    if (showTools) {
+        LaunchedEffect(Unit) { if (cm.extensions.value.isEmpty()) cm.loadExtensions() }
+        ToolManagementSheet(cm, onDismiss = { showTools = false })
     }
 
     if (showVisionWarn) AlertDialog(
@@ -333,6 +339,14 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             modifier = Modifier.size(9.dp).align(Alignment.TopEnd)) {}
                     }
                 }
+                // Live tool count for THIS session — tap to see/toggle which are actually on.
+                AssistChip(
+                    onClick = { showTools = true },
+                    label = { Text("${cm.sessionExtensionNames.value.size}") },
+                    leadingIcon = { Icon(Icons.Filled.Build, contentDescription = "tools",
+                        modifier = Modifier.size(16.dp)) },
+                    modifier = Modifier.padding(end = 4.dp),
+                )
                 IconButton(onClick = { showConfig = !showConfig }) {
                     Icon(Icons.Filled.Tune, contentDescription = "model")
                 }
@@ -384,7 +398,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             when (item) {
                                 is ChatItem.Tools -> ToolChipGroup(item.items)
                                 is ChatItem.Msg -> MessageBubble(
-                                    item.m, streaming = i == 0 && cm.busy.value && item.m.role == "assistant")
+                                    item.m, streaming = i == 0 && cm.busy.value && item.m.role == "assistant",
+                                    // Only the newest, finished assistant reply gets the stats line.
+                                    usage = if (i == 0 && item.m.role == "assistant" && !cm.busy.value)
+                                        cm.lastMessageUsage.value else null)
                             }
                         }
                     }
@@ -483,6 +500,53 @@ fun PermissionSheet(req: AcpEvent.Permission, onChoose: (String?) -> Unit) {
                     Button(onClick = { onChoose(opt.optionId) },
                         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { Text(prettyOption(opt.label)) }
                 }
+            }
+        }
+    }
+}
+
+/** What tools are actually active in THIS session, with a switch per extension to change it on the
+ *  fly (session-scoped — never touches config.yaml or any other open session). Distinct from
+ *  Settings' Extensions screen (that one's the GLOBAL default for new chats) and the Session
+ *  extension profiles (a saved preset applied at open time) — this is "right now, this chat". */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ToolManagementSheet(cm: ConnectionManager, onDismiss: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).verticalScroll(rememberScrollState())) {
+            Text("Tools for this chat", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(4.dp))
+            Text("Session-only — doesn't change your global defaults or other chats. Reflects this " +
+                "chat's own tool set from when it was opened, which can lag behind a global change " +
+                "made since — flip it here if it's stale.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.height(12.dp))
+            if (cm.extensions.value.isEmpty()) {
+                Text("loading…", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline)
+            }
+            val active = cm.sessionExtensionNames.value.toSet()
+            cm.extensions.value.forEach { e ->
+                val isOn = e.name in active
+                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(e.name, style = MaterialTheme.typography.bodyLarge)
+                        if (e.description.isNotBlank())
+                            Text(e.description, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline, maxLines = 2)
+                    }
+                    Switch(
+                        checked = isOn,
+                        // The safety guard only blocks REMOVING an already-active core extension
+                        // (matching the extension-profile diff's "never strip a core extension") —
+                        // it must NOT also block turning on a bundled one that's currently off (e.g.
+                        // a stale session predating a global enable), or a switch correctly showing
+                        // the wrong state becomes un-fixable from this sheet.
+                        enabled = !(e.bundled && isOn),
+                        onCheckedChange = { on -> cm.toggleSessionExtension(e.name, on) },
+                    )
+                }
+                HorizontalDivider()
             }
         }
     }
@@ -1159,14 +1223,14 @@ fun ConfigDropdown(opt: ConfigOption, onPick: (String, String) -> Unit) {
 // ---- Message bubbles --------------------------------------------------------
 
 @Composable
-fun MessageBubble(m: ChatMessage, streaming: Boolean = false) {
+fun MessageBubble(m: ChatMessage, streaming: Boolean = false, usage: AcpEvent.MessageUsage? = null) {
     when (m.role) {
         "user" -> UserBubble(m)
         "thought" -> ThoughtBubble(m.text)
-        "tool" -> ToolChip(m.text)
+        "tool" -> ToolChip(m.text, m.detail)
         "error" -> ErrorBubble(m.text)
         "chart" -> ChartView(m.text)
-        else -> AssistantBubble(m.text, streaming)
+        else -> AssistantBubble(m.text, streaming, usage)
     }
 }
 
@@ -1266,12 +1330,21 @@ private fun decodeImageBlock(b64: String): androidx.compose.ui.graphics.ImageBit
 } catch (e: Exception) { null }
 
 @Composable
-private fun AssistantBubble(text: String, streaming: Boolean = false) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+private fun AssistantBubble(text: String, streaming: Boolean = false, usage: AcpEvent.MessageUsage? = null) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Box(Modifier.copyOnLongPress(text).padding(horizontal = 2.dp, vertical = 4.dp)) {
             // Plain text while streaming — re-parsing the growing Markdown every token is O(n²).
             // The bubble re-renders once with full Markdown when the turn finishes.
             if (streaming) Text(text) else Markdownish(text)
+        }
+        if (usage != null) {
+            val tps = usage.outputTokens * 1000.0 / usage.elapsedMs
+            val bits = mutableListOf("%.1f tok/s".format(tps))
+            if (usage.ttftMs > 0) bits += "TTFT ${usage.ttftMs}ms"
+            usage.cost?.let { if (it > 0) bits += "$" + "%.4f".format(it) }
+            Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(start = 2.dp, top = 1.dp))
         }
     }
 }
@@ -1366,23 +1439,35 @@ private fun ToolChipGroup(items: List<ChatMessage>) {
         }
         AnimatedVisibility(expanded) {
             Column(Modifier.padding(start = 20.dp, top = 2.dp)) {
-                items.forEach { ToolChip(it.text) }
+                items.forEach { ToolChip(it.text, it.detail) }
             }
         }
     }
 }
 
+/** Tap to expand and see the tool's rawInput (command/args) — Desktop shows this inline; here it's
+ *  collapsed by default (matches ThoughtBubble's pattern) so a wall of tool calls stays scannable. */
 @Composable
-private fun ToolChip(title: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+private fun ToolChip(title: String, detail: String = "") {
+    var expanded by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Surface(color = MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = MaterialTheme.colorScheme.onSurfaceVariant, shape = RoundedCornerShape(8.dp)) {
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant, shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.let { if (detail.isNotBlank()) it.clickable { expanded = !expanded } else it }) {
             Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(6.dp))
-                Text(title, style = MaterialTheme.typography.labelMedium)
+                Text(title, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                if (detail.isNotBlank()) Icon(
+                    if (expanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null, modifier = Modifier.size(16.dp))
             }
+        }
+        if (detail.isNotBlank()) AnimatedVisibility(expanded) {
+            Text(detail, style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(start = 20.dp, top = 2.dp, bottom = 2.dp))
         }
     }
 }

@@ -18,6 +18,9 @@ data class ChatMessage(
     val role: String,
     val text: String,
     val images: List<ImageBlock> = emptyList(),
+    // Extra detail for a "tool" message: the tool's rawInput (command/args) — Desktop shows this,
+    // Grouse was discarding it and only keeping the title. Unused by other roles.
+    val detail: String = "",
     val id: Long = chatMessageSeq.getAndIncrement(),
 )
 
@@ -66,6 +69,13 @@ class ConnectionManager private constructor(context: Context) {
     val knownModels = mutableStateOf(emptySet<String>())   // models for the CURRENT provider only
     val extensions = mutableStateOf<List<ExtInfo>>(emptyList())
     val extensionsBusy = mutableStateOf(false)
+    // Names of the CURRENT session's enabled extensions — drives the in-chat "N tools" indicator
+    // and its management sheet. Refreshed on every session open (Ready); optimistically updated by
+    // toggleSessionExtension since add/remove replies are empty (no server re-list to react to).
+    val sessionExtensionNames = mutableStateOf<List<String>>(emptyList())
+    // Per-message generation stats (tok/s, cost) for the most recently finished assistant reply.
+    // Cleared when a new turn starts so stale numbers don't linger under the next streaming bubble.
+    val lastMessageUsage = mutableStateOf<AcpEvent.MessageUsage?>(null)
 
     /** Fetch the extension list over ACP (agent-global). Reply lands as AcpEvent.Extensions.
      *  goose ≥1.42 dropped goosed's REST /config/extensions; this uses the ACP method instead. */
@@ -101,6 +111,19 @@ class ConnectionManager private constructor(context: Context) {
         val c = client ?: return
         extensionsBusy.value = true
         c.setExtensionEnabled(e.configKey, enabled)
+    }
+
+    /** Enable/disable one extension for just THIS session (session-scoped API — never touches
+     *  config.yaml or any other open session). Optimistic: add/remove replies are empty, so
+     *  sessionExtensionNames is updated immediately rather than waiting on a re-list. */
+    fun toggleSessionExtension(name: String, enabled: Boolean) {
+        if (enabled) {
+            extensions.value.firstOrNull { it.name == name }?.let { client?.addSessionExtension(it.raw) }
+            sessionExtensionNames.value = sessionExtensionNames.value + name
+        } else {
+            client?.removeSessionExtension(name)
+            sessionExtensionNames.value = sessionExtensionNames.value - name
+        }
     }
 
     // Providers actually set up on this goose (config.yaml `providers:` with configured:true).
@@ -269,8 +292,10 @@ class ConnectionManager private constructor(context: Context) {
         // "[📎 N]" placeholder. (Live-session only — a session reloaded from the server replays
         // text; images aren't reconstructed from the replayed content blocks.)
         messages.add(ChatMessage("user", text, images)); streamingRole = null; busy.value = true
+        lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
         startService()   // keep the socket alive if the user backgrounds mid-turn
         if (live) {
+            lastSessionId?.let { store.pendingPushSessionId = it }
             client?.sendPrompt(text, images)
         } else {
             // Not connected yet (initial connect / silent reconnect window): queue and connect,
@@ -385,8 +410,13 @@ class ConnectionManager private constructor(context: Context) {
         live = false; connecting = true; online.value = false
         // A new client can't receive the old client's TurnDone, so clear turn state here.
         // Otherwise a hung/dropped turn leaves busy=true and every new chat + reconnect
-        // inherits a stuck "goose is thinking…" with nothing sent.
-        busy.value = false; streamingRole = null
+        // inherits a stuck "goose is thinking…" with nothing sent. Same logic for compacting:
+        // it's only cleared by TurnDone/Error/a matched CompactionStatus on the SAME client — if
+        // you switch sessions or background mid-compact, the old client gets superseded (dropped
+        // by the clientGen guard) before any of those arrive, and compacting (global, not
+        // per-session) stays stuck true forever after, permanently hiding the usage line under it
+        // (they're if/else-if) on every session including ones that were never compacting at all.
+        busy.value = false; streamingRole = null; compacting.value = false
         val url = "wss://${store.host}:${store.port}/acp"
         status.value = when {
             resume == null -> "connecting to $url"
@@ -432,7 +462,7 @@ class ConnectionManager private constructor(context: Context) {
                 compacting.value = false   // safety net: a dropped/garbled status must never stick
                 if (voiceReplyPending) { voiceReplyPending = false; restoreModel() }
             }
-            is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title)); streamingRole = null }
+            is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title, detail = ev.detail)); streamingRole = null }
             is AcpEvent.Usage -> usage.value = ev
             is AcpEvent.CompactionStatus -> {
                 // Substring match on goose's own status copy — see agents/agent.rs (aaif-goose/goose,
@@ -449,6 +479,10 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Chart -> { messages.add(ChatMessage("chart", ev.spec)); streamingRole = null }
             is AcpEvent.TurnDone -> {
                 streamingRole = null; busy.value = false; compacting.value = false
+                // We got the authoritative completion straight from our own socket -- stop waiting
+                // on the Stop-hook push for this turn so a later turn from another client in the
+                // same (possibly shared) session doesn't spuriously match the stale flag.
+                store.pendingPushSessionId = null
                 if (voiceReplyPending) {
                     // Voice turn: speak the reply here (survives the voice sheet closing) and do
                     // NOT notify — the point of voice is to just talk back. Then restore the model.
@@ -496,6 +530,10 @@ class ConnectionManager private constructor(context: Context) {
                 store.lastSessionCwd = pendingOpenCwd   // Ready itself carries no cwd -- see open()
                 currentSession.value = ev.sessionId
                 applyExtensionProfile(ev.sessionId, pendingSessionKind)
+                // Populate the in-chat "N tools" indicator for THIS session. Harmless if
+                // applyExtensionProfile above also triggers a list (e.g. via the catalog-fetch
+                // chain) — SessionExtensions just overwrites sessionExtensionNames either way.
+                client?.listSessionExtensions()
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Archive the old
                 // thread first (if any), then name this one so both the app (title match) and
@@ -511,6 +549,7 @@ class ConnectionManager private constructor(context: Context) {
                 }
                 client?.listSessions()   // so the Assistant thread can be resolved by title
                 // Flush every queued send (bubbles were already added when queued).
+                if (pendingSends.isNotEmpty()) store.pendingPushSessionId = ev.sessionId
                 while (pendingSends.isNotEmpty()) {
                     val p = pendingSends.removeFirst()
                     client?.sendPrompt(p.text, p.images)
@@ -540,6 +579,7 @@ class ConnectionManager private constructor(context: Context) {
                 pendingProfileApply?.let { client?.listSessionExtensions() }
             }
             is AcpEvent.SessionExtensions -> {
+                sessionExtensionNames.value = ev.names   // always reflect the reply, profile-apply or not
                 val (sid, desired) = pendingProfileApply ?: return
                 if (sid != ev.sessionId) return   // stale reply for a since-superseded session
                 pendingProfileApply = null
@@ -550,7 +590,9 @@ class ConnectionManager private constructor(context: Context) {
                     val ext = extensions.value.firstOrNull { it.name == name }
                     if (ext == null || !ext.bundled) client?.removeSessionExtension(name)   // never strip a core extension
                 }
+                sessionExtensionNames.value = desired.toList()   // optimistic: add/remove above don't reply
             }
+            is AcpEvent.MessageUsage -> lastMessageUsage.value = ev
             is AcpEvent.Permission -> {
                 // The privileged Assistant thread honors the user's chosen action policy; every
                 // other conversation (and voice) always prompts. Voice already auto-denies via its

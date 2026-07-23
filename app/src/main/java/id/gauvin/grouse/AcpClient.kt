@@ -58,7 +58,15 @@ sealed interface AcpEvent {
     data class AgentChunk(val text: String) : AcpEvent
     data class ThoughtChunk(val text: String) : AcpEvent
     data class UserChunk(val text: String) : AcpEvent
-    data class ToolCall(val title: String) : AcpEvent
+    /** `detail` is the tool's rawInput (command/args), same extraction the permission sheet already
+     *  does — Desktop shows this; Grouse was discarding it and only showing `title`. */
+    data class ToolCall(val title: String, val detail: String = "") : AcpEvent
+    /** Per-message generation stats (goose-custom `_goose/unstable/session/update`, sessionUpdate
+     *  "message_usage") — tok/s derived client-side from outputTokens/elapsedMs. Separate from the
+     *  aggregate [Usage] (context window used/size), which comes from the STANDARD ACP usage_update. */
+    data class MessageUsage(
+        val outputTokens: Int, val elapsedMs: Long, val ttftMs: Long, val cost: Double?,
+    ) : AcpEvent
     data class TurnDone(val stopReason: String) : AcpEvent
     data class Error(val text: String) : AcpEvent
     data class Config(val options: List<ConfigOption>) : AcpEvent
@@ -484,10 +492,25 @@ class AcpClient(
 
     private fun gooseUpdate(params: JsonObject?) {
         val update = params?.get("update") as? JsonObject ?: return
-        if (update["sessionUpdate"]?.jsonPrimitive?.contentOrNull != "status_message") return
-        val status = update["status"] as? JsonObject ?: return
-        val msg = status["message"]?.jsonPrimitive?.contentOrNull ?: return
-        onEvent(AcpEvent.CompactionStatus(msg))
+        when (update["sessionUpdate"]?.jsonPrimitive?.contentOrNull) {
+            "status_message" -> {
+                val status = update["status"] as? JsonObject ?: return
+                val msg = status["message"]?.jsonPrimitive?.contentOrNull ?: return
+                onEvent(AcpEvent.CompactionStatus(msg))
+            }
+            // Per-message tok/s + cost (goose-sdk-types MessageUsageData: outputTokens, elapsedMs,
+            // timeToFirstTokenMs, cost — camelCase on the wire). Distinct from the standard ACP
+            // usage_update (context-window used/size) already handled in standardUpdate().
+            "message_usage" -> {
+                val usage = update["usage"] as? JsonObject ?: return
+                val outTok = usage["outputTokens"]?.jsonPrimitive?.intOrNull ?: return
+                val elapsed = usage["elapsedMs"]?.jsonPrimitive?.longOrNull ?: return
+                if (elapsed <= 0) return   // can't derive a tok/s rate from a zero/missing duration
+                val ttft = usage["timeToFirstTokenMs"]?.jsonPrimitive?.longOrNull ?: 0L
+                val cost = usage["cost"]?.jsonPrimitive?.doubleOrNull
+                onEvent(AcpEvent.MessageUsage(outTok, elapsed, ttft, cost))
+            }
+        }
     }
 
     private fun standardUpdate(params: JsonObject?) {
@@ -507,13 +530,21 @@ class AcpClient(
             "tool_call" -> {
                 val toolName = (((update["_meta"] as? JsonObject)?.get("goose") as? JsonObject)
                     ?.get("toolCall") as? JsonObject)?.get("toolName")?.jsonPrimitive?.contentOrNull
+                val rawInput = update["rawInput"] as? JsonObject
                 // `as? JsonPrimitive` (not .jsonPrimitive) so a tool whose `data` arg is an
                 // object/array is simply treated as a normal tool call, not a crash.
-                val chartData = ((update["rawInput"] as? JsonObject)?.get("data") as? JsonPrimitive)?.contentOrNull
+                val chartData = (rawInput?.get("data") as? JsonPrimitive)?.contentOrNull
                 if (toolName == "autovisualiser__show_chart" && chartData != null) {
                     onEvent(AcpEvent.Chart(chartData))
                 } else {
-                    onEvent(AcpEvent.ToolCall(update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call"))
+                    // Same rawInput.command-first extraction the permission sheet already does —
+                    // Desktop shows this detail, Grouse was dropping it and only keeping the title.
+                    val detail = rawInput?.let { ri ->
+                        ri["command"]?.jsonPrimitive?.contentOrNull
+                            ?: ri.toString().takeIf { it != "{}" } ?: ""
+                    } ?: ""
+                    onEvent(AcpEvent.ToolCall(
+                        update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call", detail))
                 }
             }
             "usage_update" -> {
