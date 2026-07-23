@@ -128,6 +128,16 @@ class SecureStore(context: Context) {
         get() = cfg.getString("last_session", null)
         set(v) = cfg.edit().putString("last_session", v).apply()
 
+    /** Session id of a prompt THIS device sent and hasn't seen a local TurnDone for yet — used to
+     *  filter the goose Stop-hook push, which fires for every client's turns (Desktop included) and
+     *  can't tell them apart server-side. lastSessionId ("session I have open") isn't enough: the
+     *  Assistant thread is one session shared by every client (title-matched), so Desktop typing in
+     *  it makes lastSessionId match too. This tracks "a turn I'm actually waiting on" instead.
+     *  Persisted (not in-memory) because the whole point is surviving process death while backgrounded. */
+    var pendingPushSessionId: String?
+        get() = cfg.getString("pending_push_session", null)
+        set(v) = cfg.edit().putString("pending_push_session", v).apply()
+
     /** The cwd lastSessionId was opened with — a cold-start fallback for resolving a resume's cwd
      *  before any session/list round-trip has populated the in-memory cache (see
      *  ConnectionManager.open()). Wrong here just means a stale-cwd guess, never a crash. */

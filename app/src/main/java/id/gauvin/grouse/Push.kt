@@ -52,11 +52,15 @@ class GoosePushService : PushService() {
         // Envelope {type,session,text}; plain text (no type) is treated as a briefing.
         val (type, session, text) = parsePush(raw)
         if (type == "turn") {
-            // Finished-turn nudge (fires for every goose turn, Desktop too). Skip when you're
-            // already watching (foreground), when it's another client's session, or right after a
-            // voice turn (the assistant already spoke). Tap deep-links to that session.
+            // Finished-turn nudge (fires for every goose turn, Desktop too -- the server can't tell
+            // clients apart). Only show it for a turn THIS device actually sent and is still waiting
+            // on -- comparing against "the session I have open" isn't enough, since the Assistant
+            // thread is shared by title match across every client, so Desktop typing there would
+            // match too. Skip when you're already watching (foreground) or right after a voice turn
+            // (the assistant already spoke). Tap deep-links to that session.
             if (cm.isForeground) return
-            if (session != null && session != cm.store.lastSessionId) return
+            if (session == null || session != cm.store.pendingPushSessionId) return
+            cm.store.pendingPushSessionId = null
             if (cm.recentVoice()) return
             Notifier(this).postReply(text, session)
         } else {
