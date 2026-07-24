@@ -285,15 +285,26 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         modifier = Modifier.clickable(enabled = !online) { cm.connectSaved() }) {
                         Surface(color = dot, shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
                         Spacer(Modifier.width(8.dp))
-                        Text(when {
-                            cm.onAssistant && busy -> "Assistant · working…"
-                            cm.onAssistant -> "Assistant"
-                            online && busy -> "Grouse · working…"
-                            online -> "Grouse"
-                            cm.status.value.contains("connect", true) ||
-                                cm.status.value.contains("load", true) -> "Connecting…"
-                            else -> "Offline · tap to reconnect"
-                        })
+                        // Single line + ellipsis: this Row shares the app bar with up to 3 action
+                        // icons, so on a compact width the default (titleLarge, unbounded) title text
+                        // used to wrap to a second line and visually collide with/get clipped by the
+                        // icons (e.g. "Assistant · working…" broke across two lines mid-word). A
+                        // tighter style plus a hard single-line cap keeps it readable and self-eliding
+                        // instead of visually breaking.
+                        Text(
+                            when {
+                                cm.onAssistant && busy -> "Assistant · working…"
+                                cm.onAssistant -> "Assistant"
+                                online && busy -> "Grouse · working…"
+                                online -> "Grouse"
+                                cm.status.value.contains("connect", true) ||
+                                    cm.status.value.contains("load", true) -> "Connecting…"
+                                else -> "Offline · tap to reconnect"
+                            },
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                     // Compacting (manual /compact or a server-triggered auto-compact) takes priority
                     // over the usage line — it's transient and explains why the numbers are about to
@@ -484,10 +495,16 @@ fun PermissionSheet(req: AcpEvent.Permission, onChoose: (String?) -> Unit) {
                 color = MaterialTheme.colorScheme.primary)
             if (req.detail.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
+                // Cap + internally scroll: a big tool call's rawInput (e.g. a large `write` body)
+                // must never grow this box past a fixed height, or it pushes the allow/deny buttons
+                // below the sheet's visible/reachable area on the phone.
                 Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth()) {
                     Text(req.detail, style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(10.dp))
+                        modifier = Modifier
+                            .heightIn(max = 220.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(10.dp))
                 }
             }
             Spacer(Modifier.height(16.dp))
