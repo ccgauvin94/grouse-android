@@ -67,6 +67,9 @@ class ConnectionManager private constructor(context: Context) {
     val showAllProviders = mutableStateOf(store.showAllProviders)
     val speakReplies = mutableStateOf(store.speakReplies)
     val knownModels = mutableStateOf(emptySet<String>())   // models for the CURRENT provider only
+    // Guards listSupportedModels() to fire once per provider per connection, not on every Config
+    // event (which fires on every option change, not just provider switches).
+    private var liveModelsFetchedFor: String? = null
     val extensions = mutableStateOf<List<ExtInfo>>(emptyList())
     val extensionsBusy = mutableStateOf(false)
     // Names of the CURRENT session's enabled extensions — drives the in-chat "N tools" indicator
@@ -417,6 +420,7 @@ class ConnectionManager private constructor(context: Context) {
         // per-session) stays stuck true forever after, permanently hiding the usage line under it
         // (they're if/else-if) on every session including ones that were never compacting at all.
         busy.value = false; streamingRole = null; compacting.value = false
+        liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         val url = "wss://${store.host}:${store.port}/acp"
         status.value = when {
             resume == null -> "connecting to $url"
@@ -523,6 +527,19 @@ class ConnectionManager private constructor(context: Context) {
                     }
                 }
                 knownModels.value = if (provider.isNotBlank()) store.knownModels(provider) else emptySet()
+                // Live-fetch this provider's actual model list once (e.g. LocalAI's /v1/models via
+                // goose's fetch_supported_models()) so newly-loaded local models (a fresh LOCALAI
+                // config, a new GGUF) show up without the user having to type the slug once first.
+                // Reply merges into store.knownModels below -- see AcpEvent.SupportedModels.
+                if (provider.isNotBlank() && provider != liveModelsFetchedFor) {
+                    liveModelsFetchedFor = provider
+                    client?.listSupportedModels(provider)
+                }
+            }
+            is AcpEvent.SupportedModels -> {
+                ev.models.forEach { store.addKnownModel(ev.providerId, it) }
+                val currentProvider = config.value.firstOrNull { it.id == "provider" }?.currentValue
+                if (ev.providerId == currentProvider) knownModels.value = store.knownModels(ev.providerId)
             }
             is AcpEvent.Ready -> {
                 live = true; connecting = false; online.value = true

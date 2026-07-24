@@ -84,6 +84,10 @@ sealed interface AcpEvent {
     data class CompactionStatus(val message: String) : AcpEvent
     /** Reply to a config read: the requested key and its string value (empty if unset). */
     data class ServerConfig(val key: String, val value: String) : AcpEvent
+    /** Live model list for one provider (reply to listSupportedModels) -- for an OpenAI-compatible
+     *  backend like LocalAI this hits its /v1/models endpoint server-side, so it reflects whatever
+     *  models are actually loadable right now, not just the goose-bundled "featured" set. */
+    data class SupportedModels(val providerId: String, val models: List<String>) : AcpEvent
     data class Permission(
         val toolCallId: String, val title: String, val detail: String, val options: List<PermOption>,
     ) : AcpEvent
@@ -207,6 +211,15 @@ class AcpClient(
     fun upsertConfig(key: String, value: String) =
         rpc("_goose/unstable/config/upsert", buildJsonObject {
             put("key", key); put("value", value)
+        })
+
+    /** Ask a provider for its LIVE model list (reply arrives as AcpEvent.SupportedModels). For the
+     *  "openai" provider goose calls fetch_supported_models(), which hits the configured backend's
+     *  /v1/models -- e.g. LocalAI -- so this surfaces every model actually loadable right now, not
+     *  just goose's bundled "featured" names or what the app happens to remember from past typing. */
+    fun listSupportedModels(providerId: String) =
+        rpc("_goose/unstable/providers/supported-models/list", buildJsonObject {
+            put("providerId", providerId)
         })
 
     /** Rename a session (sets its title). Used by the assistant-thread reset: the old thread is
@@ -391,6 +404,12 @@ class AcpClient(
             }
             // Upsert returns empty; nothing to reflect (the caller re-reads if it wants confirmation).
             "_goose/unstable/config/upsert" -> {}
+            "_goose/unstable/providers/supported-models/list" -> {
+                val providerId = result?.get("providerId")?.jsonPrimitive?.contentOrNull ?: return
+                val models = (result["models"] as? JsonArray).orEmpty()
+                    .mapNotNull { it.jsonPrimitive.contentOrNull }
+                onEvent(AcpEvent.SupportedModels(providerId, models))
+            }
             // Rename returns empty; the caller re-lists sessions to see the new title.
             "_goose/unstable/session/rename" -> {}
             "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))

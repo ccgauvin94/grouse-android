@@ -1152,48 +1152,74 @@ fun ConfigPanel(
     }
 }
 
-/** Model picker: an EDITABLE combobox. Pick from goose's featured models + ones seen before for the
- *  CURRENT provider (provider-scoped, so LocalAI and OpenRouter never mix), OR type any model id.
- *  Free text is needed for OpenRouter slugs goose doesn't "feature" (e.g. poolside/laguna-s-2.1) and
- *  for local LocalAI model names — a typed id is sent straight through config/upsert on IME-done. */
+/** Model picker: a READ-ONLY dropdown. Pick from goose's featured models + ones seen before for the
+ *  CURRENT provider (provider-scoped, so LocalAI and OpenRouter never mix, and now also live-fetched
+ *  from the provider's actual backend -- see AcpClient.listSupportedModels/ConnectionManager), or
+ *  pick "Custom model…" to type any model id in a dialog. Free text is needed for OpenRouter slugs
+ *  goose doesn't "feature" (e.g. poolside/laguna-s-2.1) and any local model id not yet in the list. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModelDropdown(opt: ConfigOption, knownModels: Set<String>, onPick: (String, String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
+    var showCustomDialog by remember { mutableStateOf(false) }
     val featured = opt.choices.map { it.value }
     val entries = (featured + knownModels.filter { it !in featured }).distinct()
     fun labelFor(v: String) = if (v == "current") "Provider default"
         else opt.choices.firstOrNull { it.value == v }?.label ?: v
-    // The raw model id, editable. Re-seeds whenever the active model changes elsewhere. Blank means
-    // "provider default" (goose's config.yaml model for the provider).
-    var text by remember(opt.currentValue) { mutableStateOf(opt.currentValue) }
-    val suggestions = entries.filter { it != text && (text.isBlank() || it.contains(text, ignoreCase = true)) }
-    fun commit(v: String) { expanded = false; text = if (v == "current") "" else v; onPick("model", v) }
+    fun commit(v: String) { expanded = false; onPick("model", v) }
+    val currentLabel = if (opt.currentValue.isBlank()) "Provider default" else labelFor(opt.currentValue)
     ExposedDropdownMenuBox(
         expanded = expanded, onExpandedChange = { expanded = it },
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
     ) {
         OutlinedTextField(
-            value = text,
-            onValueChange = { text = it; expanded = true },
+            value = currentLabel,
+            onValueChange = {},
+            readOnly = true,
             singleLine = true,
             label = { Text("model") },
-            placeholder = { Text("Provider default — or type a model id") },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = {
-                val v = text.trim(); commit(if (v.isEmpty()) "current" else v)
-            }),
             modifier = Modifier.menuAnchor().fillMaxWidth()
         )
-        if (suggestions.isNotEmpty()) {
-            ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                suggestions.forEach { v ->
-                    DropdownMenuItem(text = { Text(labelFor(v)) }, onClick = { commit(v) })
-                }
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(text = { Text("Provider default") }, onClick = { commit("current") })
+            entries.forEach { v ->
+                DropdownMenuItem(text = { Text(labelFor(v)) }, onClick = { commit(v) })
             }
+            DropdownMenuItem(
+                text = { Text("Custom model…") },
+                onClick = { expanded = false; showCustomDialog = true },
+            )
         }
     }
+    if (showCustomDialog) {
+        CustomModelDialog(
+            initial = opt.currentValue,
+            onConfirm = { v -> showCustomDialog = false; if (v.isNotBlank()) commit(v) },
+            onDismiss = { showCustomDialog = false },
+        )
+    }
+}
+
+@Composable
+private fun CustomModelDialog(initial: String, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by rememberSaveable { mutableStateOf(if (initial == "current") "" else initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Custom model") },
+        text = {
+            OutlinedTextField(
+                value = text, onValueChange = { text = it }, singleLine = true,
+                label = { Text("model id") },
+                placeholder = { Text("e.g. poolside/laguna-s-2.1") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onConfirm(text.trim()) }),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(text.trim()) }, enabled = text.isNotBlank()) { Text("Set") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
