@@ -260,9 +260,17 @@ class AcpClient(
         })
     }
 
-    fun sendPrompt(text: String, images: List<ImageBlock> = emptyList()) {
+    /** @param expect the session the UI believes it is in. sendPrompt used to trust only this
+     *  client's own `sessionId`, which is set from whatever session/new or session/load last
+     *  returned -- nothing tied it to the conversation on screen. When the two diverged the prompt
+     *  went silently to the wrong chat. A mismatch is now refused and surfaced instead. */
+    fun sendPrompt(text: String, images: List<ImageBlock> = emptyList(), expect: String? = null) {
         val sid = sessionId
         if (sid == null) { onEvent(AcpEvent.Error("not ready — no session")); return }
+        if (expect != null && expect != sid) {
+            onEvent(AcpEvent.Error("not sent — this chat isn't loaded yet (showing $expect, socket on $sid). Try again."))
+            return
+        }
         rpc("session/prompt", buildJsonObject {
             put("sessionId", sid)
             putJsonArray("prompt") {

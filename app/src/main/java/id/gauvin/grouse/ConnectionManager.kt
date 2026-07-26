@@ -342,14 +342,17 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** The persistent "goose-assistant" thread (briefings/proactive/voice land here), if it exists. */
-    /** The assistant thread's id. Title lookup first (authoritative once goose lists it), then the
-     *  cached id -- because goose does NOT list a session until it has content. Straight after
-     *  resetAssistant the fresh thread is renamed but still unlisted, and the old one has been
-     *  renamed aside, so a title-only lookup returns null and the app decides there is no assistant
-     *  thread at all. That is what made Reset look like it did nothing. */
+    /** The assistant thread's id.
+     *
+     *  The CACHED id wins over the title lookup, not the other way round. Two reasons, both
+     *  measured: session/list omits sessions with no content, so a freshly reset thread is
+     *  invisible to a title search; and resets had left FOUR sessions titled "goose-assistant" at
+     *  once (two of them empty), so a title search is ambiguous as well as blind. The cached id is
+     *  the one this app actually created and renamed, so it is the authoritative answer; the title
+     *  lookup is the fallback for a fresh install that has no cache yet. */
     fun assistantSessionId(): String? =
-        sessions.value.firstOrNull { it.title == ASSISTANT_TITLE }?.sessionId
-            ?: store.assistantSessionId
+        store.assistantSessionId
+            ?: sessions.value.firstOrNull { it.title == ASSISTANT_TITLE }?.sessionId
 
     /** True when the on-screen conversation IS the privileged assistant thread. */
     val onAssistant: Boolean get() = currentSession.value != null && currentSession.value == assistantSessionId()
@@ -435,7 +438,7 @@ class ConnectionManager private constructor(context: Context) {
         if (live && !turnInFlight) {
             turnInFlight = true
             lastSessionId?.let { store.pendingPushSessionId = it }
-            client?.sendPrompt(text, images)
+            client?.sendPrompt(text, images, expect = currentSession.value)
         } else if (live) {
             // A turn is already running. Queue rather than firing a second sendPrompt into the
             // same session -- concurrent prompts interleave in the transcript and the second
@@ -661,7 +664,7 @@ class ConnectionManager private constructor(context: Context) {
                     // still busy), so backgrounding between the two turns is safe.
                     turnInFlight = true
                     lastSessionId?.let { store.pendingPushSessionId = it }
-                    client?.sendPrompt(queued.text, queued.images)
+                    client?.sendPrompt(queued.text, queued.images, expect = currentSession.value)
                 } else if (!store.persistentConnection) stopService()
             }
             is AcpEvent.AgentChunk -> appendStream("assistant", ev.text)
@@ -737,12 +740,16 @@ class ConnectionManager private constructor(context: Context) {
                     store.pendingPushSessionId = ev.sessionId
                     turnInFlight = true
                     busy.value = true
-                    client?.sendPrompt(p.text, p.images)
+                    client?.sendPrompt(p.text, p.images, expect = currentSession.value)
                 }
             }
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
-                assistantSessionId()?.let { store.assistantSessionId = it }   // cache for startup landing
+                // Only seed the cache when empty. It used to be written on every session list,
+                // which let an OLD session sharing the title clobber the id of the thread this app
+                // had just created.
+                if (store.assistantSessionId == null)
+                    sessions.value.firstOrNull { it.title == ASSISTANT_TITLE }?.let { store.assistantSessionId = it.sessionId }
                 if (pendingOpenAssistant) {
                     pendingOpenAssistant = false
                     val id = assistantSessionId()
