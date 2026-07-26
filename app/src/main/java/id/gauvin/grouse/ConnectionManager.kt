@@ -39,6 +39,9 @@ class ConnectionManager private constructor(context: Context) {
     // still connecting can't clobber the first. The user bubble is added when queued (in send()).
     private data class PendingSend(val text: String, val images: List<ImageBlock>)
     private val pendingSends = ArrayDeque<PendingSend>()
+    // True between sendPrompt and TurnDone. `busy` is UI state and is also set while merely
+    // queued, so it cannot answer "is the wire busy" -- this can.
+    private var turnInFlight = false
 
     val messages = mutableStateListOf<ChatMessage>()
     val status = mutableStateOf("not connected")
@@ -188,7 +191,13 @@ class ConnectionManager private constructor(context: Context) {
     /** Reconnect silently after Android drops the socket in the background. */
     fun ensureConnected() {
         if (!store.hasKey() || live || connecting) return
-        open(resume = lastSessionId, suppressReplay = true)
+        // suppressReplay ONLY when we still hold the conversation in memory. It exists to stop a
+        // brief socket blip duplicating messages we already show -- but if the PROCESS was killed
+        // while backgrounded (aggressive OEM battery management does this even to a foreground
+        // service), `messages` comes back empty and suppressing the replay leaves a blank chat.
+        // The turn goose actually finished is then invisible, which reads as "it died" and gets
+        // re-prompted. Replaying repopulates it instead.
+        open(resume = lastSessionId, suppressReplay = messages.isNotEmpty())
     }
 
     fun listSessions() = client?.listSessions()
@@ -299,9 +308,15 @@ class ConnectionManager private constructor(context: Context) {
         messages.add(ChatMessage("user", text, images)); streamingRole = null; busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
         startService()   // keep the socket alive if the user backgrounds mid-turn
-        if (live) {
+        if (live && !turnInFlight) {
+            turnInFlight = true
             lastSessionId?.let { store.pendingPushSessionId = it }
             client?.sendPrompt(text, images)
+        } else if (live) {
+            // A turn is already running. Queue rather than firing a second sendPrompt into the
+            // same session -- concurrent prompts interleave in the transcript and the second
+            // reply is attributed to the wrong question. Flushed on TurnDone.
+            pendingSends.add(PendingSend(text, images))
         } else {
             // Not connected yet (initial connect / silent reconnect window): queue and connect,
             // rather than calling sendPrompt against a session-less client (which just errors and
@@ -351,6 +366,17 @@ class ConnectionManager private constructor(context: Context) {
         if (fg) {
             notifier.cancelAlert()
             ensureConnected()
+            // Re-ask the server for its model list every time we come back. It was previously
+            // fetched ONCE per provider per connection (guarded by liveModelsFetchedFor, which
+            // only resets in open()), so a long-lived socket never noticed the set changing --
+            // models renamed or added server-side stayed invisible until a full reconnect, and
+            // ensureConnected() above can't force one because it early-returns on `live`.
+            // One /v1/models round trip through goose; cheap enough to just redo on resume.
+            if (live) {
+                config.value.firstOrNull { it.id == "provider" }?.currentValue
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { client?.listSupportedModels(it) }
+            }
             if (!store.persistentConnection && !busy.value) stopService()
         } else if (store.persistentConnection) {
             startService()
@@ -390,6 +416,7 @@ class ConnectionManager private constructor(context: Context) {
         client?.cancel()
         streamingRole = null
         busy.value = false
+        turnInFlight = false   // wire is free again; without this the queue never drains
         pendingSends.clear()
         if (store.hasKey()) open(resume = lastSessionId ?: store.lastSessionId, suppressReplay = true)
     }
@@ -425,6 +452,8 @@ class ConnectionManager private constructor(context: Context) {
         // per-session) stays stuck true forever after, permanently hiding the usage line under it
         // (they're if/else-if) on every session including ones that were never compacting at all.
         busy.value = false; streamingRole = null; compacting.value = false
+            // The superseded client will never report TurnDone here, so free the wire.
+            turnInFlight = false
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         val url = "wss://${store.host}:${store.port}/acp"
         status.value = when {
@@ -467,7 +496,7 @@ class ConnectionManager private constructor(context: Context) {
                 if (ev.text == "disconnected") { live = false; connecting = false; online.value = false }
             }
             is AcpEvent.Error -> {
-                messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false
+                messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false; turnInFlight = false
                 compacting.value = false   // safety net: a dropped/garbled status must never stick
                 if (voiceReplyPending) { voiceReplyPending = false; restoreModel() }
             }
@@ -487,7 +516,12 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Chart -> { messages.add(ChatMessage("chart", ev.spec)); streamingRole = null }
             is AcpEvent.TurnDone -> {
-                streamingRole = null; busy.value = false; compacting.value = false
+                streamingRole = null; compacting.value = false
+                turnInFlight = false
+                // Drain one queued prompt, if any: send it and STAY busy, so the UI never flickers
+                // idle between a queue and its turn.
+                val queued = if (pendingSends.isNotEmpty()) pendingSends.removeFirst() else null
+                busy.value = queued != null
                 // We got the authoritative completion straight from our own socket -- stop waiting
                 // on the Stop-hook push for this turn so a later turn from another client in the
                 // same (possibly shared) session doesn't spuriously match the stale flag.
@@ -502,7 +536,13 @@ class ConnectionManager private constructor(context: Context) {
                     // If push is on, the goose Stop hook nudges the phone — don't double-notify.
                     notifier.postReply(lastAssistantText())
                 }
-                if (!store.persistentConnection) stopService()
+                if (queued != null) {
+                    // Send the queued prompt now that the wire is free. Service stays up (we are
+                    // still busy), so backgrounding between the two turns is safe.
+                    turnInFlight = true
+                    lastSessionId?.let { store.pendingPushSessionId = it }
+                    client?.sendPrompt(queued.text, queued.images)
+                } else if (!store.persistentConnection) stopService()
             }
             is AcpEvent.AgentChunk -> appendStream("assistant", ev.text)
             is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
