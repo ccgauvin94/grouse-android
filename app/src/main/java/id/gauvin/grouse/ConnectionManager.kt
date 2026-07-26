@@ -39,6 +39,15 @@ class ConnectionManager private constructor(context: Context) {
     // still connecting can't clobber the first. The user bubble is added when queued (in send()).
     private data class PendingSend(val text: String, val images: List<ImageBlock>)
     private val pendingSends = ArrayDeque<PendingSend>()
+
+    /** How many prompts are waiting behind the running turn. Drives the "N queued" chip -- without
+     *  it a queued message is indistinguishable from a dropped one, since its bubble looks exactly
+     *  like a sent one. Mutate the deque ONLY through enqueue/dequeue/clearQueue so this can't drift. */
+    val queuedCount = mutableStateOf(0)
+    private fun enqueue(p: PendingSend) { pendingSends.add(p); queuedCount.value = pendingSends.size }
+    private fun dequeue(): PendingSend? =
+        (if (pendingSends.isEmpty()) null else pendingSends.removeFirst()).also { queuedCount.value = pendingSends.size }
+    private fun clearQueue() { pendingSends.clear(); queuedCount.value = 0 }
     // True between sendPrompt and TurnDone. `busy` is UI state and is also set while merely
     // queued, so it cannot answer "is the wire busy" -- this can.
     private var turnInFlight = false
@@ -316,12 +325,12 @@ class ConnectionManager private constructor(context: Context) {
             // A turn is already running. Queue rather than firing a second sendPrompt into the
             // same session -- concurrent prompts interleave in the transcript and the second
             // reply is attributed to the wrong question. Flushed on TurnDone.
-            pendingSends.add(PendingSend(text, images))
+            enqueue(PendingSend(text, images))
         } else {
             // Not connected yet (initial connect / silent reconnect window): queue and connect,
             // rather than calling sendPrompt against a session-less client (which just errors and
             // loses the message). Flushed in the Ready branch.
-            pendingSends.add(PendingSend(text, images))
+            enqueue(PendingSend(text, images))
             if (!connecting) open(resume = lastSessionId ?: store.lastSessionId, suppressReplay = true)
         }
     }
@@ -417,7 +426,7 @@ class ConnectionManager private constructor(context: Context) {
         streamingRole = null
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
-        pendingSends.clear()
+        clearQueue()           // Stop means stop: don't let queued prompts fire after a cancel
         if (store.hasKey()) open(resume = lastSessionId ?: store.lastSessionId, suppressReplay = true)
     }
 
@@ -520,7 +529,7 @@ class ConnectionManager private constructor(context: Context) {
                 turnInFlight = false
                 // Drain one queued prompt, if any: send it and STAY busy, so the UI never flickers
                 // idle between a queue and its turn.
-                val queued = if (pendingSends.isNotEmpty()) pendingSends.removeFirst() else null
+                val queued = dequeue()
                 busy.value = queued != null
                 // We got the authoritative completion straight from our own socket -- stop waiting
                 // on the Stop-hook push for this turn so a later turn from another client in the
@@ -604,10 +613,15 @@ class ConnectionManager private constructor(context: Context) {
                     store.assistantSessionId = ev.sessionId
                 }
                 client?.listSessions()   // so the Assistant thread can be resolved by title
-                // Flush every queued send (bubbles were already added when queued).
-                if (pendingSends.isNotEmpty()) store.pendingPushSessionId = ev.sessionId
-                while (pendingSends.isNotEmpty()) {
-                    val p = pendingSends.removeFirst()
+                // Send ONE queued prompt (bubbles were already added when queued); TurnDone drains
+                // the rest. This used to `while`-loop the whole deque, firing every queued prompt
+                // into the session at once -- which interleaves them in the transcript and
+                // misattributes each reply, the exact failure the queue exists to prevent. It also
+                // left turnInFlight false, so the next send() would fire a concurrent prompt too.
+                dequeue()?.let { p ->
+                    store.pendingPushSessionId = ev.sessionId
+                    turnInFlight = true
+                    busy.value = true
                     client?.sendPrompt(p.text, p.images)
                 }
             }

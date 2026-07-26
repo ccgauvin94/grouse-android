@@ -451,6 +451,15 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 }
             }
 
+            // A queued message's bubble is identical to a sent one, so without this there is no way
+            // to tell "waiting its turn" from "silently dropped".
+            if (cm.queuedCount.value > 0) {
+                Text("${cm.queuedCount.value} queued — will send when this turn finishes",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 2.dp))
+            }
+
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
@@ -469,14 +478,17 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 OutlinedTextField(input, { input = it }, modifier = Modifier.weight(1f),
                     placeholder = { Text("message goose…") })
                 Spacer(Modifier.width(6.dp))
+                // Stop and Send coexist while a turn runs. Send used to be REPLACED by Stop, which
+                // made the send queue in ConnectionManager unreachable -- it was implemented and
+                // working, but nothing could put anything into it.
                 if (cm.busy.value) {
                     FilledIconButton(onClick = { cm.cancel() }) {
                         Icon(Icons.Filled.Stop, contentDescription = "stop")
                     }
-                } else {
-                    FilledIconButton(onClick = { doSend() }) {
-                        Icon(Icons.Filled.Send, contentDescription = "send")
-                    }
+                    Spacer(Modifier.width(6.dp))
+                }
+                FilledIconButton(onClick = { doSend() }) {
+                    Icon(Icons.Filled.Send, contentDescription = if (cm.busy.value) "queue" else "send")
                 }
             }
         }
