@@ -419,8 +419,8 @@ class AcpClient(
                 onEvent(AcpEvent.Tools(names))
             }
             "_goose/unstable/config/extensions/add" -> listExtensions()
-            "_goose/unstable/session/extensions/add" -> {}
-            "_goose/unstable/session/extensions/remove" -> {}
+            "_goose/unstable/session/extensions/add" -> listTools()
+            "_goose/unstable/session/extensions/remove" -> {}   // the paired add re-lists
             "_goose/unstable/config/read" -> {
                 // The reply doesn't echo the key, so recover it from the request we cached.
                 val key = pendingConfigKeys.remove(id) ?: return

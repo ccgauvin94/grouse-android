@@ -804,6 +804,10 @@ private fun SettingsSwitchRow(label: String, checked: Boolean, onChange: (Boolea
  *  and why it is cached afterwards. */
 @Composable
 fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>, onSave: (Set<String>) -> Unit) {
+    // Only mcp-backed extensions namespace their tools as `name__tool`, so only those can be mapped
+    // back to an owner. Builtins (developer -> shell/edit/tree, summon -> delegate) cannot be, and
+    // rendering a row for them showed a permanent "0 tools" that opened onto nothing.
+    if (!cm.toolsAttributable(e)) return
     var open by remember { mutableStateOf(false) }
     val catalog = cm.toolCatalog.value[e.name]
     // Local echo so a checkbox responds instantly; the server round-trip refreshes it after.
@@ -817,15 +821,19 @@ fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>, onSave: (Se
             contentDescription = if (open) "hide tools" else "show tools")
         Spacer(Modifier.width(6.dp))
         Text(
-            if (catalog == null) "${active.size} tools"
-            else "${sel.size} of ${catalog.size} tools",
+            when {
+                catalog != null -> "${sel.size} of ${catalog.size} tools"
+                active.isNotEmpty() -> "${active.size} tools"
+                else -> "tools"     // list not back yet — don't claim zero
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.outline,
         )
     }
     if (open) {
-        if (catalog == null) {
-            Text("reading tool list…", style = MaterialTheme.typography.bodySmall,
+        if (catalog.isNullOrEmpty()) {
+            Text(if (catalog == null) "reading tool list…" else "no tools reported",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(start = 30.dp, bottom = 6.dp))
         } else {

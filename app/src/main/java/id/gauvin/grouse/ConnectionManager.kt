@@ -130,9 +130,18 @@ class ConnectionManager private constructor(context: Context) {
     // different tool set, that is what a recipe's `extensions:` block is for -- goose already scopes
     // per-run there, with `available_tools` to trim inside an extension.
 
-    /** Group `ext__tool` names into ext -> [tool]. Core/platform tools carry no prefix. */
+    /** Group `ext__tool` names into ext -> [tool]. ONLY mcp-type extensions namespace their tools
+     *  this way: developer's are bare (`shell`, `edit`, `tree`), summon's is `delegate`, skills' is
+     *  `load_skill`. So an extension with no matching prefix is not "zero tools", it is "cannot be
+     *  attributed" -- see toolsAttributable(). Grouping bare names under a bucket and showing that
+     *  as a count is what made every builtin read 0. */
     private fun group(names: List<String>): Map<String, List<String>> =
-        names.groupBy({ it.substringBefore("__", "(core)") }, { it.substringAfter("__") })
+        names.filter { it.contains("__") }
+            .groupBy({ it.substringBefore("__") }, { it.substringAfter("__") })
+
+    /** Whether per-tool control can be offered for this extension at all. Only mcp-backed ones
+     *  namespace their tools, and only namespaced tools can be mapped back to an owner. */
+    fun toolsAttributable(e: ExtInfo): Boolean = e.type == "mcp"
 
     /** Ask goose for this session's active tools; lands as AcpEvent.Tools. */
     fun refreshTools() { discovering = null; client?.listTools() }
@@ -150,8 +159,7 @@ class ConnectionManager private constructor(context: Context) {
         })
         discovering = ext.name
         c.removeSessionExtension(ext.name)
-        c.addSessionExtension(unfiltered)
-        c.listTools()
+        c.addSessionExtension(unfiltered)   // its reply triggers listTools -- see AcpClient
     }
 
     /** Restrict `ext` to `allowed` for THIS session only (no config.yaml write). Empty = all. */
@@ -166,8 +174,7 @@ class ConnectionManager private constructor(context: Context) {
         })
         discovering = null
         c.removeSessionExtension(ext.name)
-        c.addSessionExtension(scoped)
-        c.listTools()
+        c.addSessionExtension(scoped)       // its reply triggers listTools
     }
 
     /** Save `allowed` as the GLOBAL default for `ext` (config.yaml; applies to new chats). */
@@ -662,7 +669,13 @@ class ConnectionManager private constructor(context: Context) {
                 store.lastSessionCwd = pendingOpenCwd   // Ready itself carries no cwd -- see open()
                 currentSession.value = ev.sessionId
                 // Populate the in-chat "N tools" indicator and the per-extension tool lists.
+                // MCP-backed extensions come up asynchronously AFTER the session is ready: a
+                // tools/list fired here returns only the builtins (measured -- nextcloud, beeper,
+                // kagi and memory were all absent from a list taken immediately). Ask again shortly
+                // for the full picture rather than caching a half-built one.
                 client?.listTools()
+                val genAtReady = clientGen
+                main.postDelayed({ if (genAtReady == clientGen) client?.listTools() }, 2500)
                 client?.listSessionExtensions()
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Archive the old
