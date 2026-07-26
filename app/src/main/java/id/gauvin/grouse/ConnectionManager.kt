@@ -102,26 +102,18 @@ class ConnectionManager private constructor(context: Context) {
         c.listExtensions()
     }
 
-    // Session-scoped profile apply awaiting its listSessionExtensions reply: (sessionId, desired set).
-    private var pendingProfileApply: Pair<String, Set<String>>? = null
-
-    /** Apply `kind`'s configured extension profile (if the user enabled one) to session `sessionId`:
-     *  list its current extensions, diff against the stored desired set, add/remove via the
-     *  SESSION-SCOPED API (never toggleExtension's global one -- that would touch every other open
-     *  session too). Applies once, at session-open time -- matches how goose's own config-driven
-     *  initial extension set already works; editing a profile in Settings doesn't retroactively
-     *  touch already-open sessions (same convention as the "changes apply to new chats" caption on
-     *  the Extensions screen). */
-    private fun applyExtensionProfile(sessionId: String, kind: SessionKind) {
-        val key = kind.name.lowercase()
-        if (!store.profileEnabled(key)) return
-        pendingProfileApply = sessionId to store.profileExtensions(key)
-        // The diff (SessionExtensions handler below) needs extensions.value (the global catalog,
-        // for each name's raw/bundled) populated -- it's normally only loaded lazily when the
-        // Extensions screen opens. If it's empty, fetch it first; the Extensions handler continues
-        // the flow into listSessionExtensions() once it lands.
-        if (extensions.value.isEmpty()) client?.listExtensions() else client?.listSessionExtensions()
-    }
+    // Per-session-type extension profiles (Assistant/Chat/Code) were REMOVED 2026-07-25. They were
+    // a third layer on top of the two goose actually defines, and the three fought each other: goose
+    // seeds a session from config.yaml, the profile then diffed it back to a stored set, and the
+    // in-chat sheet edited the result -- so "what tools does this chat have" had three owners and no
+    // single answer. Goose's own model is the two below, and it is enough:
+    //
+    //   config/extensions/set-enabled  -> writes config.yaml, the default every NEW session starts from
+    //   session/extensions/{add,remove} -> this session only, never persisted
+    //
+    // Settings owns the first, the in-chat sheet owns the second. If a whole class of session needs a
+    // different tool set, that is what a recipe's `extensions:` block is for -- goose already scopes
+    // per-run there, with `available_tools` to trim inside an extension.
 
     /** Enable/disable an extension globally (affects new chats); the reply refreshes the list. */
     fun toggleExtension(e: ExtInfo, enabled: Boolean) {
@@ -161,9 +153,6 @@ class ConnectionManager private constructor(context: Context) {
     // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
     private var pendingOpenCwd: String = "/state"
-    // The kind resolved for the in-flight open() -- consumed once by applyExtensionProfile in the
-    // Ready handler (same "Ready carries neither cwd nor kind" gap as above).
-    private var pendingSessionKind: SessionKind = SessionKind.CHAT
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
 
     // Voice: the voice sheet has a short lifecycle, so CM owns speaking the reply (it survives the
@@ -480,10 +469,6 @@ class ConnectionManager private constructor(context: Context) {
             sessions.value.firstOrNull { it.sessionId == resume }?.cwd?.takeIf { it.isNotBlank() }
                 ?: store.lastSessionCwd
         pendingOpenCwd = resolvedCwd
-        // Same idea as cwd, but kind only gates an OPT-IN, default-off extension profile -- a wrong
-        // guess here just means a profile doesn't apply until the session is reopened with the list
-        // loaded, never a correctness bug, so a plain CHAT fallback (not a persisted one) is fine.
-        pendingSessionKind = kind ?: SessionKind.CHAT
         // Tag this client's events with a generation; a just-closed client still fires
         // onClosed/onFailure asynchronously and its stale "disconnected" must not flip us offline
         // after the new client is already live.
@@ -594,10 +579,7 @@ class ConnectionManager private constructor(context: Context) {
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
                 store.lastSessionCwd = pendingOpenCwd   // Ready itself carries no cwd -- see open()
                 currentSession.value = ev.sessionId
-                applyExtensionProfile(ev.sessionId, pendingSessionKind)
-                // Populate the in-chat "N tools" indicator for THIS session. Harmless if
-                // applyExtensionProfile above also triggers a list (e.g. via the catalog-fetch
-                // chain) — SessionExtensions just overwrites sessionExtensionNames either way.
+                // Populate the in-chat "N tools" indicator for THIS session.
                 client?.listSessionExtensions()
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Archive the old
@@ -643,25 +625,8 @@ class ConnectionManager private constructor(context: Context) {
                 }
             }
             is AcpEvent.Commands -> commands.value = ev.names
-            is AcpEvent.Extensions -> {
-                extensions.value = ev.list; extensionsBusy.value = false
-                // Continue an applyExtensionProfile() that was waiting on the catalog to populate.
-                pendingProfileApply?.let { client?.listSessionExtensions() }
-            }
-            is AcpEvent.SessionExtensions -> {
-                sessionExtensionNames.value = ev.names   // always reflect the reply, profile-apply or not
-                val (sid, desired) = pendingProfileApply ?: return
-                if (sid != ev.sessionId) return   // stale reply for a since-superseded session
-                pendingProfileApply = null
-                val current = ev.names.toSet()
-                for (name in desired - current)
-                    extensions.value.firstOrNull { it.name == name }?.let { client?.addSessionExtension(it.raw) }
-                for (name in current - desired) {
-                    val ext = extensions.value.firstOrNull { it.name == name }
-                    if (ext == null || !ext.bundled) client?.removeSessionExtension(name)   // never strip a core extension
-                }
-                sessionExtensionNames.value = desired.toList()   // optimistic: add/remove above don't reply
-            }
+            is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }
+            is AcpEvent.SessionExtensions -> sessionExtensionNames.value = ev.names
             is AcpEvent.MessageUsage -> lastMessageUsage.value = ev
             is AcpEvent.Permission -> {
                 // The privileged Assistant thread honors the user's chosen action policy; every

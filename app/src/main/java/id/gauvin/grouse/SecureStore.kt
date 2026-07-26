@@ -59,6 +59,16 @@ class SecureStore(context: Context) {
             .remove("known_models_openrouter")
             .remove("known_models_sanitized")
             .apply()
+        // Per-session-type extension profiles are GONE (2026-07-25) -- see the note in
+        // ConnectionManager. Goose defines exactly two scopes (global config.yaml, and
+        // session-scoped add/remove); a third layer keyed on session type just gave "what tools does
+        // this chat have" a third owner. Drop its keys so they don't linger in prefs forever.
+        cfg.edit().apply {
+            for (k in listOf("assistant", "chat", "code")) {
+                remove("profile_${k}_on")
+                remove("profile_${k}_ext")
+            }
+        }.apply()
     }
 
     var host: String
@@ -139,16 +149,6 @@ class SecureStore(context: Context) {
         val next = (listOf(name) + cur).take(10)
         cfg.edit().putString("recent_workspace_projects", next.joinToString("\n")).apply()
     }
-
-    // --- Per-session-type extension profiles (Assistant/Chat/Code) ---
-    // `kind` is a lowercase string key ("assistant"/"chat"/"code") -- simplest option for 3 fixed
-    // values, avoids a SessionKind<->prefs-key mapping layer. Default OFF: zero behavior change
-    // until the user configures one in Settings.
-    fun profileEnabled(kind: String): Boolean = cfg.getBoolean("profile_${kind}_on", false)
-    fun setProfileEnabled(kind: String, v: Boolean) = cfg.edit().putBoolean("profile_${kind}_on", v).apply()
-    fun profileExtensions(kind: String): Set<String> = cfg.getStringSet("profile_${kind}_ext", emptySet()) ?: emptySet()
-    fun setProfileExtensions(kind: String, names: Set<String>) =
-        cfg.edit().putStringSet("profile_${kind}_ext", HashSet(names)).apply()
 
     /** When the last proactive briefing push arrived (epoch millis) — shown on the Assistant status. */
     var lastBriefingAt: Long
