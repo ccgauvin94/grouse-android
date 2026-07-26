@@ -1312,27 +1312,17 @@ private fun CustomModelDialog(initial: String, onConfirm: (String) -> Unit, onDi
     )
 }
 
-/** goose returns `choices: []` for some options even though it validates the value it is sent --
- *  thinking_effort accepts off/low/medium/high and rejects anything else with "Invalid thinking
- *  effort". With no choices the dropdown could only ever offer the current value, which is why
- *  thinking effort showed "off" as the sole option. Fall back to the known set.
- *
- *  Note a model that does not support reasoning effort silently normalises back to `off` server
- *  side -- picking `high` on such a model is accepted and then reads `off` again. That is goose's
- *  behaviour, not a UI bug. */
-private val FALLBACK_CHOICES = mapOf(
-    "thinking_effort" to listOf("off", "low", "medium", "high"),
-    "mode" to listOf("auto", "approve", "smart_approve", "chat"),
-)
-
+/** goose reports which values a knob accepts, and it is model-dependent -- do NOT second-guess it
+ *  with a hardcoded list. `thinking_effort` offers only ["off"] on a model without extended
+ *  thinking (Qwen3.6-35B-A3B on LocalAI) and ["off","low","medium","high","max"] on one that has it
+ *  (z-ai/glm-5.2, deepseek-r1). A fallback list lived here briefly on the mistaken belief that goose
+ *  sent no options at all -- that came from reading the wrong JSON key (`choices`; goose sends
+ *  `options`) and it also omitted "max". Showing only "off" is correct, not a bug. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConfigDropdown(opt: ConfigOption, onPick: (String, String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    val choices = opt.choices.ifEmpty {
-        FALLBACK_CHOICES[opt.id].orEmpty().map { Choice(it, prettyOption(it)) }
-    }
-    val label = choices.firstOrNull { it.value == opt.currentValue }?.label ?: opt.currentValue
+    val label = opt.choices.firstOrNull { it.value == opt.currentValue }?.label ?: opt.currentValue
     ExposedDropdownMenuBox(
         expanded = expanded, onExpandedChange = { expanded = it },
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
@@ -1344,7 +1334,7 @@ fun ConfigDropdown(opt: ConfigOption, onPick: (String, String) -> Unit) {
             modifier = Modifier.menuAnchor().fillMaxWidth()
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            choices.forEach { c ->
+            opt.choices.forEach { c ->
                 DropdownMenuItem(text = { Text(c.label) },
                     onClick = { expanded = false; onPick(opt.id, c.value) })
             }
