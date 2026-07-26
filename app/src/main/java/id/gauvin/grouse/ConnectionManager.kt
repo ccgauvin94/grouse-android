@@ -309,6 +309,13 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun openSession(sessionId: String, knownKind: SessionKind? = null) {
+        // Cancel any deferred "open the assistant thread" -- the user has since picked a specific
+        // session and that choice wins. Without this, a pendingOpenAssistant set while offline (its
+        // listSessions() is a no-op with no client) survives until the NEXT Sessions event, which
+        // arrives from the listSessions() in this very open()'s Ready handler -- and then reopens
+        // the assistant on top of the session just chosen. The chat visibly switches and the next
+        // message lands in the assistant thread.
+        pendingOpenAssistant = false
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
         // A caller resuming a session it already has cached (e.g. connectHome's assistant shortcut)
         // can pass knownKind to skip the sessions.value lookup, which may not be populated yet on a
@@ -319,6 +326,7 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun newSession(cwd: String = "/state", kind: SessionKind = SessionKind.CHAT) {
+        pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
         open(resume = null, suppressReplay = false, cwd = cwd, kind = kind)
     }
@@ -352,8 +360,11 @@ class ConnectionManager private constructor(context: Context) {
      *  open as soon as it arrives (see the Sessions event handler). */
     fun openAssistant() {
         val id = assistantSessionId()
-        if (id != null) openSession(id, knownKind = SessionKind.ASSISTANT)
-        else { pendingOpenAssistant = true; listSessions() }
+        if (id != null) { openSession(id, knownKind = SessionKind.ASSISTANT); return }
+        // No id yet: defer until a session list arrives -- but only if one can actually arrive.
+        // With no client, listSessions() does nothing and the flag would sit armed indefinitely.
+        if (client != null) { pendingOpenAssistant = true; listSessions() }
+        else beginAssistantThread(null)
     }
 
     // --- Assistant-thread reset / (re)create ---
