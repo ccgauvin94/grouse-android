@@ -150,6 +150,33 @@ class SecureStore(context: Context) {
         cfg.edit().putString("recent_workspace_projects", next.joinToString("\n")).apply()
     }
 
+    // --- Server-side speech (LocalAI) ---------------------------------------------------
+    // Android's own SpeechRecognizer/TextToSpeech stay the default: no network, streaming partials,
+    // works offline. These opt into the box's own models instead -- Kokoro sounds far better than
+    // the stock Android voice, and Whisper transcribes better than on-device recognition. LocalAI
+    // publishes 0.0.0.0:8080 so the phone reaches it directly; goose is not in this path.
+    /** Base URL of LocalAI. Defaults to the goose host on :8080, which is the usual setup. */
+    var localAiUrl: String
+        get() = cfg.getString("localai_url", "")?.takeIf { it.isNotBlank() } ?: "http://$host:8080"
+        set(v) = cfg.edit().putString("localai_url", v.trim().trimEnd('/')).apply()
+
+    /** Speak replies with LocalAI TTS instead of Android TextToSpeech. */
+    var serverTts: Boolean
+        get() = cfg.getBoolean("server_tts", false)
+        set(v) = cfg.edit().putBoolean("server_tts", v).apply()
+    var ttsModel: String
+        get() = cfg.getString("tts_model", "TTS-Kokoro") ?: "TTS-Kokoro"
+        set(v) = cfg.edit().putString("tts_model", v.trim()).apply()
+
+    /** Transcribe with LocalAI Whisper instead of Android SpeechRecognizer. Trade-off: no live
+     *  partial results -- the whole clip is uploaded when you stop talking. */
+    var serverStt: Boolean
+        get() = cfg.getBoolean("server_stt", false)
+        set(v) = cfg.edit().putBoolean("server_stt", v).apply()
+    var sttModel: String
+        get() = cfg.getString("stt_model", "STT-Whisper-Base") ?: "STT-Whisper-Base"
+        set(v) = cfg.edit().putString("stt_model", v.trim()).apply()
+
     /** Models the user has confirmed DO accept images, by sending anyway past the warning.
      *  isLikelyVisionModel() is a substring heuristic over model names and cannot be right in
      *  general -- it missed Qwen3.6-35B-A3B, which is vision-capable via its mmproj, and every

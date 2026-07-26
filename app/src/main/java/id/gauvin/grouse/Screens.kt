@@ -81,6 +81,12 @@ import kotlinx.coroutines.launch
 
 private val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")
 
+/** Run on the main looper. ServerSpeech's callbacks fire on its own worker threads; Compose
+ *  snapshot state tolerates that, but UI state changes are clearer (and safer for anything that
+ *  later touches a View) marshalled back. */
+private fun mainThread(block: () -> Unit) =
+    android.os.Handler(android.os.Looper.getMainLooper()).post(block)
+
 // ---- Connect (onboarding) ---------------------------------------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -158,14 +164,35 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // Voice: push-to-talk STT streaming into the draft, and TTS to read replies aloud.
     val voiceInput = remember { VoiceInput(ctx) }
     val speaker = remember { Speaker(ctx) }
-    DisposableEffect(Unit) { onDispose { voiceInput.stop(); speaker.shutdown() } }
+    // Server-side (Whisper) recording in flight, when the LocalAI STT setting is on. Null while
+    // idle, or always if the user is on Android's recognizer.
+    var serverRec by remember { mutableStateOf<ServerSpeech.Recording?>(null) }
+    val listening = voiceInput.listening || serverRec != null
+
+    DisposableEffect(Unit) { onDispose { voiceInput.stop(); serverRec?.cancel(); speaker.shutdown() } }
     fun startListening() {
         val base = input
+        if (cm.store.serverStt) {
+            // Whisper has no streaming partials over this API -- the clip goes up when you stop.
+            serverRec = ServerSpeech.record(ctx.cacheDir)
+            return
+        }
         voiceInput.start(
             onPartial = { input = (base.trim() + " " + it).trim() },
             onFinal = { input = (base.trim() + " " + it).trim() },
             onError = {},
         )
+    }
+
+    fun stopListening() {
+        val rec = serverRec
+        if (rec != null) {
+            serverRec = null
+            val base = input
+            rec.stop(cm.store.localAiUrl, cm.store.sttModel,
+                onText = { t -> mainThread { input = (base.trim() + " " + t).trim() } },
+                onError = { e -> mainThread { cm.status.value = "STT: $e" } })
+        } else voiceInput.stop()
     }
     val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startListening()
@@ -221,7 +248,8 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     var wasBusy by remember { mutableStateOf(false) }
     LaunchedEffect(cm.busy.value) {
         if (wasBusy && !cm.busy.value && cm.speakReplies.value) {
-            cm.messages.lastOrNull { it.role == "assistant" }?.text?.let { speaker.speak(it) }
+            // cm.say routes to LocalAI TTS or Android TTS per the setting (and falls back).
+            cm.messages.lastOrNull { it.role == "assistant" }?.text?.let { cm.say(it) }
         }
         wasBusy = cm.busy.value
     }
@@ -475,15 +503,15 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 }) { Icon(Icons.Filled.Image, contentDescription = "attach image") }
                 IconButton(onClick = {
-                    if (voiceInput.listening) voiceInput.stop()
+                    if (listening) stopListening()
                     else if (androidx.core.content.ContextCompat.checkSelfPermission(
                             ctx, android.Manifest.permission.RECORD_AUDIO) ==
                             android.content.pm.PackageManager.PERMISSION_GRANTED) startListening()
                     else micPerm.launch(android.Manifest.permission.RECORD_AUDIO)
                 }) {
-                    Icon(if (voiceInput.listening) Icons.Filled.MicOff else Icons.Filled.Mic,
-                        contentDescription = if (voiceInput.listening) "stop listening" else "voice input",
-                        tint = if (voiceInput.listening) MaterialTheme.colorScheme.error else LocalContentColor.current)
+                    Icon(if (listening) Icons.Filled.MicOff else Icons.Filled.Mic,
+                        contentDescription = if (listening) "stop listening" else "voice input",
+                        tint = if (listening) MaterialTheme.colorScheme.error else LocalContentColor.current)
                 }
                 OutlinedTextField(input, { input = it }, modifier = Modifier.weight(1f),
                     placeholder = { Text("message goose…") })
@@ -918,6 +946,38 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
             SettingsSection("Voice") {
                 SettingsSwitchRow("Speak replies aloud", cm.speakReplies.value) { cm.setSpeakReplies(it) }
                 SettingCaption("Read each finished reply with text-to-speech.")
+
+                // The box's own speech models. Separate from the two "voice provider/model" fields
+                // below, which pick the CHAT model a voice turn runs on -- these pick what does the
+                // listening and the talking. Grouse calls LocalAI directly for both: goose has no
+                // TTS at all, and its dictation methods transcribe for goose's own UI rather than
+                // returning text to an ACP client.
+                var srvTts by remember { mutableStateOf(cm.store.serverTts) }
+                var srvStt by remember { mutableStateOf(cm.store.serverStt) }
+                var ttsM by remember { mutableStateOf(cm.store.ttsModel) }
+                var sttM by remember { mutableStateOf(cm.store.sttModel) }
+                var laUrl by remember { mutableStateOf(cm.store.localAiUrl) }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                Text("Speech models", style = MaterialTheme.typography.titleSmall)
+                SettingsSwitchRow("Speak with LocalAI", srvTts) { srvTts = it; cm.store.serverTts = it }
+                if (srvTts) OutlinedTextField(ttsM, { ttsM = it; cm.store.ttsModel = it },
+                    label = { Text("TTS model") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                SettingsSwitchRow("Transcribe with LocalAI", srvStt) { srvStt = it; cm.store.serverStt = it }
+                if (srvStt) OutlinedTextField(sttM, { sttM = it; cm.store.sttModel = it },
+                    label = { Text("STT model") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                if (srvTts || srvStt) {
+                    OutlinedTextField(laUrl, { laUrl = it; cm.store.localAiUrl = it },
+                        label = { Text("LocalAI URL") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                    SettingCaption("Off by default — Android's own speech works offline and streams " +
+                        "words as you say them. LocalAI sounds better and transcribes better, but " +
+                        "needs the network and only shows the text once you stop talking. If a " +
+                        "request fails, replies fall back to the device voice.")
+                }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
                 var vProv by remember { mutableStateOf(cm.store.voiceProvider) }
                 var vModel by remember { mutableStateOf(cm.store.voiceModel) }
                 OutlinedTextField(vProv, { vProv = it; cm.store.voiceProvider = it.trim() },

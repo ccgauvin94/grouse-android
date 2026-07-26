@@ -237,6 +237,32 @@ class ConnectionManager private constructor(context: Context) {
     @Volatile private var voiceModelActive = false
     private var lastVoiceAt = 0L
     private val voiceSpeaker by lazy { Speaker(appContext) }
+    private var serverPlayer: android.media.MediaPlayer? = null
+
+    /** Speak `text`, through LocalAI if the user turned that on, else Android TextToSpeech.
+     *  Falls back to the on-device voice when the server call fails, so a LocalAI outage degrades
+     *  the voice rather than silencing replies. */
+    fun say(text: String, whenDone: (() -> Unit)? = null) {
+        if (!store.serverTts) { voiceSpeaker.speak(text, whenDone); return }
+        serverPlayer?.let { runCatching { it.stop() }; runCatching { it.release() } }
+        serverPlayer = ServerSpeech.speak(
+            store.localAiUrl, store.ttsModel, text, appContext.cacheDir,
+            onError = { msg ->
+                main.post {
+                    status.value = "TTS: $msg"
+                    voiceSpeaker.speak(text, whenDone)   // fall back to the device voice
+                }
+            },
+            onDone = { main.post { whenDone?.invoke() } },
+        )
+    }
+
+    /** Stop any in-flight speech, whichever engine produced it. */
+    fun stopSpeaking() {
+        voiceSpeaker.stop()
+        serverPlayer?.let { runCatching { it.stop() }; runCatching { it.release() } }
+        serverPlayer = null
+    }
 
     val configured: Boolean get() = store.hasKey()
 
@@ -613,7 +639,7 @@ class ConnectionManager private constructor(context: Context) {
                     // Voice turn: speak the reply here (survives the voice sheet closing) and do
                     // NOT notify — the point of voice is to just talk back. Then restore the model.
                     voiceReplyPending = false
-                    voiceSpeaker.speak(lastAssistantText())
+                    say(lastAssistantText())
                     restoreModel()
                 } else if (!appForeground && !store.pushEnabled) {
                     // If push is on, the goose Stop hook nudges the phone — don't double-notify.
