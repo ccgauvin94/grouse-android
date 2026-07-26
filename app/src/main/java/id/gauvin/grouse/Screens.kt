@@ -199,7 +199,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     fun doSend() {
         if (input.isBlank() && attachments.isEmpty()) return
         // Sending images to a non-vision model (esp. LocalAI without mmproj) hangs the session.
-        if (attachments.isNotEmpty() && !isLikelyVisionModel(currentModel)) { showVisionWarn = true; return }
+        // The heuristic is a name-substring guess and gets it wrong (it missed Qwen3.6-35B-A3B,
+        // which reads images fine); the user's own past answer for this exact model overrides it.
+        if (attachments.isNotEmpty() && !isLikelyVisionModel(currentModel) &&
+            !cm.store.visionOk(currentModel)) { showVisionWarn = true; return }
         reallySend()
     }
 
@@ -243,8 +246,13 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         onDismissRequest = { showVisionWarn = false },
         title = { Text("Model may not support images") },
         text = { Text("“$currentModel” probably can't read images and may get stuck on them — " +
-            "even later text messages. If that happens, start a New chat. Send anyway?") },
-        confirmButton = { TextButton(onClick = { showVisionWarn = false; reallySend() }) { Text("Send anyway") } },
+            "even later text messages. If that happens, start a New chat.\n\n" +
+            "Sending anyway won't ask again for this model.") },
+        confirmButton = { TextButton(onClick = {
+            showVisionWarn = false
+            cm.store.markVisionOk(currentModel)   // remember: don't ask again for THIS model
+            reallySend()
+        }) { Text("Send anyway") } },
         dismissButton = { TextButton(onClick = { showVisionWarn = false }) { Text("Cancel") } },
     )
 
@@ -616,6 +624,19 @@ private fun prettyOption(raw: String) = when (raw) {
 fun SessionListScreen(cm: ConnectionManager, nav: NavController, kind: SessionKind, onOpenDrawer: () -> Unit) {
     LaunchedEffect(Unit) { cm.listSessions() }
     var showNewCode by remember { mutableStateOf(false) }
+    var confirmArchive by remember { mutableStateOf<SessionInfo?>(null) }
+    confirmArchive?.let { s ->
+        AlertDialog(
+            onDismissRequest = { confirmArchive = null },
+            title = { Text("Archive chat?") },
+            text = { Text("“${s.title.ifBlank { "Untitled chat" }}” leaves this list. goose keeps the " +
+                "history on disk — it has no delete.") },
+            confirmButton = { TextButton(onClick = {
+                cm.archiveSession(s.sessionId); confirmArchive = null
+            }) { Text("Archive") } },
+            dismissButton = { TextButton(onClick = { confirmArchive = null }) { Text("Cancel") } },
+        )
+    }
     fun goToChat() = nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
     if (showNewCode) NewCodeSessionDialog(
         recents = cm.store.recentWorkspaceProjects(),
@@ -672,6 +693,13 @@ fun SessionListScreen(cm: ConnectionManager, nav: NavController, kind: SessionKi
                                 .filter { it.isNotBlank() }
                             Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        // goose exposes no session/delete (it answers "Method not found"), so this
+                        // archives: the session leaves the list, its history stays on disk. Named
+                        // "Archive" rather than "Delete" so the label matches what actually happens.
+                        IconButton(onClick = { confirmArchive = s }) {
+                            Icon(Icons.Filled.Close, contentDescription = "archive chat",
+                                tint = MaterialTheme.colorScheme.outline)
                         }
                         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
                             tint = MaterialTheme.colorScheme.outline)
@@ -1276,11 +1304,27 @@ private fun CustomModelDialog(initial: String, onConfirm: (String) -> Unit, onDi
     )
 }
 
+/** goose returns `choices: []` for some options even though it validates the value it is sent --
+ *  thinking_effort accepts off/low/medium/high and rejects anything else with "Invalid thinking
+ *  effort". With no choices the dropdown could only ever offer the current value, which is why
+ *  thinking effort showed "off" as the sole option. Fall back to the known set.
+ *
+ *  Note a model that does not support reasoning effort silently normalises back to `off` server
+ *  side -- picking `high` on such a model is accepted and then reads `off` again. That is goose's
+ *  behaviour, not a UI bug. */
+private val FALLBACK_CHOICES = mapOf(
+    "thinking_effort" to listOf("off", "low", "medium", "high"),
+    "mode" to listOf("auto", "approve", "smart_approve", "chat"),
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConfigDropdown(opt: ConfigOption, onPick: (String, String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    val label = opt.choices.firstOrNull { it.value == opt.currentValue }?.label ?: opt.currentValue
+    val choices = opt.choices.ifEmpty {
+        FALLBACK_CHOICES[opt.id].orEmpty().map { Choice(it, prettyOption(it)) }
+    }
+    val label = choices.firstOrNull { it.value == opt.currentValue }?.label ?: opt.currentValue
     ExposedDropdownMenuBox(
         expanded = expanded, onExpandedChange = { expanded = it },
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
@@ -1292,7 +1336,7 @@ fun ConfigDropdown(opt: ConfigOption, onPick: (String, String) -> Unit) {
             modifier = Modifier.menuAnchor().fillMaxWidth()
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            opt.choices.forEach { c ->
+            choices.forEach { c ->
                 DropdownMenuItem(text = { Text(c.label) },
                     onClick = { expanded = false; onPick(opt.id, c.value) })
             }

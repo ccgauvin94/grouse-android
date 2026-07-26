@@ -247,6 +247,11 @@ class AcpClient(
             put("sessionId", targetSessionId); put("title", title)
         })
 
+    /** Archive a session. goose exposes no session/delete (confirmed: -32601 Method not found), so
+     *  this is the delete-equivalent -- the session leaves session/list, history stays on disk. */
+    fun archiveSession(targetSessionId: String) =
+        rpc("_goose/unstable/session/archive", buildJsonObject { put("sessionId", targetSessionId) })
+
     /** Change a session config knob; server replies with the refreshed configOptions. */
     fun setConfigOption(configId: String, value: String) {
         val sid = sessionId ?: return
@@ -437,6 +442,7 @@ class AcpClient(
             }
             // Rename returns empty; the caller re-lists sessions to see the new title.
             "_goose/unstable/session/rename" -> {}
+            "_goose/unstable/session/archive" -> listSessions()
             "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))
             "session/set_mode" -> {}
             "session/prompt" ->

@@ -150,6 +150,18 @@ class SecureStore(context: Context) {
         cfg.edit().putString("recent_workspace_projects", next.joinToString("\n")).apply()
     }
 
+    /** Models the user has confirmed DO accept images, by sending anyway past the warning.
+     *  isLikelyVisionModel() is a substring heuristic over model names and cannot be right in
+     *  general -- it missed Qwen3.6-35B-A3B, which is vision-capable via its mmproj, and every
+     *  model rename invalidates it again. So the user's own answer is recorded and wins. */
+    fun visionOk(model: String): Boolean =
+        model.isNotBlank() && model in (cfg.getStringSet("vision_ok", emptySet()) ?: emptySet())
+    fun markVisionOk(model: String) {
+        if (model.isBlank()) return
+        val next = HashSet(cfg.getStringSet("vision_ok", emptySet()) ?: emptySet()); next.add(model)
+        cfg.edit().putStringSet("vision_ok", next).apply()
+    }
+
     /** When the last proactive briefing push arrived (epoch millis) — shown on the Assistant status. */
     var lastBriefingAt: Long
         get() = cfg.getLong("last_briefing_at", 0L)

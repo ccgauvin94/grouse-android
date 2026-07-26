@@ -267,6 +267,14 @@ class ConnectionManager private constructor(context: Context) {
 
     fun listSessions() = client?.listSessions()
 
+    /** Archive a session -- goose has NO session/delete (verified: "Method not found"), so archive
+     *  is the strongest available. History stays on disk; it just leaves the list. */
+    fun archiveSession(sessionId: String) {
+        client?.archiveSession(sessionId)
+        sessions.value = sessions.value.filterNot { it.sessionId == sessionId }   // optimistic
+        if (sessionId == store.assistantSessionId) store.assistantSessionId = null
+    }
+
     fun openSession(sessionId: String, knownKind: SessionKind? = null) {
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
         // A caller resuming a session it already has cached (e.g. connectHome's assistant shortcut)
@@ -293,7 +301,14 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** The persistent "goose-assistant" thread (briefings/proactive/voice land here), if it exists. */
-    fun assistantSessionId(): String? = sessions.value.firstOrNull { it.title == ASSISTANT_TITLE }?.sessionId
+    /** The assistant thread's id. Title lookup first (authoritative once goose lists it), then the
+     *  cached id -- because goose does NOT list a session until it has content. Straight after
+     *  resetAssistant the fresh thread is renamed but still unlisted, and the old one has been
+     *  renamed aside, so a title-only lookup returns null and the app decides there is no assistant
+     *  thread at all. That is what made Reset look like it did nothing. */
+    fun assistantSessionId(): String? =
+        sessions.value.firstOrNull { it.title == ASSISTANT_TITLE }?.sessionId
+            ?: store.assistantSessionId
 
     /** True when the on-screen conversation IS the privileged assistant thread. */
     val onAssistant: Boolean get() = currentSession.value != null && currentSession.value == assistantSessionId()
