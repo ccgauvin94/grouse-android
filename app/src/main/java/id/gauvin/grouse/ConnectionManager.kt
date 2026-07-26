@@ -66,7 +66,9 @@ class ConnectionManager private constructor(context: Context) {
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
     val speakReplies = mutableStateOf(store.speakReplies)
-    val knownModels = mutableStateOf(emptySet<String>())   // models for the CURRENT provider only
+    // Live model list for the CURRENT provider, from the server, in memory only -- never
+    // persisted. See the AcpEvent.Config/SupportedModels handlers for why.
+    val knownModels = mutableStateOf(emptySet<String>())
     // Guards listSupportedModels() to fire once per provider per connection, not on every Config
     // event (which fires on every option change, not just provider switches).
     private var liveModelsFetchedFor: String? = null
@@ -338,7 +340,10 @@ class ConnectionManager private constructor(context: Context) {
         voiceModelActive = false
         val saved = store.savedOptions(optionIds)
         saved["provider"]?.let { client?.setConfigOption("provider", it) }
-        saved["model"]?.let { client?.setConfigOption("model", it) }
+        // Never re-send the legacy "current" sentinel -- goose forwards it verbatim and LocalAI
+        // 404s. Devices that picked the old "Provider default" entry have it persisted, so
+        // without this they would keep re-poisoning the config on every reconnect.
+        saved["model"]?.takeIf { it != "current" }?.let { client?.setConfigOption("model", it) }
     }
 
     fun setForeground(fg: Boolean) {
@@ -509,37 +514,31 @@ class ConnectionManager private constructor(context: Context) {
                 // transient voice model is applied, so it doesn't overwrite the app's saved model.
                 if (!voiceModelActive)
                     ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
-                // Remember real model slugs PER PROVIDER (goose only lists featured + "current"),
-                // then expose only the current provider's models so LocalAI/OpenRouter don't mix.
+                // Models come from the SERVER, live, and are never persisted. The old design kept
+                // a per-provider set in SharedPreferences that only ever GREW: every slug goose
+                // ever reported stayed forever, so a model retired server-side (Qwen3_1.7B), an
+                // alias that was renamed (the whole 2026-07-25 rename), and slugs that leaked in
+                // from another provider during a switch (z-ai/glm-5.2, gpt-4o under openai) all
+                // accumulated with no way to clear them short of wiping app data. Two separate
+                // one-time migrations existed in SecureStore purely to repair that cache, and a
+                // shape heuristic here tried to stop it being poisoned in the first place.
+                //
+                // None of that is needed: fetch_supported_models is authoritative and cheap. Ask
+                // the server, show the answer, keep nothing.
                 val provider = ev.options.firstOrNull { it.id == "provider" }?.currentValue ?: ""
-                val modelOpt = ev.options.firstOrNull { it.id == "model" }
-                modelOpt?.currentValue?.let { m ->
-                    if (m.isNotBlank() && m != "current") {
-                        // Guard the provider/model pairing: during a provider switch goose can emit
-                        // a Config where `provider` already flipped but `model` is still the old
-                        // provider's slug, which would poison the wrong bucket (OpenRouter slugs
-                        // leaking into openai's list). Only record when the slug's shape matches the
-                        // provider's featured models — OpenRouter = "vendor/slug", LocalAI = bare.
-                        val featuredSlashed = modelOpt.choices.map { it.value }
-                            .firstOrNull { it != "current" }?.contains("/")
-                        if (featuredSlashed == null || featuredSlashed == m.contains("/"))
-                            store.addKnownModel(provider, m)
-                    }
-                }
-                knownModels.value = if (provider.isNotBlank()) store.knownModels(provider) else emptySet()
-                // Live-fetch this provider's actual model list once (e.g. LocalAI's /v1/models via
-                // goose's fetch_supported_models()) so newly-loaded local models (a fresh LOCALAI
-                // config, a new GGUF) show up without the user having to type the slug once first.
-                // Reply merges into store.knownModels below -- see AcpEvent.SupportedModels.
-                if (provider.isNotBlank() && provider != liveModelsFetchedFor) {
+                if (provider != liveModelsFetchedFor) {
+                    // Provider changed (or first Config): drop the previous provider's list
+                    // immediately so its slugs cannot be shown under the new one, even briefly.
+                    knownModels.value = emptySet()
                     liveModelsFetchedFor = provider
-                    client?.listSupportedModels(provider)
+                    if (provider.isNotBlank()) client?.listSupportedModels(provider)
                 }
             }
             is AcpEvent.SupportedModels -> {
-                ev.models.forEach { store.addKnownModel(ev.providerId, it) }
+                // Straight replace, in memory only. Ignore a reply for a provider we have since
+                // switched away from, so a slow response can't repopulate the wrong list.
                 val currentProvider = config.value.firstOrNull { it.id == "provider" }?.currentValue
-                if (ev.providerId == currentProvider) knownModels.value = store.knownModels(ev.providerId)
+                if (ev.providerId == currentProvider) knownModels.value = ev.models.toSet()
             }
             is AcpEvent.Ready -> {
                 live = true; connecting = false; online.value = true

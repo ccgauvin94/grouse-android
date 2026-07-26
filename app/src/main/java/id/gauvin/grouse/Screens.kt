@@ -1199,7 +1199,12 @@ fun ModelDropdown(opt: ConfigOption, knownModels: Set<String>, onPick: (String, 
             modifier = Modifier.menuAnchor().fillMaxWidth()
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(text = { Text("Provider default") }, onClick = { commit("current") })
+            // NO "Provider default" entry. It committed the literal string "current", which
+            // goose forwards verbatim to the backend, and LocalAI answers
+            //   404  model "current" not found. To see available models, call GET /v1/models
+            // so selecting it killed the chat until another model was picked. It was also
+            // conceptually empty: setConfigOption("model", X) makes goose WRITE X into its
+            // config.yaml, so whatever this picker last chose IS the provider default.
             entries.forEach { v ->
                 DropdownMenuItem(text = { Text(labelFor(v)) }, onClick = { commit(v) })
             }

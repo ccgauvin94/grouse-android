@@ -47,35 +47,18 @@ class SecureStore(context: Context) {
         // Move off the ACP-only server (:3285) to the full agent server (:3284) which also
         // serves ACP and exposes the extension API.
         if (cfg.getString("port", null) == "3285") cfg.edit().putString("port", "3284").apply()
-        // One-time: split the old FLAT known_models set into per-provider buckets so models like
-        // z-ai/glm-5.2 (which goose doesn't "feature") survive the provider-scoped picker change.
-        // Heuristic: OpenRouter slugs are "vendor/model" (contain "/"); LocalAI ones are bare names.
-        cfg.getStringSet("known_models", null)?.let { flat ->
-            val or = knownModels("openrouter") + flat.filter { it.contains("/") }
-            val oa = knownModels("openai") + flat.filterNot { it.contains("/") }
-            cfg.edit()
-                .putStringSet("known_models_openrouter", HashSet(or))
-                .putStringSet("known_models_openai", HashSet(oa))
-                .remove("known_models")
-                .apply()
-        }
-        // One-time sanitize: a provider-switch race let OpenRouter slugs ("vendor/model") get
-        // recorded under openai and vice-versa, so the openai picker listed OpenRouter models.
-        // Only the two providers whose slug shape is KNOWN are touched — openai ids are bare,
-        // OpenRouter ids are "vendor/model" — so a third provider whose ids legitimately contain
-        // "/" (some OpenAI-compatible gateways) is never purged. Snapshot keys before editing.
-        if (!cfg.getBoolean("known_models_sanitized", false)) {
-            val edit = cfg.edit()
-            cfg.getStringSet("known_models_openai", emptySet())?.let { cur ->
-                val cleaned = cur.filterNot { it.contains("/") }
-                if (cleaned.size != cur.size) edit.putStringSet("known_models_openai", HashSet(cleaned))
-            }
-            cfg.getStringSet("known_models_openrouter", emptySet())?.let { cur ->
-                val cleaned = cur.filter { it.contains("/") }
-                if (cleaned.size != cur.size) edit.putStringSet("known_models_openrouter", HashSet(cleaned))
-            }
-            edit.putBoolean("known_models_sanitized", true).apply()
-        }
+        // The per-provider known_models cache is GONE (2026-07-25). Models are fetched live
+        // from the server on every connect and held in memory only -- see
+        // ConnectionManager's AcpEvent.SupportedModels. Two one-time migrations used to live
+        // here (flat -> per-provider split, then a cross-provider sanitize); both existed
+        // purely to repair a cache that should never have been persistent, so they went with
+        // it. Drop the dead keys so an upgraded install doesn't carry them forever.
+        cfg.edit()
+            .remove("known_models")
+            .remove("known_models_openai")
+            .remove("known_models_openrouter")
+            .remove("known_models_sanitized")
+            .apply()
     }
 
     var host: String
@@ -210,15 +193,6 @@ class SecureStore(context: Context) {
     /** Real model slugs we've seen active, scoped PER PROVIDER (goose hides non-featured models
      *  like z-ai/glm-5.2). Provider-scoping stops LocalAI models leaking into the OpenRouter list
      *  and vice-versa. */
-    fun knownModels(provider: String): Set<String> =
-        cfg.getStringSet("known_models_$provider", emptySet()) ?: emptySet()
-
-    fun addKnownModel(provider: String, model: String) {
-        if (provider.isBlank() || model.isBlank()) return
-        val cur = knownModels(provider)
-        if (model in cur) return
-        cfg.edit().putStringSet("known_models_$provider", HashSet(cur + model)).apply()
-    }
 
     fun savedOptions(ids: List<String>): Map<String, String> =
         ids.mapNotNull { id -> cfg.getString("opt_$id", null)?.let { id to it } }.toMap()
