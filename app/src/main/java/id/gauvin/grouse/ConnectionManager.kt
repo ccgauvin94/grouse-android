@@ -6,6 +6,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import androidx.compose.runtime.mutableStateListOf
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import androidx.compose.runtime.mutableStateOf
 
 /** The three drawer session categories. See ConnectionManager.sessionKind(). */
@@ -90,6 +95,16 @@ class ConnectionManager private constructor(context: Context) {
     // and its management sheet. Refreshed on every session open (Ready); optimistically updated by
     // toggleSessionExtension since add/remove replies are empty (no server re-list to react to).
     val sessionExtensionNames = mutableStateOf<List<String>>(emptyList())
+    // Tools ACTIVE in the current session, grouped extension -> tool names (the `ext__tool` prefix
+    // goose uses, stripped). Reflects available_tools filtering, so it is the "checked" set.
+    val sessionTools = mutableStateOf<Map<String, List<String>>>(emptyMap())
+    // Full tool catalogue per extension, i.e. what you'd get with no allowlist. Not obtainable
+    // directly -- goose has no per-extension tools endpoint -- so it is discovered on demand by
+    // discoverTools() and cached here for the process lifetime. Absent = not discovered yet.
+    val toolCatalog = mutableStateOf<Map<String, List<String>>>(emptyMap())
+    // Extension whose full catalogue is being discovered; its tools/list reply is the catalogue,
+    // not the live set, so the Tools handler must not treat it as sessionTools.
+    private var discovering: String? = null
     // Per-message generation stats (tok/s, cost) for the most recently finished assistant reply.
     // Cleared when a new turn starts so stale numbers don't linger under the next streaming bubble.
     val lastMessageUsage = mutableStateOf<AcpEvent.MessageUsage?>(null)
@@ -114,6 +129,58 @@ class ConnectionManager private constructor(context: Context) {
     // Settings owns the first, the in-chat sheet owns the second. If a whole class of session needs a
     // different tool set, that is what a recipe's `extensions:` block is for -- goose already scopes
     // per-run there, with `available_tools` to trim inside an extension.
+
+    /** Group `ext__tool` names into ext -> [tool]. Core/platform tools carry no prefix. */
+    private fun group(names: List<String>): Map<String, List<String>> =
+        names.groupBy({ it.substringBefore("__", "(core)") }, { it.substringAfter("__") })
+
+    /** Ask goose for this session's active tools; lands as AcpEvent.Tools. */
+    fun refreshTools() { discovering = null; client?.listTools() }
+
+    /** Discover an extension's FULL tool set. goose only reports ALLOWED tools, so the only way to
+     *  see what an allowlist is hiding is to briefly run the extension unfiltered: re-add it
+     *  session-scoped with an empty available_tools, list, then put the real setting back. Entirely
+     *  session-local -- config.yaml is untouched -- and self-healing, since the restore re-applies
+     *  whatever the session should have. */
+    fun discoverTools(ext: ExtInfo) {
+        if (toolCatalog.value.containsKey(ext.name)) return   // cached for the process lifetime
+        val c = client ?: return
+        val unfiltered = JsonObject(ext.raw.toMutableMap().apply {
+            put("available_tools", JsonArray(emptyList()))
+        })
+        discovering = ext.name
+        c.removeSessionExtension(ext.name)
+        c.addSessionExtension(unfiltered)
+        c.listTools()
+    }
+
+    /** Restrict `ext` to `allowed` for THIS session only (no config.yaml write). Empty = all. */
+    fun setSessionTools(ext: ExtInfo, allowed: Set<String>) {
+        val c = client ?: return
+        val full = toolCatalog.value[ext.name].orEmpty()
+        // An allowlist equal to the whole catalogue is the same as no allowlist, and storing []
+        // keeps it that way if the extension later gains tools.
+        val list = if (allowed.size >= full.size && full.isNotEmpty()) emptyList() else allowed.toList()
+        val scoped = JsonObject(ext.raw.toMutableMap().apply {
+            put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
+        })
+        discovering = null
+        c.removeSessionExtension(ext.name)
+        c.addSessionExtension(scoped)
+        c.listTools()
+    }
+
+    /** Save `allowed` as the GLOBAL default for `ext` (config.yaml; applies to new chats). */
+    fun setDefaultTools(ext: ExtInfo, allowed: Set<String>) {
+        val c = client ?: return
+        val full = toolCatalog.value[ext.name].orEmpty()
+        val list = if (allowed.size >= full.size && full.isNotEmpty()) emptyList() else allowed.toList()
+        val updated = JsonObject(ext.raw.toMutableMap().apply {
+            put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
+        })
+        extensionsBusy.value = true
+        c.addExtensionConfig(updated, ext.enabled)
+    }
 
     /** Enable/disable an extension globally (affects new chats); the reply refreshes the list. */
     fun toggleExtension(e: ExtInfo, enabled: Boolean) {
@@ -579,7 +646,8 @@ class ConnectionManager private constructor(context: Context) {
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
                 store.lastSessionCwd = pendingOpenCwd   // Ready itself carries no cwd -- see open()
                 currentSession.value = ev.sessionId
-                // Populate the in-chat "N tools" indicator for THIS session.
+                // Populate the in-chat "N tools" indicator and the per-extension tool lists.
+                client?.listTools()
                 client?.listSessionExtensions()
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Archive the old
@@ -627,6 +695,20 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Commands -> commands.value = ev.names
             is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }
             is AcpEvent.SessionExtensions -> sessionExtensionNames.value = ev.names
+            is AcpEvent.Tools -> {
+                val g = group(ev.names)
+                val target = discovering
+                if (target != null) {
+                    // Catalogue read: record the full set, then restore the session's real setting.
+                    toolCatalog.value = toolCatalog.value + (target to g[target].orEmpty())
+                    discovering = null
+                    extensions.value.firstOrNull { it.name == target }?.let { e ->
+                        val allowed = (e.raw["available_tools"] as? JsonArray)
+                            ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
+                        setSessionTools(e, if (allowed.isEmpty()) g[target].orEmpty().toSet() else allowed)
+                    }
+                } else sessionTools.value = g
+            }
             is AcpEvent.MessageUsage -> lastMessageUsage.value = ev
             is AcpEvent.Permission -> {
                 // The privileged Assistant thread honors the user's chosen action policy; every

@@ -76,6 +76,8 @@ sealed interface AcpEvent {
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
      *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
     data class SessionExtensions(val sessionId: String, val names: List<String>) : AcpEvent
+    /** Tools active in the current session, as `extension__tool` names straight from goose. */
+    data class Tools(val names: List<String>) : AcpEvent
     data class Commands(val names: List<String>) : AcpEvent
     data class Usage(val used: Int, val size: Int, val cost: Double, val currency: String) : AcpEvent
     data class Chart(val spec: String) : AcpEvent   // Chart.js-shaped JSON from autovisualiser
@@ -164,8 +166,7 @@ class AcpClient(
 
     // --- Session-scoped extensions (a DIFFERENT, session-local API from config/extensions/* above:
     // that one writes config.yaml and affects every session; this one mutates only ONE session's own
-    // extension_data, so per-session-type profiles can't fight over shared global state). Used for
-    // "which tools does this session type get" -- see ConnectionManager.applyExtensionProfile. ---
+    // extension_data, so a per-chat override can't leak into other sessions). ---
 
     /** List the CURRENT session's enabled extensions. Reply arrives as AcpEvent.SessionExtensions. */
     fun listSessionExtensions() {
@@ -188,6 +189,23 @@ class AcpClient(
             put("sessionId", sid); put("name", name)
         })
     }
+
+    /** Tools currently active in this session. Names are `extension__tool`; goose only returns
+     *  ALLOWED tools, so this reflects `available_tools` filtering rather than the full catalogue
+     *  (see ConnectionManager.discoverTools for how the full set is obtained). */
+    fun listTools() {
+        val sid = sessionId ?: return
+        rpc("_goose/unstable/tools/list", buildJsonObject { put("sessionId", sid) })
+    }
+
+    /** Upsert an extension in config.yaml (the GLOBAL default for new sessions). Sending the
+     *  extension object back with a modified `available_tools` is how a tool allowlist is saved.
+     *  NOTE this rewrites the whole config.yaml and drops its comments -- goose re-serialises from
+     *  its parsed model. Same is true of setExtensionEnabled. */
+    fun addExtensionConfig(extension: JsonObject, enabled: Boolean) =
+        rpc("_goose/unstable/config/extensions/add", buildJsonObject {
+            put("extension", extension); put("enabled", enabled)
+        })
 
     /** Read a global goose config value (e.g. GOOSE_FAST_MODEL). Reply arrives as
      *  AcpEvent.ServerConfig. These live in goose's config.yaml, NOT per-session — so the
@@ -389,6 +407,13 @@ class AcpClient(
             }
             // add/remove reply empty -- ConnectionManager's diff-and-apply already knows the target
             // state, so there's nothing to re-fetch (unlike the global toggle above).
+            "_goose/unstable/tools/list" -> {
+                val names = (result?.get("tools") as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                }
+                onEvent(AcpEvent.Tools(names))
+            }
+            "_goose/unstable/config/extensions/add" -> listExtensions()
             "_goose/unstable/session/extensions/add" -> {}
             "_goose/unstable/session/extensions/remove" -> {}
             "_goose/unstable/config/read" -> {

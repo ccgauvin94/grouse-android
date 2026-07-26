@@ -18,8 +18,8 @@ android {
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 4
-        versionName = "0.4-20260725"
+        versionCode = 5
+        versionName = "0.5-20260725"
     }
 
     buildTypes {

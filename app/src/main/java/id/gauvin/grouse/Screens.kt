@@ -19,6 +19,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -576,6 +578,9 @@ private fun ToolManagementSheet(cm: ConnectionManager, onDismiss: () -> Unit) {
                         onCheckedChange = { on -> cm.toggleSessionExtension(e.name, on) },
                     )
                 }
+                if (isOn) ToolList(cm, e, cm.sessionTools.value[e.name].orEmpty().toSet()) {
+                    cm.setSessionTools(e, it)          // this chat only
+                }
                 HorizontalDivider()
             }
         }
@@ -758,6 +763,57 @@ private fun SettingsSwitchRow(label: String, checked: Boolean, onChange: (Boolea
     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+
+/** Expandable per-extension tool list, shared by Settings (global default, writes config.yaml) and
+ *  the in-chat sheet (this session only). `onSave` is the only difference between the two.
+ *
+ *  The full catalogue is not directly queryable -- goose reports only ALLOWED tools -- so expanding
+ *  triggers ConnectionManager.discoverTools, which briefly runs the extension unfiltered in this
+ *  session to read the whole set. That is why the list can take a moment to populate the first time,
+ *  and why it is cached afterwards. */
+@Composable
+fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>, onSave: (Set<String>) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val catalog = cm.toolCatalog.value[e.name]
+    // Local echo so a checkbox responds instantly; the server round-trip refreshes it after.
+    var sel by remember(e.name, active) { mutableStateOf(active) }
+
+    Row(Modifier.fillMaxWidth().clickable {
+            open = !open
+            if (open) cm.discoverTools(e)
+        }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+            contentDescription = if (open) "hide tools" else "show tools")
+        Spacer(Modifier.width(6.dp))
+        Text(
+            if (catalog == null) "${active.size} tools"
+            else "${sel.size} of ${catalog.size} tools",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+        )
+    }
+    if (open) {
+        if (catalog == null) {
+            Text("reading tool list…", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(start = 30.dp, bottom = 6.dp))
+        } else {
+            Column(Modifier.padding(start = 30.dp, bottom = 8.dp)) {
+                catalog.sorted().forEach { t ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text(t, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Checkbox(checked = t in sel, onCheckedChange = { on ->
+                            sel = if (on) sel + t else sel - t
+                            onSave(sel)
+                        })
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1008,6 +1064,11 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
                         }
                         Switch(checked = e.enabled, enabled = !cm.extensionsBusy.value,
                             onCheckedChange = { cm.toggleExtension(e, it) })
+                    }
+                    if (e.enabled) Box(Modifier.padding(horizontal = 16.dp)) {
+                        ToolList(cm, e, cm.sessionTools.value[e.name].orEmpty().toSet()) {
+                            cm.setDefaultTools(e, it)   // config.yaml; applies to new chats
+                        }
                     }
                     HorizontalDivider()
                 }
