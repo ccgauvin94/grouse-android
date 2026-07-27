@@ -78,6 +78,9 @@ import androidx.navigation.NavController
 import com.halilibo.richtext.markdown.Markdown
 import com.halilibo.richtext.ui.material3.RichText
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 private val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")
 
@@ -1162,7 +1165,19 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
                             onCheckedChange = { cm.toggleExtension(e, it) })
                     }
                     if (e.enabled) Box(Modifier.padding(horizontal = 16.dp)) {
-                        ToolList(cm, e, cm.sessionTools.value[e.name].orEmpty().toSet()) {
+                        // Seed the checkboxes from the SAVED global allowlist (e.raw), not from the
+                        // current session's tool state. The session reflects whatever this chat
+                        // happens to be running (and after a catalogue discovery, the FULL set), so
+                        // seeding from it made every box show checked again after a save that had in
+                        // fact persisted -- "my pruning didn't save" when config.yaml said otherwise.
+                        // Empty allowlist means "all tools", so fall back to the catalogue then.
+                        val saved = (e.raw["available_tools"] as? JsonArray)
+                            ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
+                        val active = if (saved.isEmpty())
+                            cm.toolCatalog.value[e.name]?.toSet()
+                                ?: cm.sessionTools.value[e.name].orEmpty().toSet()
+                        else saved
+                        ToolList(cm, e, active) {
                             cm.setDefaultTools(e, it)   // config.yaml; applies to new chats
                         }
                     }
