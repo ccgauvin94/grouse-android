@@ -232,6 +232,9 @@ class ConnectionManager private constructor(context: Context) {
     private var live = false
     private var connecting = false
     private var lastSessionId: String? = null
+    // True between a ReplayStart wiping `messages` and the following Ready, which re-adds the
+    // bubbles of any still-queued prompts (they aren't in the server history the replay rebuilt).
+    private var replayWiped = false
     // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
     private var pendingOpenCwd: String = "/state"
@@ -275,7 +278,7 @@ class ConnectionManager private constructor(context: Context) {
     val configured: Boolean get() = store.hasKey()
 
     /** Connect using the already-saved host/port/key (post-unlock auto-connect). */
-    fun connectSaved() { if (store.hasKey()) open(resume = null, suppressReplay = false) }
+    fun connectSaved() { if (store.hasKey()) open(resume = null) }
 
     /** Startup: land directly on the privileged Assistant thread (its home). Uses the cached id to
      *  resume it with no churn; on first run (no cache) connects fresh and opens it once the list
@@ -284,26 +287,23 @@ class ConnectionManager private constructor(context: Context) {
         if (!store.hasKey()) return
         val a = store.assistantSessionId
         if (a != null) openSession(a, knownKind = SessionKind.ASSISTANT)
-        else { pendingOpenAssistant = true; open(resume = null, suppressReplay = false) }
+        else { pendingOpenAssistant = true; open(resume = null) }
     }
 
     /** Save new credentials and connect fresh (from the Connect screen). */
     fun connect(host: String, port: String, key: String) {
         store.host = host; store.port = port; store.secretKey = key
         lastSessionId = null; config.value = emptyList()
-        open(resume = null, suppressReplay = false)
+        open(resume = null)
     }
 
-    /** Reconnect silently after Android drops the socket in the background. */
+    /** Reconnect silently after Android drops the socket in the background. The resume always
+     *  replays: the server history is rebuilt into the transcript on every session/load (see
+     *  AcpEvent.ReplayStart), which both repopulates after a background process kill and picks up
+     *  turns another client (Desktop, deliver.sh) added to this session while we were away. */
     fun ensureConnected() {
         if (!store.hasKey() || live || connecting) return
-        // suppressReplay ONLY when we still hold the conversation in memory. It exists to stop a
-        // brief socket blip duplicating messages we already show -- but if the PROCESS was killed
-        // while backgrounded (aggressive OEM battery management does this even to a foreground
-        // service), `messages` comes back empty and suppressing the replay leaves a blank chat.
-        // The turn goose actually finished is then invisible, which reads as "it died" and gets
-        // re-prompted. Replaying repopulates it instead.
-        open(resume = lastSessionId, suppressReplay = messages.isNotEmpty())
+        open(resume = lastSessionId)
     }
 
     fun listSessions() = client?.listSessions()
@@ -330,13 +330,13 @@ class ConnectionManager private constructor(context: Context) {
         // cold start; open() falls back to that lookup (then CHAT) when knownKind is null.
         val kind = knownKind ?: sessions.value.firstOrNull { it.sessionId == sessionId }
             ?.let { ConnectionManager.sessionKind(it) }
-        open(resume = sessionId, suppressReplay = false, kind = kind)
+        open(resume = sessionId, kind = kind)
     }
 
     fun newSession(cwd: String = "/state", kind: SessionKind = SessionKind.CHAT) {
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
-        open(resume = null, suppressReplay = false, cwd = cwd, kind = kind)
+        open(resume = null, cwd = cwd, kind = kind)
     }
 
     /** A Code session: scoped to a project directory under the server's /workspace bind mount
@@ -455,9 +455,11 @@ class ConnectionManager private constructor(context: Context) {
         } else {
             // Not connected yet (initial connect / silent reconnect window): queue and connect,
             // rather than calling sendPrompt against a session-less client (which just errors and
-            // loses the message). Flushed in the Ready branch.
+            // loses the message). Flushed in the Ready branch. The resume's replay wipes the local
+            // transcript (including this just-added bubble); Ready re-adds the queued bubbles on
+            // top of the rebuilt history -- see the ReplayStart/Ready handlers.
             enqueue(PendingSend(text, images))
-            if (!connecting) open(resume = lastSessionId ?: store.lastSessionId, suppressReplay = true)
+            if (!connecting) open(resume = lastSessionId ?: store.lastSessionId)
         }
     }
 
@@ -501,6 +503,15 @@ class ConnectionManager private constructor(context: Context) {
         if (fg) {
             notifier.cancelAlert()
             ensureConnected()
+            // Even with the socket still alive, this session may have moved on without us: goosed
+            // only streams a turn to the connection that prompted it, so anything another client
+            // (Desktop, deliver.sh) added while we were backgrounded is invisible until a
+            // session/load replay. Reopen the current session to resync -- idle-only, so a turn
+            // this app is actually streaming is never yanked. ensureConnected() above covers the
+            // dropped-socket case (its resume now always replays too).
+            if (live && !busy.value && !turnInFlight) {
+                (lastSessionId ?: store.lastSessionId)?.let { open(resume = it) }
+            }
             // Re-ask the server for its model list every time we come back. It was previously
             // fetched ONCE per provider per connection (guarded by liveModelsFetchedFor, which
             // only resets in open()), so a long-lived socket never noticed the set changing --
@@ -546,14 +557,15 @@ class ConnectionManager private constructor(context: Context) {
     /** Stop the running turn — reliably, even if goose is wedged mid-turn and won't honor the
      *  polite ACP cancel. We send the cancel, free the UI immediately, then reconnect (resume):
      *  reopening bumps the client generation so any late events from the stuck connection are
-     *  dropped, and the fresh client comes back idle. The streamed partial stays in the list. */
+     *  dropped, and the fresh client comes back idle. The reconnect's replay rebuilds the
+     *  transcript to whatever the server persisted of the cancelled turn. */
     fun cancel() {
         client?.cancel()
         streamingRole = null
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
         clearQueue()           // Stop means stop: don't let queued prompts fire after a cancel
-        if (store.hasKey()) open(resume = lastSessionId ?: store.lastSessionId, suppressReplay = true)
+        if (store.hasKey()) open(resume = lastSessionId ?: store.lastSessionId)
     }
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
@@ -569,7 +581,7 @@ class ConnectionManager private constructor(context: Context) {
         permissions.remove(p)
     }
 
-    private fun open(resume: String?, suppressReplay: Boolean, cwd: String? = null, kind: SessionKind? = null) {
+    private fun open(resume: String?, cwd: String? = null, kind: SessionKind? = null) {
         // If a reset/create-assistant is pending but THIS open() isn't the one it scheduled
         // (clientGen+1 != resetGen), a different navigation superseded it — abandon it so a later
         // unrelated Ready can't complete a stale rename.
@@ -590,12 +602,9 @@ class ConnectionManager private constructor(context: Context) {
             // The superseded client will never report TurnDone here, so free the wire.
             turnInFlight = false
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
+        replayWiped = false
         val url = "wss://${store.host}:${store.port}/acp"
-        status.value = when {
-            resume == null -> "connecting to $url"
-            suppressReplay -> "reconnecting…"
-            else -> "loading session…"
-        }
+        status.value = if (resume == null) "connecting to $url" else "loading session…"
         val saved = store.savedOptions(optionIds)
         // Resolve the cwd for this open(): an explicit param wins (new session creation always
         // knows its own target); otherwise, for a resume, prefer the cached SessionInfo's cwd
@@ -615,7 +624,6 @@ class ConnectionManager private constructor(context: Context) {
             it.resumeSessionId = resume
             it.resumeCwd = resolvedCwd
             it.desiredCwd = resolvedCwd
-            it.suppressReplay = suppressReplay
             it.connect()
         }
     }
@@ -674,6 +682,14 @@ class ConnectionManager private constructor(context: Context) {
                     lastSessionId?.let { store.pendingPushSessionId = it }
                     client?.sendPrompt(queued.text, queued.images, expect = currentSession.value)
                 } else if (!store.persistentConnection) stopService()
+            }
+            is AcpEvent.ReplayStart -> {
+                // A session/load replay is about to stream: the server transcript is ground truth
+                // (it may hold turns Desktop or deliver.sh added while this app wasn't looking),
+                // so rebuild from scratch instead of appending onto the local copy.
+                messages.clear()
+                streamingRole = null
+                replayWiped = true
             }
             is AcpEvent.AgentChunk -> appendStream("assistant", ev.text)
             is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
@@ -739,6 +755,14 @@ class ConnectionManager private constructor(context: Context) {
                     store.assistantSessionId = ev.sessionId
                 }
                 client?.listSessions()   // so the Assistant thread can be resolved by title
+                // If a replay wiped the transcript this connection, the rebuilt history now holds
+                // everything the server knows -- but prompts still waiting in the queue aren't in
+                // it (they haven't been sent). Re-add their bubbles on top, in queue order, so the
+                // user's unsent messages don't vanish from the screen.
+                if (replayWiped) {
+                    replayWiped = false
+                    pendingSends.forEach { messages.add(ChatMessage("user", it.text, it.images)) }
+                }
                 // Send ONE queued prompt (bubbles were already added when queued); TurnDone drains
                 // the rest. This used to `while`-loop the whole deque, firing every queued prompt
                 // into the session at once -- which interleaves them in the transcript and
@@ -753,11 +777,30 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
+                // Validate the cached assistant id against the list. The cache wins over a title
+                // lookup on open (an empty, freshly-reset thread is invisible to session/list, so
+                // absence alone proves nothing) -- but if the server SHOWS the cached session under
+                // a different title, it was renamed aside (archived / fork cleanup) and the cache
+                // is definitively stale. This is exactly how the 2026-07-26 fork presented: the
+                // phone kept opening its cached acp-type thread while deliver.sh and Desktop used
+                // a same-named user-type one it couldn't see. Repoint to the newest session
+                // actually bearing the title, and if the stale thread is on screen AS the
+                // assistant, hop to the right one.
+                val cached = store.assistantSessionId
+                val cachedEntry = cached?.let { c -> ev.list.firstOrNull { it.sessionId == c } }
+                if (cachedEntry != null && cachedEntry.title != ASSISTANT_TITLE) {
+                    val fresh = ev.list.filter { it.title == ASSISTANT_TITLE }
+                        .maxByOrNull { it.updatedAt }?.sessionId
+                    store.assistantSessionId = fresh   // null just clears -> reseed below / recreate
+                    if (fresh != null && currentSession.value == cached)
+                        openSession(fresh, knownKind = SessionKind.ASSISTANT)
+                }
                 // Only seed the cache when empty. It used to be written on every session list,
                 // which let an OLD session sharing the title clobber the id of the thread this app
-                // had just created.
+                // had just created. Newest title match wins, in case stale duplicates linger.
                 if (store.assistantSessionId == null)
-                    sessions.value.firstOrNull { it.title == ASSISTANT_TITLE }?.let { store.assistantSessionId = it.sessionId }
+                    sessions.value.filter { it.title == ASSISTANT_TITLE }
+                        .maxByOrNull { it.updatedAt }?.let { store.assistantSessionId = it.sessionId }
                 if (pendingOpenAssistant) {
                     pendingOpenAssistant = false
                     val id = assistantSessionId()

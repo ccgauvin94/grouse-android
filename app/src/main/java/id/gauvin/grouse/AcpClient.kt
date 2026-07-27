@@ -68,6 +68,10 @@ sealed interface AcpEvent {
         val outputTokens: Int, val elapsedMs: Long, val ttftMs: Long, val cost: Double?,
     ) : AcpEvent
     data class TurnDone(val stopReason: String) : AcpEvent
+    /** A session/load history replay is about to stream. The server transcript is ground truth --
+     *  it may hold turns other clients (Desktop, deliver.sh) added while this app wasn't looking --
+     *  so the UI drops its local copy and rebuilds from the replayed chunks. */
+    object ReplayStart : AcpEvent
     data class Error(val text: String) : AcpEvent
     data class Config(val options: List<ConfigOption>) : AcpEvent
     data class Ready(val sessionId: String) : AcpEvent
@@ -134,8 +138,6 @@ class AcpClient(
     /** The cwd for a brand-new session (session/new) when resumeSessionId is null. "/state" for
      *  Chat/Assistant; "/workspace/<project>" for a Code session. */
     var desiredCwd: String = "/state"
-    /** On a silent background reconnect the UI still holds the transcript — drop the replay. */
-    var suppressReplay = false
     // True between sending session/load and its response (i.e. while history replays).
     private var replaying = false
 
@@ -379,6 +381,7 @@ class AcpClient(
                 val resume = resumeSessionId
                 if (resume != null) {
                     replaying = true
+                    onEvent(AcpEvent.ReplayStart)
                     rpc("session/load", buildJsonObject {
                         put("sessionId", resume)
                         // session/load's cwd SILENTLY REWRITES the session's working_dir if it
@@ -574,10 +577,10 @@ class AcpClient(
     private fun standardUpdate(params: JsonObject?) {
         val update = params?.get("update") as? JsonObject ?: return
         val tag = update["sessionUpdate"]?.jsonPrimitive?.contentOrNull
-        // Silent reconnect: the UI already holds the transcript, so drop the replay — EXCEPT
-        // usage_update, which can be the only signal a suppressed-replay reconnect gets that a
-        // trailing usage number changed; dropping it blanket-style left the top bar stale.
-        if (tag != "usage_update" && replaying && suppressReplay) return
+        // Replays are never suppressed: every reconnect rebuilds the transcript from the server's
+        // history (see AcpEvent.ReplayStart). Suppression used to guard a socket blip against
+        // duplicate bubbles, but it couldn't tell "what I already show" from "turns another client
+        // added while I was away", so those turns were silently dropped.
         fun text() = (update["content"] as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
         when (tag) {
             // user_message_chunk only appears during a session/load replay (live prompts aren't echoed).
