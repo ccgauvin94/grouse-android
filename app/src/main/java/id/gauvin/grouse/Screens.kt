@@ -582,6 +582,10 @@ fun PermissionSheet(req: AcpEvent.Permission, onChoose: (String?) -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ToolManagementSheet(cm: ConnectionManager, onDismiss: () -> Unit) {
+    // Re-list the session's tools and extensions every time the sheet opens. Ready's two polls
+    // (0s/2.5s) can both miss a slow-attaching MCP extension, after which nothing else refreshed —
+    // the sheet then showed the previous session's state until a manual toggle forced a round trip.
+    LaunchedEffect(Unit) { cm.refreshSessionSheet() }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).verticalScroll(rememberScrollState())) {
             Text("Tools for this chat", style = MaterialTheme.typography.titleLarge)

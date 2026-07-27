@@ -146,13 +146,21 @@ class ConnectionManager private constructor(context: Context) {
     /** Ask goose for this session's active tools; lands as AcpEvent.Tools. */
     fun refreshTools() { discovering = null; client?.listTools() }
 
+    /** Everything the in-chat tool sheet displays, refreshed together on open. */
+    fun refreshSessionSheet() { refreshTools(); client?.listSessionExtensions() }
+
     /** Discover an extension's FULL tool set. goose only reports ALLOWED tools, so the only way to
      *  see what an allowlist is hiding is to briefly run the extension unfiltered: re-add it
      *  session-scoped with an empty available_tools, list, then put the real setting back. Entirely
      *  session-local -- config.yaml is untouched -- and self-healing, since the restore re-applies
      *  whatever the session should have. */
     fun discoverTools(ext: ExtInfo) {
-        if (toolCatalog.value.containsKey(ext.name)) return   // cached for the process lifetime
+        // Catalogue is cached for the process lifetime, but sessionTools is NOT reliably fresh:
+        // MCP extensions attach asynchronously after Ready, and the two listTools polls (0s/2.5s)
+        // can both miss a slow one. Expanding a cached row used to early-return without any
+        // refresh, so the sheet rendered the PREVIOUS session's tool state after a global-default
+        // change -- "the session tools list isn't accurate". Refresh cheaply instead.
+        if (toolCatalog.value.containsKey(ext.name)) { refreshTools(); return }
         val c = client ?: return
         val unfiltered = JsonObject(ext.raw.toMutableMap().apply {
             put("available_tools", JsonArray(emptyList()))
