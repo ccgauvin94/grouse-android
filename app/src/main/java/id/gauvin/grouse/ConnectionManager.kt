@@ -310,6 +310,21 @@ class ConnectionManager private constructor(context: Context) {
         open(resume = lastSessionId)
     }
 
+    // A turn was streaming when the socket died. goosed streams a turn ONLY to the connection
+    // that prompted it (protocol fact, not a bug here), so the remainder is invisible to the
+    // replacement socket and the chat looks frozen mid-tool-calls. Best available recovery:
+    // after reconnecting, replay the session a few times so the finished turn shows up.
+    private var droppedMidTurn = false
+    private var resyncTicks = 0
+    private fun turnResyncTick() {
+        if (resyncTicks <= 0) return
+        resyncTicks--
+        // The user started something new (or left) — their action wins; stop quietly.
+        if (busy.value || turnInFlight || !appForeground) return
+        lastSessionId?.let { open(resume = it) }
+        if (resyncTicks > 0) main.postDelayed(::turnResyncTick, 8_000)
+    }
+
     fun listSessions() = client?.listSessions()
 
     /** Archive a session -- goose has NO session/delete (verified: "Method not found"), so archive
@@ -366,57 +381,47 @@ class ConnectionManager private constructor(context: Context) {
         newSession(cwd = "/workspace/$clean", kind = SessionKind.CODE)
     }
 
-    /** Run one prompt in a throwaway fast-model session and report (error, agentReplyText).
+    /** Run one shell command server-side via a DIRECT tool call and report (error, output).
      *
-     *  There is no ACP method to touch server files (no mkdir, no read -- checked the full
-     *  custom-method table), so server-side file work rides a BOOTSTRAP session: a second,
-     *  short-lived AcpClient (the UI session's client and its state machine stay untouched)
-     *  opens at /state on the fast model, sends the prompt, collects the reply, and archives
-     *  ITSELF through its own still-connected client -- combined with the archivedAt filter in
-     *  parseSessions, the helper session never shows in any list. The developer extension's
-     *  shell is always_allow server-side, so commands run without an approval round-trip; any
-     *  other approval request is answered allow_once (the prompt is ours and fixed). */
-    private fun runUtilitySession(prompt: String, timeoutMs: Long = 90_000, onDone: (String?, String) -> Unit) {
+     *  No model is involved: a throwaway AcpClient opens a session at /state purely to get a
+     *  sessionId, then invokes developer__shell through goose's _goose/unstable/tools/call --
+     *  deterministic, exact output, near-instant. Because the session never receives a prompt
+     *  it has ZERO messages, and session/list filters message-less sessions, so it never
+     *  appears anywhere -- no archiving dance needed. (The earlier version prompted the fast
+     *  model to run commands; it was slow, paraphrased output, and its session flashed into
+     *  the list until archived.) */
+    private fun runUtilityTool(command: String, timeoutMs: Long = 30_000, onDone: (String?, String) -> Unit) {
         val url = "wss://${store.host}:${store.port}/acp"
         var boot: AcpClient? = null
-        var bootSid: String? = null
         var finished = false
-        val reply = StringBuilder()
         lateinit var watchdog: Runnable
-        fun finish(err: String?) {
+        fun finish(err: String?, out: String) {
             if (finished) return
             finished = true
             main.removeCallbacks(watchdog)
-            bootSid?.let { boot?.archiveSession(it) }
-            // Give the archive frame a moment on the wire before the socket closes.
             val b = boot
-            main.postDelayed({ b?.close() }, 1_500)
+            main.postDelayed({ b?.close() }, 500)
             boot = null
-            onDone(err, reply.toString())
+            onDone(err, out)
         }
-        watchdog = Runnable { finish("Timed out talking to the server.") }
+        watchdog = Runnable { finish("Timed out talking to the server.", "") }
         main.postDelayed(watchdog, timeoutMs)
         boot = AcpClient(url, store.secretKey) { ev ->
             main.post {
                 if (finished) return@post
                 when (ev) {
-                    is AcpEvent.Ready -> { bootSid = ev.sessionId; boot?.sendPrompt(prompt) }
-                    is AcpEvent.AgentChunk -> reply.append(ev.text)
-                    is AcpEvent.Permission -> boot?.respondPermission(
-                        ev.toolCallId,
-                        ev.options.firstOrNull { it.kind == "allow_once" }?.optionId
-                            ?: ev.options.firstOrNull()?.optionId
-                    )
-                    is AcpEvent.TurnDone -> finish(null)
-                    is AcpEvent.Error -> finish(ev.text)
+                    is AcpEvent.Ready -> boot?.callTool(ev.sessionId, "developer__shell",
+                        kotlinx.serialization.json.buildJsonObject {
+                            put("command", kotlinx.serialization.json.JsonPrimitive(command))
+                        })
+                    is AcpEvent.DirectToolResult ->
+                        if (ev.isError) finish(ev.text.ifBlank { "tool call failed" }, ev.text)
+                        else finish(null, ev.text)
+                    is AcpEvent.Error -> finish(ev.text, "")
                     else -> {}
                 }
             }
         }.also {
-            // Pin to the fast model (these tasks need no intelligence); blank if the server
-            // config read hasn't landed yet -- applyDesired skips blanks and the session
-            // just uses the default model instead.
-            it.desiredOptions = mapOf("model" to serverFastModel.value.trim())
             it.desiredCwd = "/state"
             it.connect()
         }
@@ -429,27 +434,24 @@ class ConnectionManager private constructor(context: Context) {
         return name
     }
 
-    /** Create /workspace/<name> on the server (null = success, else error). Success is verified
-     *  by the caller's newCodeSession() -- if the mkdir silently failed, that session/new
-     *  rejects the nonexistent cwd and surfaces its error. */
+    /** Create /workspace/<name> on the server (null = success, else error). Deterministic
+     *  direct mkdir -- no model. */
     fun createProject(rawName: String, onResult: (String?) -> Unit) {
         val name = cleanProjectName(rawName)
             ?: run { onResult("Single folder name — no slashes, spaces, or quotes."); return }
-        runUtilitySession(
-            "Run exactly this shell command: mkdir -p /workspace/$name\nThen reply with just: done"
-        ) { err, _ -> onResult(err) }
+        runUtilityTool("mkdir -p '/workspace/$name'") { err, _ -> onResult(err) }
     }
 
     /** Read a project's .goosehints and local memory (goose's memory extension stores its
-     *  local scope at <cwd>/.goose/memory). Model-mediated: the fast model runs cat/ls and
-     *  echoes the output -- there is no direct file read over ACP. */
+     *  local scope at <cwd>/.goose/memory). Direct shell call -- exact file contents. */
     fun fetchProjectInfo(project: String, onResult: (String?, String) -> Unit) {
         val name = cleanProjectName(project) ?: run { onResult("bad project name", ""); return }
-        runUtilitySession(
-            "Run exactly this shell command:\n" +
-                "sh -c 'echo ===GOOSEHINTS===; cat /workspace/$name/.goosehints 2>/dev/null || echo (none); " +
-                "echo ===MEMORY===; ls /workspace/$name/.goose/memory 2>/dev/null || echo (none)'\n" +
-                "Then output ONLY the command's raw output, verbatim. No commentary, no code fences."
+        runUtilityTool(
+            "echo '=== .goosehints ==='; cat '/workspace/$name/.goosehints' 2>/dev/null || echo '(none)'; " +
+                "echo; echo '=== .goose/memory ==='; " +
+                "for f in '/workspace/$name/.goose/memory'/*; do [ -f \"\$f\" ] || continue; " +
+                "echo \"-- \$(basename \"\$f\")\"; cat \"\$f\"; done 2>/dev/null; " +
+                "[ -d '/workspace/$name/.goose/memory' ] || echo '(none)'"
         ) { err, text -> onResult(err, text) }
     }
 
@@ -462,14 +464,11 @@ class ConnectionManager private constructor(context: Context) {
             .forEach { archiveSession(it.sessionId) }
         store.removeRecentWorkspaceProject(name)
         recentProjects.value = store.recentWorkspaceProjects()
-        runUtilitySession(
-            "Run exactly this shell command: rmdir /workspace/$name\n" +
-                "If it succeeds reply with just: removed\n" +
-                "If it fails reply with just: kept"
-        ) { err, text ->
+        runUtilityTool("rmdir '/workspace/$name'") { err, out ->
             onResult(when {
-                err != null -> "Chats archived; server said: $err"
-                text.contains("removed") -> "Project removed."
+                err == null -> "Project removed."
+                (err + out).contains("No such file", ignoreCase = true) ->
+                    "Project removed from the list (the directory was already gone)."
                 else -> "Chats archived. The directory has files in it, so it was left in place."
             })
         }
@@ -762,9 +761,14 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun onEvent(ev: AcpEvent) {
         when (ev) {
+            // Direct tool replies only occur on utility clients, which have their own handler.
+            is AcpEvent.DirectToolResult -> {}
             is AcpEvent.Status -> {
                 status.value = ev.text
-                if (ev.text == "disconnected") { live = false; connecting = false; online.value = false }
+                if (ev.text == "disconnected") {
+                    if (turnInFlight) droppedMidTurn = true   // see turnResyncTick
+                    live = false; connecting = false; online.value = false
+                }
             }
             is AcpEvent.Error -> {
                 messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false; turnInFlight = false
@@ -864,6 +868,12 @@ class ConnectionManager private constructor(context: Context) {
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
                 // Ready itself carries no cwd -- record what this open resolved (see open()).
                 store.rememberSessionCwds(listOf(ev.sessionId to pendingOpenCwd))
+                if (droppedMidTurn) {
+                    // The turn we lost is still finishing server-side; poll it back into view.
+                    droppedMidTurn = false
+                    resyncTicks = 3
+                    main.postDelayed(::turnResyncTick, 8_000)
+                }
                 currentSession.value = ev.sessionId
                 // Populate the in-chat "N tools" indicator and the per-extension tool lists.
                 // MCP-backed extensions come up asynchronously AFTER the session is ready: a

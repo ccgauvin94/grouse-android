@@ -1898,21 +1898,22 @@ private fun ToolChipGroup(items: List<ChatMessage>) {
     val label = if (names.size == 1) "${items.size}× ${names[0]}" else "${items.size} tool calls"
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            shape = RoundedCornerShape(14.dp),
             modifier = Modifier.clickable { expanded = !expanded }
         ) {
-            Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     if (expanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                     contentDescription = null, modifier = Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.outline
                 )
                 Spacer(Modifier.width(2.dp))
-                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(15.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(label, style = MaterialTheme.typography.labelMedium)
+                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(13.dp),
+                    tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text(label.replace('_', ' '), style = MaterialTheme.typography.labelLarge)
             }
         }
         AnimatedVisibility(expanded) {
@@ -1928,24 +1929,38 @@ private fun ToolChipGroup(items: List<ChatMessage>) {
 @Composable
 private fun ToolChip(title: String, detail: String = "") {
     var expanded by remember { mutableStateOf(false) }
+    val (name, inlineDetail) = splitToolTitle(title)
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-        Surface(color = MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = MaterialTheme.colorScheme.onSurfaceVariant, shape = RoundedCornerShape(8.dp),
+        Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            shape = RoundedCornerShape(14.dp),
             modifier = Modifier.let { if (detail.isNotBlank()) it.clickable { expanded = !expanded } else it }) {
-            Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(15.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(title, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(13.dp),
+                    tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text(name.replace('_', ' '), style = MaterialTheme.typography.labelLarge)
+                if (inlineDetail.isNotBlank()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(inlineDetail, style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                } else Spacer(Modifier.weight(1f))
                 if (detail.isNotBlank()) Icon(
                     if (expanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null, modifier = Modifier.size(16.dp))
+                    contentDescription = null, modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.outline)
             }
         }
         if (detail.isNotBlank()) AnimatedVisibility(expanded) {
-            Text(detail, style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
-                color = MaterialTheme.colorScheme.outline,
-                modifier = Modifier.padding(start = 20.dp, top = 2.dp, bottom = 2.dp))
+            Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.padding(start = 16.dp, top = 3.dp, bottom = 2.dp).fillMaxWidth()) {
+                Text(detail, style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+            }
         }
     }
 }

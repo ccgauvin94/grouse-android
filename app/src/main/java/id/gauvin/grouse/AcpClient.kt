@@ -97,6 +97,9 @@ sealed interface AcpEvent {
     data class Permission(
         val toolCallId: String, val title: String, val detail: String, val options: List<PermOption>,
     ) : AcpEvent
+    /** Reply to a DIRECT tool invocation (_goose/unstable/tools/call — no model turn involved).
+     *  `text` is the concatenated text content blocks. */
+    data class DirectToolResult(val text: String, val isError: Boolean) : AcpEvent
 }
 
 /**
@@ -253,6 +256,16 @@ class AcpClient(
      *  this is the delete-equivalent -- the session leaves session/list, history stays on disk. */
     fun archiveSession(targetSessionId: String) =
         rpc("_goose/unstable/session/archive", buildJsonObject { put("sessionId", targetSessionId) })
+
+    /** Invoke a tool DIRECTLY -- no model turn, no prompt, deterministic. Name is the
+     *  `extension__tool` form (e.g. "developer__shell"). Reply arrives as DirectToolResult.
+     *  A session that only ever does this has zero messages, so session/list (which filters
+     *  only_sessions_with_messages) never shows it -- the invisible-utility-session property
+     *  the bootstrap flows rely on. */
+    fun callTool(targetSessionId: String, name: String, arguments: JsonObject) =
+        rpc("_goose/unstable/tools/call", buildJsonObject {
+            put("sessionId", targetSessionId); put("name", name); put("arguments", arguments)
+        })
 
     /** Change a session config knob; server replies with the refreshed configOptions. */
     fun setConfigOption(configId: String, value: String) {
@@ -453,6 +466,14 @@ class AcpClient(
             }
             // Rename returns empty; re-list so every consumer sees the new title.
             "_goose/unstable/session/rename" -> listSessions()
+            "_goose/unstable/tools/call" -> {
+                val texts = (result?.get("content") as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
+                }
+                onEvent(AcpEvent.DirectToolResult(
+                    texts.joinToString("\n"),
+                    result?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false))
+            }
             "_goose/unstable/session/archive" -> listSessions()
             "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))
             "session/set_mode" -> {}
