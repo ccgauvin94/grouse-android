@@ -449,10 +449,16 @@ class ConnectionManager private constructor(context: Context) {
             main.post {
                 if (finished) return@post
                 when (ev) {
-                    is AcpEvent.Ready -> boot?.callTool(ev.sessionId, "developer__shell",
-                        kotlinx.serialization.json.buildJsonObject {
-                            put("command", kotlinx.serialization.json.JsonPrimitive(command))
-                        })
+                    is AcpEvent.Ready -> {
+                        // Builtin developer tools are UNPREFIXED ("shell", not developer__shell —
+                        // matches permission.yaml's bare names). Small delay: extensions attach
+                        // async after session/new.
+                        val sid = ev.sessionId
+                        main.postDelayed({ if (!finished) boot?.callTool(sid, "shell",
+                            kotlinx.serialization.json.buildJsonObject {
+                                put("command", kotlinx.serialization.json.JsonPrimitive(command))
+                            }) }, 800)
+                    }
                     is AcpEvent.DirectToolResult ->
                         if (ev.isError) finish(ev.text.ifBlank { "tool call failed" }, ev.text)
                         else finish(null, ev.text)
@@ -602,6 +608,41 @@ class ConnectionManager private constructor(context: Context) {
         assistantExtNames.value =
             if (on) (assistantExtNames.value + ext.name).distinct()
             else assistantExtNames.value - ext.name
+    }
+
+    /** The Assistant thread's ACTIVE tools, grouped ext -> tool names (targeted tools/list). */
+    val assistantTools = mutableStateOf<Map<String, List<String>>>(emptyMap())
+    private var discoveringAssistant: String? = null
+    fun refreshAssistantTools() { assistantSessionId()?.let { client?.listToolsFor(it) } }
+
+    /** Mirror of discoverTools for the ASSISTANT session: briefly re-adds the extension
+     *  unfiltered so the full catalogue becomes observable, then the UI's Save re-applies. */
+    fun discoverAssistantTools(ext: ExtInfo) {
+        val sid = assistantSessionId() ?: return
+        if (toolCatalog.value.containsKey(ext.name)) { refreshAssistantTools(); return }
+        val c = client ?: return
+        val unfiltered = JsonObject(ext.raw.toMutableMap().apply {
+            put("available_tools", JsonArray(emptyList()))
+        })
+        discoveringAssistant = ext.name
+        c.removeSessionExtensionFor(sid, ext.name)
+        c.addSessionExtensionFor(sid, unfiltered)
+        main.postDelayed({ client?.listToolsFor(sid) }, 1_200)
+    }
+
+    /** Restrict `ext` to `allowed` in the ASSISTANT thread (rotation carries it forward). */
+    fun setAssistantTools(ext: ExtInfo, allowed: Set<String>) {
+        val sid = assistantSessionId() ?: return
+        val c = client ?: return
+        val full = toolCatalog.value[ext.name].orEmpty()
+        val list = if (allowed.size >= full.size && full.isNotEmpty()) emptyList() else allowed.toList()
+        val scoped = JsonObject(ext.raw.toMutableMap().apply {
+            put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
+        })
+        discoveringAssistant = null
+        c.removeSessionExtensionFor(sid, ext.name)
+        c.addSessionExtensionFor(sid, scoped)
+        main.postDelayed({ refreshAssistantTools() }, 1_200)
     }
 
     /** Observable master switch (mirrors SecureStore.assistantEnabled for the drawer). */
@@ -1085,6 +1126,18 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Tools -> {
                 val g = group(ev.names)
+                // Targeted reply for the Assistant thread: its own state bucket + its own
+                // discovery flow; never touches the on-screen session's sessionTools.
+                if (ev.sessionId != null && ev.sessionId == store.assistantSessionId) {
+                    val dt = discoveringAssistant
+                    if (dt != null && g.containsKey(dt)) {
+                        toolCatalog.value = toolCatalog.value + (dt to g[dt].orEmpty())
+                        // Leave the unfiltered set active until the user Saves (mirrors the
+                        // sheet's explore-then-save semantics).
+                    }
+                    assistantTools.value = g
+                    return
+                }
                 val target = discovering
                 if (target != null) {
                     // Catalogue read: record the full set, then restore the session's real setting.

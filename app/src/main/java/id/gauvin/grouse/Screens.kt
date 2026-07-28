@@ -1163,6 +1163,7 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
             cm.readServerConfig("MORNING_ENABLED", "MORNING_TIME", "MORNING_MODEL", "MORNING_PROMPT",
                 "BRIEFING_ENABLED", "BRIEFING_INTERVAL_HOURS", "BRIEFING_MODEL", "BRIEFING_PROMPT")
             cm.loadAssistantExtensions()
+            cm.refreshAssistantTools()
         }
     }
     var testNote by remember { mutableStateOf<String?>(null) }
@@ -1319,17 +1320,21 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
                 }
 
                 SettingsSection("Thread tools") {
-                    SettingCaption("Extensions enabled in the Assistant thread. The daily " +
-                        "rotation carries this set forward, so changes stick. Other chats " +
-                        "use the global defaults.")
+                    SettingCaption("Extensions and their individual tools in the Assistant " +
+                        "thread. The daily rotation carries this set forward, so changes " +
+                        "stick. Other chats use the global defaults.")
                     if (cm.extensions.value.isEmpty()) {
                         Text("Connect to load the extension list.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline)
                     }
                     cm.extensions.value.sortedBy { it.name.lowercase() }.forEach { ext ->
-                        SettingsSwitchRow(ext.name, ext.name in cm.assistantExtNames.value) { on ->
-                            cm.toggleAssistantExtension(ext, on)
+                        val on = ext.name in cm.assistantExtNames.value
+                        SettingsSwitchRow(ext.name, on) { cm.toggleAssistantExtension(ext, it) }
+                        if (on) ToolList(cm, ext,
+                            active = cm.assistantTools.value[ext.name].orEmpty().toSet(),
+                            onExpand = { cm.discoverAssistantTools(ext) }) { sel ->
+                            cm.setAssistantTools(ext, sel)
                         }
                     }
                 }
@@ -1398,7 +1403,8 @@ private fun SettingsSwitchRow(label: String, checked: Boolean, onChange: (Boolea
  *  session to read the whole set. That is why the list can take a moment to populate the first time,
  *  and why it is cached afterwards. */
 @Composable
-fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>, onSave: (Set<String>) -> Unit) {
+fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>,
+             onExpand: (() -> Unit)? = null, onSave: (Set<String>) -> Unit) {
     // Only mcp-backed extensions namespace their tools as `name__tool`, so only those can be mapped
     // back to an owner. Builtins (developer -> shell/edit/tree, summon -> delegate) cannot be, and
     // rendering a row for them showed a permanent "0 tools" that opened onto nothing.
@@ -1410,7 +1416,7 @@ fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>, onSave: (Se
 
     Row(Modifier.fillMaxWidth().clickable {
             open = !open
-            if (open) cm.discoverTools(e)
+            if (open) (onExpand ?: { cm.discoverTools(e) })()
         }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
             contentDescription = if (open) "hide tools" else "show tools")

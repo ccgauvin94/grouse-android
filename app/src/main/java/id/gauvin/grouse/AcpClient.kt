@@ -88,8 +88,9 @@ sealed interface AcpEvent {
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
      *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
     data class SessionExtensions(val sessionId: String, val names: List<String>) : AcpEvent
-    /** Tools active in the current session, as `extension__tool` names straight from goose. */
-    data class Tools(val names: List<String>) : AcpEvent
+    /** Tools active in a session, as `extension__tool` names straight from goose.
+     *  sessionId is null for the client's own session (legacy), set for targeted queries. */
+    data class Tools(val names: List<String>, val sessionId: String? = null) : AcpEvent
     data class Commands(val names: List<String>) : AcpEvent
     data class Usage(val used: Int, val size: Int, val cost: Double, val currency: String) : AcpEvent
     data class Chart(val spec: String) : AcpEvent   // Chart.js-shaped JSON from autovisualiser
@@ -143,8 +144,9 @@ class AcpClient(
     // Touched from both the main thread (outbound rpc) and the OkHttp WS thread (responses).
     private val pending = ConcurrentHashMap<Int, String>()      // request id -> method we sent
     private val pendingConfigKeys = ConcurrentHashMap<Int, String>()  // config/read id -> key
-    // Explicit-target session/extensions/list requests (the reply doesn't echo the session).
+    // Explicit-target session/extensions/list + tools/list requests (replies don't echo the session).
     private val pendingExtListSids = ConcurrentHashMap<Int, String>()
+    private val pendingToolListSids = ConcurrentHashMap<Int, String>()
     private var sessionId: String? = null
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     // Outstanding tool-approval requests: toolCallId -> the JSON-RPC id we must answer.
@@ -233,6 +235,10 @@ class AcpClient(
         val id = rpc("_goose/unstable/session/extensions/list",
             buildJsonObject { put("sessionId", target) })
         pendingExtListSids[id] = target
+    }
+    fun listToolsFor(target: String) {
+        val id = rpc("_goose/unstable/tools/list", buildJsonObject { put("sessionId", target) })
+        pendingToolListSids[id] = target
     }
     fun addSessionExtensionFor(target: String, extension: JsonObject) =
         rpc("_goose/unstable/session/extensions/add", buildJsonObject {
@@ -545,7 +551,7 @@ class AcpClient(
                 val names = (result?.get("tools") as? JsonArray).orEmpty().mapNotNull {
                     (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
                 }
-                onEvent(AcpEvent.Tools(names))
+                onEvent(AcpEvent.Tools(names, id?.let { pendingToolListSids.remove(it) }))
             }
             "_goose/unstable/config/extensions/add" -> listExtensions()
             "_goose/unstable/session/extensions/add" -> listTools()
