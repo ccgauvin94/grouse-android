@@ -143,6 +143,8 @@ class AcpClient(
     // Touched from both the main thread (outbound rpc) and the OkHttp WS thread (responses).
     private val pending = ConcurrentHashMap<Int, String>()      // request id -> method we sent
     private val pendingConfigKeys = ConcurrentHashMap<Int, String>()  // config/read id -> key
+    // Explicit-target session/extensions/list requests (the reply doesn't echo the session).
+    private val pendingExtListSids = ConcurrentHashMap<Int, String>()
     private var sessionId: String? = null
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     // Outstanding tool-approval requests: toolCallId -> the JSON-RPC id we must answer.
@@ -224,6 +226,22 @@ class AcpClient(
             put("sessionId", sid); put("name", name)
         })
     }
+
+    // --- Explicit-target variants: operate on ANY session (the Assistant thread's tool
+    // profile is edited from Settings without that session being the one on screen). ---
+    fun listSessionExtensionsFor(target: String) {
+        val id = rpc("_goose/unstable/session/extensions/list",
+            buildJsonObject { put("sessionId", target) })
+        pendingExtListSids[id] = target
+    }
+    fun addSessionExtensionFor(target: String, extension: JsonObject) =
+        rpc("_goose/unstable/session/extensions/add", buildJsonObject {
+            put("sessionId", target); put("extension", extension)
+        })
+    fun removeSessionExtensionFor(target: String, name: String) =
+        rpc("_goose/unstable/session/extensions/remove", buildJsonObject {
+            put("sessionId", target); put("name", name)
+        })
 
     /** Tools currently active in this session. Names are `extension__tool`; goose only returns
      *  ALLOWED tools, so this reflects `available_tools` filtering rather than the full catalogue
@@ -518,7 +536,8 @@ class AcpClient(
                 val names = (result?.get("extensions") as? JsonArray).orEmpty().mapNotNull {
                     (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
                 }
-                sessionId?.let { onEvent(AcpEvent.SessionExtensions(it, names)) }
+                val target = id?.let { pendingExtListSids.remove(it) } ?: sessionId
+                target?.let { onEvent(AcpEvent.SessionExtensions(it, names)) }
             }
             // add/remove reply empty -- ConnectionManager's diff-and-apply already knows the target
             // state, so there's nothing to re-fetch (unlike the global toggle above).

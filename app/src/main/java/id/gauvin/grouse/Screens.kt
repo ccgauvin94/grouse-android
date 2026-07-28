@@ -1147,6 +1147,198 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     }
 }
 
+// ---- Assistant settings ------------------------------------------------------
+
+/** The Assistant control panel. Server-side behavior (schedule, models, prompts, kill
+ *  switches) lives in goose's config.yaml, written over ACP and read by deliver.sh per
+ *  timer firing — changes apply at the next firing, no restarts. Tests touch a /state drop
+ *  file via a direct tool call; a host systemd path unit runs the real pipeline with every
+ *  gate bypassed. Thread tools edit the live Assistant session's extension set, which the
+ *  daily rotation copies forward. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
+    LaunchedEffect(cm.online.value) {
+        if (cm.online.value) {
+            cm.readServerConfig("MORNING_ENABLED", "MORNING_TIME", "MORNING_MODEL", "MORNING_PROMPT",
+                "BRIEFING_ENABLED", "BRIEFING_INTERVAL_HOURS", "BRIEFING_MODEL", "BRIEFING_PROMPT")
+            cm.loadAssistantExtensions()
+        }
+    }
+    var testNote by remember { mutableStateOf<String?>(null) }
+
+    @Composable
+    fun modelPicker(label: String, key: String) {
+        val current = cm.serverConfig[key].orEmpty().ifBlank { "Qwen3.6-35B-A3B" }
+        var open by remember { mutableStateOf(false) }
+        Box {
+            SettingsNavRow(label, current) { open = true }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                (cm.knownModels.value + current).distinct().sorted().forEach { m ->
+                    DropdownMenuItem(text = { Text(m) },
+                        onClick = { cm.writeServerConfig(key, m); open = false })
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun promptField(key: String) {
+        val server = cm.serverConfig[key].orEmpty()
+        var draft by remember(server) { mutableStateOf(server) }
+        OutlinedTextField(draft, { draft = it }, minLines = 2, maxLines = 5,
+            label = { Text("Extra instructions") },
+            placeholder = { Text("Appended to the recipe prompt — steer tone or content.") },
+            modifier = Modifier.fillMaxWidth())
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(enabled = draft != server,
+                onClick = { cm.writeServerConfig(key, draft.trim()) }) { Text("Save prompt") }
+        }
+    }
+
+    @Composable
+    fun testRow(kind: String) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = {
+                testNote = "Triggering $kind test…"
+                cm.testAssistantJob(kind) { err ->
+                    testNote = err?.let { "Test trigger failed: $it" }
+                        ?: "Test running — expect a push (and a thread post) within a few minutes."
+                }
+            }) { Text("Run test now") }
+        }
+    }
+
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Assistant") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            }
+        )
+    }) { pad ->
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+
+            SettingsSection("Master") {
+                SettingsSwitchRow("Assistant features", cm.assistantEnabled.value) {
+                    cm.setAssistantEnabled(it)
+                }
+                SettingCaption("Off pauses the morning digest and briefings server-side and " +
+                    "hides the Assistant from the menu. Chats and projects are unaffected.")
+            }
+
+            testNote?.let {
+                Spacer(Modifier.height(6.dp))
+                Text(it, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary)
+            }
+
+            if (cm.assistantEnabled.value) {
+                SettingsSection("Morning digest") {
+                    SettingsSwitchRow("Enabled", cm.serverConfig["MORNING_ENABLED"] != "false") {
+                        cm.writeServerConfig("MORNING_ENABLED", if (it) "true" else "false")
+                    }
+                    HorizontalDivider()
+                    val serverMorning = cm.serverConfig["MORNING_TIME"].orEmpty()
+                    var morning by remember(serverMorning) { mutableStateOf(serverMorning.ifBlank { "06:00" }) }
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(top = 8.dp)) {
+                        OutlinedTextField(morning, { morning = it }, singleLine = true,
+                            label = { Text("Delivery time") },
+                            supportingText = { Text("HH:MM, 05:00–10:45, 15-min steps") },
+                            modifier = Modifier.weight(1f))
+                        Spacer(Modifier.width(10.dp))
+                        TextButton(enabled = Regex("^(0[5-9]|10):(00|15|30|45)$").matches(morning.trim()),
+                            onClick = { cm.writeServerConfig("MORNING_TIME", morning.trim()) }) { Text("Save") }
+                    }
+                    modelPicker("Model", "MORNING_MODEL")
+                    promptField("MORNING_PROMPT")
+                    testRow("morning")
+                }
+
+                SettingsSection("Updates (briefings)") {
+                    SettingsSwitchRow("Enabled", cm.serverConfig["BRIEFING_ENABLED"] != "false") {
+                        cm.writeServerConfig("BRIEFING_ENABLED", if (it) "true" else "false")
+                    }
+                    HorizontalDivider()
+                    Text("Check interval", style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.padding(top = 10.dp))
+                    Spacer(Modifier.height(6.dp))
+                    val serverInterval = cm.serverConfig["BRIEFING_INTERVAL_HOURS"].orEmpty()
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("1", "2", "3", "4").forEach { h ->
+                            FilterChip(selected = (serverInterval.ifBlank { "1" }) == h,
+                                onClick = { cm.writeServerConfig("BRIEFING_INTERVAL_HOURS", h) },
+                                label = { Text(if (h == "1") "hourly" else "${h}h") })
+                        }
+                    }
+                    SettingCaption("Runs 07:00–22:00; the interval counts from 07:00. Pushes " +
+                        "only when something is genuinely imminent.")
+                    modelPicker("Model", "BRIEFING_MODEL")
+                    promptField("BRIEFING_PROMPT")
+                    testRow("briefing")
+                }
+
+                SettingsSection("Thread") {
+                    var actions by remember { mutableStateOf(cm.store.assistantActions) }
+                    var actMenu by remember { mutableStateOf(false) }
+                    fun actLabel(v: String) = when (v) {
+                        "auto" -> "Auto-approve (trusted)"; "readonly" -> "Read-only"; else -> "Ask me each time"
+                    }
+                    Box {
+                        SettingsNavRow("Assistant actions", actLabel(actions)) { actMenu = true }
+                        DropdownMenu(expanded = actMenu, onDismissRequest = { actMenu = false }) {
+                            listOf("confirm", "auto", "readonly").forEach { v ->
+                                DropdownMenuItem(text = { Text(actLabel(v)) },
+                                    onClick = { actions = v; cm.store.assistantActions = v; actMenu = false })
+                            }
+                        }
+                    }
+                    SettingCaption("How the privileged Assistant thread handles write/shell " +
+                        "actions. Other chats always ask; voice stays read-only.")
+                    HorizontalDivider()
+                    var confirmReset by remember { mutableStateOf(false) }
+                    SettingsNavRow("Reset assistant thread",
+                        "Start fresh now. The old thread is kept, renamed aside. (Happens " +
+                        "automatically every morning.)") {
+                        confirmReset = true
+                    }
+                    if (confirmReset) AlertDialog(
+                        onDismissRequest = { confirmReset = false },
+                        title = { Text("Reset assistant thread?") },
+                        text = { Text("Your current assistant conversation is renamed aside " +
+                            "(history preserved) and a fresh empty thread takes its place.") },
+                        confirmButton = { TextButton(onClick = {
+                            confirmReset = false; cm.resetAssistant(); nav.popBackStack()
+                        }) { Text("Reset") } },
+                        dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
+                    )
+                }
+
+                SettingsSection("Thread tools") {
+                    SettingCaption("Extensions enabled in the Assistant thread. The daily " +
+                        "rotation carries this set forward, so changes stick. Other chats " +
+                        "use the global defaults.")
+                    if (cm.extensions.value.isEmpty()) {
+                        Text("Connect to load the extension list.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline)
+                    }
+                    cm.extensions.value.sortedBy { it.name.lowercase() }.forEach { ext ->
+                        SettingsSwitchRow(ext.name, ext.name in cm.assistantExtNames.value) { on ->
+                            cm.toggleAssistantExtension(ext, on)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(28.dp))
+        }
+    }
+}
+
 // ---- Settings ---------------------------------------------------------------
 
 // ---- Reusable settings building blocks --------------------------------------
@@ -1375,79 +1567,10 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
             }
 
             SettingsSection("Assistant") {
-                SettingsNavRow("Manage extensions",
-                    "Enable/disable goose's tools to control context per new chat.") {
-                    nav.navigate("extensions")
+                SettingsNavRow("Assistant settings",
+                    "Briefings, schedule, models, prompts, thread tools — everything in one place.") {
+                    nav.navigate("assistant_settings")
                 }
-                HorizontalDivider()
-                // Privileged Assistant thread: user-chosen action policy.
-                var actions by remember { mutableStateOf(cm.store.assistantActions) }
-                var actMenu by remember { mutableStateOf(false) }
-                fun actLabel(v: String) = when (v) {
-                    "auto" -> "Auto-approve (trusted)"; "readonly" -> "Read-only"; else -> "Ask me each time"
-                }
-                Box {
-                    SettingsNavRow("Assistant actions", actLabel(actions)) { actMenu = true }
-                    DropdownMenu(expanded = actMenu, onDismissRequest = { actMenu = false }) {
-                        listOf("confirm", "auto", "readonly").forEach { v ->
-                            DropdownMenuItem(text = { Text(actLabel(v)) },
-                                onClick = { actions = v; cm.store.assistantActions = v; actMenu = false })
-                        }
-                    }
-                }
-                SettingCaption("How the privileged Assistant thread handles write/shell actions. " +
-                    "Other chats always ask; voice stays read-only.")
-                HorizontalDivider()
-                // Reset the assistant thread (rename-aside + recreate) — for when it jams.
-                var confirmReset by remember { mutableStateOf(false) }
-                SettingsNavRow("Reset assistant thread",
-                    "Start a fresh conversation. The old one is kept, renamed aside.") {
-                    confirmReset = true
-                }
-                if (confirmReset) AlertDialog(
-                    onDismissRequest = { confirmReset = false },
-                    title = { Text("Reset assistant thread?") },
-                    text = { Text("Your current assistant conversation is renamed aside (history " +
-                        "preserved) and a fresh empty thread takes its place. Use this if the " +
-                        "assistant has stopped responding.") },
-                    confirmButton = { TextButton(onClick = {
-                        confirmReset = false; cm.resetAssistant(); nav.popBackStack()
-                    }) { Text("Reset") } },
-                    dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
-                )
-            }
-
-            SettingsSection("Schedule") {
-                // Server-side keys read by deliver.sh (the host schedule window is a fine
-                // grid; these decide which firings act). Written over ACP into goose's
-                // config.yaml -- same channel as the push endpoint.
-                LaunchedEffect(cm.online.value) {
-                    if (cm.online.value) cm.readServerConfig("MORNING_TIME", "BRIEFING_INTERVAL_HOURS")
-                }
-                val serverMorning = cm.serverConfig["MORNING_TIME"] ?: ""
-                var morning by remember(serverMorning) { mutableStateOf(serverMorning.ifBlank { "06:00" }) }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(morning, { morning = it }, singleLine = true,
-                        label = { Text("Morning digest time") },
-                        supportingText = { Text("HH:MM, 05:00–10:45 in 15-min steps") },
-                        modifier = Modifier.weight(1f))
-                    Spacer(Modifier.width(10.dp))
-                    TextButton(enabled = Regex("^(0[5-9]|10):(00|15|30|45)$").matches(morning.trim()),
-                        onClick = { cm.writeServerConfig("MORNING_TIME", morning.trim()) }) { Text("Save") }
-                }
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                val serverInterval = cm.serverConfig["BRIEFING_INTERVAL_HOURS"] ?: ""
-                Text("Briefing check interval", style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("1", "2", "3", "4").forEach { h ->
-                        FilterChip(selected = (serverInterval.ifBlank { "1" }) == h,
-                            onClick = { cm.writeServerConfig("BRIEFING_INTERVAL_HOURS", h) },
-                            label = { Text(if (h == "1") "hourly" else "${h}h") })
-                    }
-                }
-                SettingCaption("Applies from the next timer firing — no restarts needed. " +
-                    "Briefings run 07:00–22:00; the interval counts from 07:00.")
             }
 
             SettingsSection("Models") {

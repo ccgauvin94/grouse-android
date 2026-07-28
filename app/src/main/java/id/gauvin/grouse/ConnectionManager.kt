@@ -296,6 +296,8 @@ class ConnectionManager private constructor(context: Context) {
      *  arrives. */
     fun connectHome() {
         if (!store.hasKey()) return
+        // Master switch off: connect to the last regular session instead of the Assistant.
+        if (!store.assistantEnabled) { ensureConnected(); return }
         val a = store.assistantSessionId
         if (a != null) openSession(a, knownKind = SessionKind.ASSISTANT)
         else { pendingOpenAssistant = true; open(resume = null) }
@@ -585,6 +587,38 @@ class ConnectionManager private constructor(context: Context) {
     /** Generic mirror of config/read replies, keyed by config key — the phone-writable
      *  server settings channel (schedule times, etc.). */
     val serverConfig = androidx.compose.runtime.mutableStateMapOf<String, String>()
+
+    /** The Assistant thread's own enabled-extension names (session-scoped; the daily
+     *  rotation copies extension_data forward, so edits here persist across days). */
+    val assistantExtNames = mutableStateOf<List<String>>(emptyList())
+    fun loadAssistantExtensions() {
+        loadExtensions()
+        assistantSessionId()?.let { client?.listSessionExtensionsFor(it) }
+    }
+    fun toggleAssistantExtension(ext: ExtInfo, on: Boolean) {
+        val sid = assistantSessionId() ?: return
+        if (on) client?.addSessionExtensionFor(sid, ext.raw)
+        else client?.removeSessionExtensionFor(sid, ext.name)
+        assistantExtNames.value =
+            if (on) (assistantExtNames.value + ext.name).distinct()
+            else assistantExtNames.value - ext.name
+    }
+
+    /** Observable master switch (mirrors SecureStore.assistantEnabled for the drawer). */
+    val assistantEnabled = mutableStateOf(store.assistantEnabled)
+    fun setAssistantEnabled(on: Boolean) {
+        store.assistantEnabled = on
+        assistantEnabled.value = on
+        writeServerConfig("ASSISTANT_ENABLED", if (on) "true" else "false")
+    }
+
+    /** Trigger a server-side test run of a delivery pipeline ("morning" | "briefing"):
+     *  a direct tool call touches a /state drop file that a host systemd path unit watches;
+     *  the unit runs deliver.sh with TEST_RUN=1 (all gates and stamps bypassed, briefings
+     *  forced to produce a visible push). */
+    fun testAssistantJob(kind: String, onResult: (String?) -> Unit) {
+        runUtilityTool("touch /state/.assistant-test-$kind") { err, _ -> onResult(err) }
+    }
 
     /** Read + write server-side goose config (the deliver.sh schedule keys live there). */
     fun readServerConfig(vararg keys: String) { keys.forEach { client?.readConfig(it) } }
@@ -1044,7 +1078,11 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Commands -> commands.value = ev.names
             is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }
-            is AcpEvent.SessionExtensions -> sessionExtensionNames.value = ev.names
+            is AcpEvent.SessionExtensions -> {
+                if (ev.sessionId == store.assistantSessionId) assistantExtNames.value = ev.names
+                if (ev.sessionId == currentSession.value || ev.sessionId != store.assistantSessionId)
+                    sessionExtensionNames.value = ev.names
+            }
             is AcpEvent.Tools -> {
                 val g = group(ev.names)
                 val target = discovering

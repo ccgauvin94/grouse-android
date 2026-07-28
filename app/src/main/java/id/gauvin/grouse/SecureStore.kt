@@ -229,6 +229,12 @@ class SecureStore(context: Context) {
         set(v) = cfg.edit().putString("assistant_session", v).apply()
 
     /** How the privileged Assistant thread handles tool actions: confirm | auto | readonly. */
+    /** Master switch for all assistant features (UI + server jobs). Mirrored to the server
+     *  key ASSISTANT_ENABLED so deliver.sh's jobs pause too. */
+    var assistantEnabled: Boolean
+        get() = cfg.getBoolean("assistant_enabled", true)
+        set(v) = cfg.edit().putBoolean("assistant_enabled", v).apply()
+
     var assistantActions: String
         get() = cfg.getString("assistant_actions", "confirm") ?: "confirm"
         set(v) = cfg.edit().putString("assistant_actions", v).apply()

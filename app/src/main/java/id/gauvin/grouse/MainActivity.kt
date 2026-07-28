@@ -184,17 +184,19 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
                 // so it must reflect renames/archives/new sessions from any client.
                 LaunchedEffect(drawerState.isOpen) { if (drawerState.isOpen) cm.listSessions() }
                 Column(Modifier.fillMaxHeight().padding(vertical = 12.dp)) {
-                    NavigationDrawerItem(
-                        label = { Text("Assistant") },
-                        icon = { Icon(Icons.Filled.Psychology, contentDescription = null) },
-                        selected = route == "chat" && cm.onAssistant,
-                        onClick = {
-                            closeDrawer(); cm.openAssistant()
-                            nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
-                        },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
-                    HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    if (cm.assistantEnabled.value) {
+                        NavigationDrawerItem(
+                            label = { Text("Assistant") },
+                            icon = { Icon(Icons.Filled.Psychology, contentDescription = null) },
+                            selected = route == "chat" && cm.onAssistant,
+                            onClick = {
+                                closeDrawer(); cm.openAssistant()
+                                nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
+                            },
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        )
+                        HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    }
                     // The whole chats world lives in the menu: projects (collapsible) then free
                     // chats. Tap opens; long-press renames/archives. Scrolls independently so
                     // Settings stays pinned at the bottom.
@@ -224,6 +226,7 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
                 ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
             }
             composable("chat") { ChatScreen(cm, onOpenDrawer = ::openDrawer) }
+            composable("assistant_settings") { AssistantSettingsScreen(cm, nav) }
             composable("project/{pname}") { back ->
                 val pname = Uri.decode(back.arguments?.getString("pname") ?: "")
                 ProjectScreen(cm, nav, pname)
