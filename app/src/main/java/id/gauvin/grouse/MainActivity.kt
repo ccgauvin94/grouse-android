@@ -9,6 +9,7 @@ import android.os.Bundle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.core.content.IntentCompat
 import androidx.compose.material.icons.Icons
@@ -28,6 +29,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
@@ -123,23 +125,30 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
         onDispose { lockOwner.lifecycle.removeObserver(obs) }
     }
 
-    if (!unlocked) {
-        LockScreen(error) { authenticate() }
-        return
+    // The main tree stays composed while locked — the lock screen is an opaque overlay on top.
+    // An early return here used to tear the whole UI down on every lock, so unlocking rebuilt
+    // the NavHost from scratch: back to the chat route, Settings position and scroll state gone.
+    Box(Modifier.fillMaxSize()) {
+        MainApp(activity, cm, unlocked)
+        if (!unlocked) LockScreen(error) { authenticate() }
     }
+}
 
-    // Ask for notification permission so backgrounded turns can alert (API 33+).
+@Composable
+private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked: Boolean) {
+    // Ask for notification permission so backgrounded turns can alert (API 33+). Gated on
+    // unlocked so the dialog doesn't compete with the biometric prompt at cold start.
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         val notifPerm = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()) {}
-        LaunchedEffect(Unit) { notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS) }
+        LaunchedEffect(unlocked) { if (unlocked) notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS) }
     }
 
     // Ask for mic up front: push-to-talk needs it, and the assistant VoiceInteractionSession
     // can't request runtime permissions itself — so the app must obtain it through the Activity.
     val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
-    LaunchedEffect(Unit) {
-        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO)
+    LaunchedEffect(unlocked) {
+        if (unlocked && ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
             micPerm.launch(Manifest.permission.RECORD_AUDIO)
         }
@@ -241,7 +250,19 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
 
 @Composable
 fun LockScreen(error: String?, onUnlock: () -> Unit) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    // Drawn as an overlay above the still-composed app: must be opaque and swallow every
+    // pointer event so nothing shows or scrolls through.
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(Icons.Filled.Lock, contentDescription = null, modifier = Modifier.size(48.dp),
                 tint = MaterialTheme.colorScheme.primary)
