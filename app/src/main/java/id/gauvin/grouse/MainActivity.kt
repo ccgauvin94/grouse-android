@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.*
 import androidx.core.content.IntentCompat
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
@@ -194,17 +193,10 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                     NavigationDrawerItem(
-                        label = { Text("Chat") },
+                        label = { Text("Chats") },
                         icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null) },
                         selected = route == "sessions_chat" || (route == "chat" && !cm.onAssistant),
                         onClick = { closeDrawer(); nav.navigate("sessions_chat") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
-                    NavigationDrawerItem(
-                        label = { Text("Code") },
-                        icon = { Icon(Icons.Filled.Code, contentDescription = null) },
-                        selected = route == "sessions_code",
-                        onClick = { closeDrawer(); nav.navigate("sessions_code") { launchSingleTop = true } },
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                     Spacer(Modifier.weight(1f))
@@ -225,8 +217,7 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
                 ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
             }
             composable("chat") { ChatScreen(cm, onOpenDrawer = ::openDrawer) }
-            composable("sessions_chat") { SessionListScreen(cm, nav, SessionKind.CHAT, onOpenDrawer = ::openDrawer) }
-            composable("sessions_code") { SessionListScreen(cm, nav, SessionKind.CODE, onOpenDrawer = ::openDrawer) }
+            composable("sessions_chat") { SessionListScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("settings") { SettingsScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("extensions") { ExtensionsScreen(cm, nav) }
         }

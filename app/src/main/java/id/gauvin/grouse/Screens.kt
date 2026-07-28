@@ -29,8 +29,8 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
@@ -650,16 +650,19 @@ private fun prettyOption(raw: String) = when (raw) {
 
 // ---- Sessions ---------------------------------------------------------------
 
-/** goose has no session tags — Chat and Code are the same list filtered by sessionKind() (title for
- *  Assistant, cwd for Code, see ConnectionManager.sessionKind). Peer drawer destination, so
- *  navigation is explicit (navigate to "chat"), not popBackStack — this screen may be reached
- *  directly from the drawer without a "chat" entry below it on the back stack. */
+/** goose has no session tags — projects and free chats are ONE session list grouped by cwd
+ *  (ConnectionManager.projectOf unifies /workspace with the Desktop cwd-shim spellings, which
+ *  goose stores verbatim). The project list is the union of names seen in session cwds and the
+ *  typed-recents store, so a just-created project with no sessions yet still shows. Peer drawer
+ *  destination, so navigation is explicit (navigate to "chat"), not popBackStack — this screen
+ *  may be reached directly from the drawer without a "chat" entry below it on the back stack. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionListScreen(cm: ConnectionManager, nav: NavController, kind: SessionKind, onOpenDrawer: () -> Unit) {
+fun SessionListScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Unit) {
     LaunchedEffect(Unit) { cm.listSessions() }
-    var showNewCode by remember { mutableStateOf(false) }
+    var showNewProject by remember { mutableStateOf(false) }
     var confirmArchive by remember { mutableStateOf<SessionInfo?>(null) }
+    var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
     confirmArchive?.let { s ->
         AlertDialog(
             onDismissRequest = { confirmArchive = null },
@@ -673,109 +676,194 @@ fun SessionListScreen(cm: ConnectionManager, nav: NavController, kind: SessionKi
         )
     }
     fun goToChat() = nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
-    if (showNewCode) NewCodeSessionDialog(
-        recents = cm.store.recentWorkspaceProjects(),
-        onCreate = { project -> showNewCode = false; cm.newCodeSession(project); goToChat() },
-        onDismiss = { showNewCode = false },
+    if (showNewProject) NewProjectDialog(
+        cm = cm,
+        onCreated = { name -> showNewProject = false; cm.newCodeSession(name); goToChat() },
+        onDismiss = { showNewProject = false },
     )
-    val isCode = kind == SessionKind.CODE
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text(if (isCode) "Code" else "Chat") },
+            title = { Text("Chats") },
             navigationIcon = {
                 IconButton(onClick = onOpenDrawer) { Icon(Icons.Filled.Menu, contentDescription = "menu") }
             }
         )
     }) { pad ->
+        val all = cm.sessions.value
+        val byProject = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CODE }
+            .groupBy { ConnectionManager.projectOf(it.cwd) ?: "?" }
+        val freeChats = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CHAT }
+        // Union: sessions win for grouping, but recents keep sessionless projects visible
+        // (a project created moments ago has no sessions yet — it must not vanish).
+        val projects = (byProject.keys + cm.store.recentWorkspaceProjects()).distinct().sortedBy { it.lowercase() }
         LazyColumn(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
-            val list = cm.sessions.value.filter { ConnectionManager.sessionKind(it) == kind }
+            item {
+                Text("PROJECTS", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 6.dp, top = 10.dp, bottom = 4.dp))
+            }
             item {
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .clickable { if (isCode) showNewCode = true else { cm.newSession(); goToChat() } }) {
+                    .clickable { showNewProject = true }) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Add, contentDescription = null)
                         Spacer(Modifier.width(10.dp))
-                        Text(if (isCode) "New Code session" else "New chat", style = MaterialTheme.typography.titleMedium)
+                        Text("New project", style = MaterialTheme.typography.titleMedium)
                     }
                 }
             }
-            if (list.isEmpty()) item {
-                Column(Modifier.fillMaxWidth().padding(vertical = 56.dp),
+            projects.forEach { p ->
+                val inProject = byProject[p].orEmpty()
+                val open = p in expanded
+                item(key = "project:$p") {
+                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                        .clickable { expanded = if (open) expanded - p else expanded + p }) {
+                        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Folder, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(p, style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (inProject.isNotEmpty()) Text(
+                                    "${inProject.size} chat${if (inProject.size == 1) "" else "s"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline)
+                            }
+                            Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                contentDescription = null, tint = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                }
+                if (open) {
+                    item(key = "project:$p:new") {
+                        Row(Modifier.fillMaxWidth().padding(start = 24.dp)
+                            .clickable { cm.newCodeSession(p); goToChat() }
+                            .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Add, contentDescription = null,
+                                modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
+                            Spacer(Modifier.width(8.dp))
+                            Text("New chat in $p", style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                    items(inProject, key = { "s:" + it.sessionId }) { s ->
+                        Box(Modifier.padding(start = 24.dp)) {
+                            SessionRow(s, showProject = false,
+                                onOpen = { cm.openSession(s.sessionId); goToChat() },
+                                onArchive = { confirmArchive = s })
+                        }
+                    }
+                }
+            }
+            item {
+                Text("CHATS", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 6.dp, top = 18.dp, bottom = 4.dp))
+            }
+            item {
+                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    .clickable { cm.newSession(); goToChat() }) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Spacer(Modifier.width(10.dp))
+                        Text("New chat", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+            }
+            if (freeChats.isEmpty()) item {
+                Column(Modifier.fillMaxWidth().padding(vertical = 40.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(if (isCode) Icons.Filled.Code else Icons.Filled.History, contentDescription = null,
+                    Icon(Icons.Filled.History, contentDescription = null,
                         modifier = Modifier.size(44.dp), tint = MaterialTheme.colorScheme.outline)
                     Spacer(Modifier.height(8.dp))
-                    Text(if (isCode) "No Code sessions yet" else "No past chats yet",
+                    Text("No past chats yet",
                         style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.outline)
-                    Text(if (isCode) "Start one above — scoped to a project under /workspace."
-                         else "Start one above — it'll show here to resume later.",
+                    Text("Start one above — it'll show here to resume later.",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
                         textAlign = TextAlign.Center)
                 }
             }
-            items(list) { s ->
-                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .clickable { cm.openSession(s.sessionId); goToChat() }) {
-                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Spacer(Modifier.height(2.dp))
-                            // Code rows lead with the project folder (basename of cwd) so sessions in
-                            // the same project are recognizable at a glance.
-                            val project = s.cwd.removePrefix("/workspace/").takeIf { isCode && it.isNotBlank() }
-                            val bits = listOfNotNull(project, "${s.messageCount} msgs", s.model, relativeTime(s.updatedAt))
-                                .filter { it.isNotBlank() }
-                            Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                        // goose exposes no session/delete (it answers "Method not found"), so this
-                        // archives: the session leaves the list, its history stays on disk. Named
-                        // "Archive" rather than "Delete" so the label matches what actually happens.
-                        IconButton(onClick = { confirmArchive = s }) {
-                            Icon(Icons.Filled.Close, contentDescription = "archive chat",
-                                tint = MaterialTheme.colorScheme.outline)
-                        }
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
-                            tint = MaterialTheme.colorScheme.outline)
-                    }
-                }
+            items(freeChats, key = { "s:" + it.sessionId }) { s ->
+                SessionRow(s, showProject = false,
+                    onOpen = { cm.openSession(s.sessionId); goToChat() },
+                    onArchive = { confirmArchive = s })
             }
         }
     }
 }
 
-/** No ACP directory-listing method exists (confirmed — Desktop's own "Choose directory" picker is
- *  native OS file access on the desktop machine, nothing to reuse remotely), so this is text-entry
- *  + a recents list, not a picker — designating a session as Code IS picking its project. */
+/** One session row: title, meta line, archive control. Extracted so project groups and free
+ *  chats render identically. */
 @Composable
-private fun NewCodeSessionDialog(recents: List<String>, onCreate: (String) -> Unit, onDismiss: () -> Unit) {
-    var project by rememberSaveable { mutableStateOf("") }
+private fun SessionRow(s: SessionInfo, showProject: Boolean, onOpen: () -> Unit, onArchive: () -> Unit) {
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onOpen() }) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(2.dp))
+                val project = if (showProject) ConnectionManager.projectOf(s.cwd) else null
+                val bits = listOfNotNull(project, "${s.messageCount} msgs", s.model, relativeTime(s.updatedAt))
+                    .filter { it.isNotBlank() }
+                Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            // goose exposes no session/delete (it answers "Method not found"), so this
+            // archives: the session leaves the list, its history stays on disk.
+            IconButton(onClick = onArchive) {
+                Icon(Icons.Filled.Close, contentDescription = "archive chat",
+                    tint = MaterialTheme.colorScheme.outline)
+            }
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
+                tint = MaterialTheme.colorScheme.outline)
+        }
+    }
+}
+
+/** Create a project on the server, then open its first chat. No ACP directory-listing or mkdir
+ *  method exists, so ConnectionManager.createProject runs a throwaway fast-model session that
+ *  executes the mkdir (see its doc) — the busy state here covers that round trip. */
+@Composable
+private fun NewProjectDialog(cm: ConnectionManager, onCreated: (String) -> Unit, onDismiss: () -> Unit) {
+    var name by rememberSaveable { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
     AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("New Code session") },
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("New project") },
         text = {
             Column {
-                Text("Project folder under /workspace on the server.",
+                Text("Creates /workspace/<name> on the server, then opens a chat scoped to it.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(project, { project = it }, singleLine = true,
-                    placeholder = { Text("e.g. goose-android") }, modifier = Modifier.fillMaxWidth())
-                if (recents.isNotEmpty()) {
+                OutlinedTextField(name, { name = it }, singleLine = true, enabled = !busy,
+                    placeholder = { Text("e.g. bird-feeder-cam") }, modifier = Modifier.fillMaxWidth())
+                if (busy) {
                     Spacer(Modifier.height(10.dp))
-                    Text("Recent", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-                    Spacer(Modifier.height(4.dp))
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        recents.forEach { r -> AssistChip(onClick = { project = r }, label = { Text(r) }) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text("Creating on the server…", style = MaterialTheme.typography.bodySmall)
                     }
+                }
+                error?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error)
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onCreate(project.trim()) }, enabled = project.isNotBlank()) { Text("Create") }
+            TextButton(enabled = name.isNotBlank() && !busy, onClick = {
+                busy = true; error = null
+                cm.createProject(name) { err ->
+                    if (err == null) onCreated(name) else { busy = false; error = err }
+                }
+            }) { Text("Create") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } },
     )
 }
 

@@ -343,10 +343,75 @@ class ConnectionManager private constructor(context: Context) {
      *  (the user's ~/dev) instead of the default /state. This IS the "designation" -- goose has no
      *  tags/labels, so cwd is the native, protocol-level signal sessionKind() reads back later. */
     fun newCodeSession(project: String) {
-        val clean = project.trim().trim('/')
+        // Forgive "/workspace/foo" and "workspace/foo" -- typing the full path used to build
+        // /workspace/workspace/foo, whose session/new rejection looked like a silent no-op.
+        val clean = project.trim().trim('/').removePrefix("workspace/").trim('/')
         require(clean.isNotEmpty() && !clean.contains("..")) { "invalid project name" }
         store.addRecentWorkspaceProject(clean)
         newSession(cwd = "/workspace/$clean", kind = SessionKind.CODE)
+    }
+
+    /** Create /workspace/<name> on the server, then report back (null = success, else error).
+     *
+     *  There is no ACP method to create a directory and session/new hard-rejects nonexistent
+     *  cwds, so this runs a BOOTSTRAP session: a second, throwaway AcpClient (the UI session's
+     *  client and its state machine stay untouched) opens at /state on the fast model, asks it
+     *  to run `mkdir -p`, and archives itself. The developer extension's shell is always_allow
+     *  server-side, so the command runs without an approval round-trip; if some other approval
+     *  is requested anyway, it is answered allow_once (the prompt is ours and fixed).
+     *  Success is verified by the caller's newCodeSession() -- if the mkdir silently failed,
+     *  that session/new rejects and surfaces its error. */
+    fun createProject(rawName: String, onResult: (String?) -> Unit) {
+        val name = rawName.trim().trim('/').removePrefix("workspace/").trim('/')
+        if (name.isEmpty() || name.contains("..") || name.contains('/') || name.any { it.isWhitespace() }) {
+            onResult("Single folder name — no slashes or spaces."); return
+        }
+        val url = "wss://${store.host}:${store.port}/acp"
+        var boot: AcpClient? = null
+        var bootSid: String? = null
+        var finished = false
+        lateinit var watchdog: Runnable
+        fun finish(err: String?) {
+            if (finished) return
+            finished = true
+            main.removeCallbacks(watchdog)
+            // Archive through the MAIN client so the throwaway session never clutters the list;
+            // harmless no-op if we're offline (the session then just lingers server-side).
+            bootSid?.let { client?.archiveSession(it) }
+            boot?.close()
+            onResult(err)
+        }
+        watchdog = Runnable { finish("Timed out creating the project.") }
+        main.postDelayed(watchdog, 90_000)
+        boot = AcpClient(url, store.secretKey) { ev ->
+            main.post {
+                if (finished) return@post
+                when (ev) {
+                    is AcpEvent.Ready -> {
+                        bootSid = ev.sessionId
+                        boot?.sendPrompt(
+                            "Run exactly this shell command: mkdir -p /workspace/$name\n" +
+                                "Then reply with just: done"
+                        )
+                    }
+                    is AcpEvent.Permission -> boot?.respondPermission(
+                        ev.toolCallId,
+                        ev.options.firstOrNull { it.kind == "allow_once" }?.optionId
+                            ?: ev.options.firstOrNull()?.optionId
+                    )
+                    is AcpEvent.TurnDone -> finish(null)
+                    is AcpEvent.Error -> finish(ev.text)
+                    else -> {}
+                }
+            }
+        }.also {
+            // Pin the bootstrap to the fast model (the mkdir needs no intelligence); blank if
+            // the server config read hasn't landed yet -- applyDesired skips blanks and the
+            // session just uses the default model instead.
+            it.desiredOptions = mapOf("model" to serverFastModel.value.trim())
+            it.desiredCwd = "/state"
+            it.connect()
+        }
     }
 
     /** The persistent "goose-assistant" thread (briefings/proactive/voice land here), if it exists. */
@@ -867,13 +932,25 @@ class ConnectionManager private constructor(context: Context) {
     companion object {
         /** Server-side name of the persistent assistant thread (see docker/llm/goose-recipes). */
         const val ASSISTANT_TITLE = "goose-assistant"
-        /** goose has no session tags/labels -- cwd is the native signal. A Code session is simply
-         *  one scoped under /workspace (the server's ~/dev bind mount); everything else on the
-         *  default /state is Chat, unless its title marks it as the privileged Assistant thread. */
+        /** goose has no session tags/labels -- cwd is the native signal. A project session is one
+         *  scoped to a project directory; everything else on the default /state is Chat, unless
+         *  its title marks it as the privileged Assistant thread. */
         fun sessionKind(s: SessionInfo): SessionKind = when {
             s.title == ASSISTANT_TITLE -> SessionKind.ASSISTANT
-            s.cwd.startsWith("/workspace") -> SessionKind.CODE
+            projectOf(s.cwd) != null -> SessionKind.CODE
             else -> SessionKind.CHAT
+        }
+
+        /** All server paths that mean "project <name>". /workspace is the canonical spelling
+         *  (Grouse-created sessions); the other two are the SAME host directory (~/dev) reached
+         *  through the Desktop cwd-shims -- goose stores cwd verbatim as each client sent it
+         *  (no canonicalize on session/new), so the spellings coexist and must be unified here. */
+        private val PROJECT_PREFIXES = listOf("/workspace/", "/Users/colin/dev/", "/home/colin/dev/")
+
+        /** The project name a session cwd belongs to, or null for non-project paths. */
+        fun projectOf(cwd: String): String? = PROJECT_PREFIXES.firstNotNullOfOrNull { p ->
+            if (cwd.startsWith(p)) cwd.removePrefix(p).trim('/').substringBefore('/')
+                .takeIf { it.isNotEmpty() } else null
         }
         @Volatile private var instance: ConnectionManager? = null
         fun get(context: Context): ConnectionManager =
