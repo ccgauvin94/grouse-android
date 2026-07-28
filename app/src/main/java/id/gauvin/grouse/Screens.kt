@@ -1417,6 +1417,39 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 )
             }
 
+            SettingsSection("Schedule") {
+                // Server-side keys read by deliver.sh (the host schedule window is a fine
+                // grid; these decide which firings act). Written over ACP into goose's
+                // config.yaml -- same channel as the push endpoint.
+                LaunchedEffect(cm.online.value) {
+                    if (cm.online.value) cm.readServerConfig("MORNING_TIME", "BRIEFING_INTERVAL_HOURS")
+                }
+                val serverMorning = cm.serverConfig["MORNING_TIME"] ?: ""
+                var morning by remember(serverMorning) { mutableStateOf(serverMorning.ifBlank { "06:00" }) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(morning, { morning = it }, singleLine = true,
+                        label = { Text("Morning digest time") },
+                        supportingText = { Text("HH:MM, 05:00–10:45 in 15-min steps") },
+                        modifier = Modifier.weight(1f))
+                    Spacer(Modifier.width(10.dp))
+                    TextButton(enabled = Regex("^(0[5-9]|10):(00|15|30|45)$").matches(morning.trim()),
+                        onClick = { cm.writeServerConfig("MORNING_TIME", morning.trim()) }) { Text("Save") }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                val serverInterval = cm.serverConfig["BRIEFING_INTERVAL_HOURS"] ?: ""
+                Text("Briefing check interval", style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("1", "2", "3", "4").forEach { h ->
+                        FilterChip(selected = (serverInterval.ifBlank { "1" }) == h,
+                            onClick = { cm.writeServerConfig("BRIEFING_INTERVAL_HOURS", h) },
+                            label = { Text(if (h == "1") "hourly" else "${h}h") })
+                    }
+                }
+                SettingCaption("Applies from the next timer firing — no restarts needed. " +
+                    "Briefings run 07:00–22:00; the interval counts from 07:00.")
+            }
+
             SettingsSection("Models") {
                 SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
                 SettingCaption("Off shows only providers set up on your goose (openai, openrouter). " +

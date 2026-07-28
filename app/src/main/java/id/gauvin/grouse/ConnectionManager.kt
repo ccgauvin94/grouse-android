@@ -582,6 +582,16 @@ class ConnectionManager private constructor(context: Context) {
     /** Current server values, populated by loadServerConfig(); empty until read. */
     val serverContextLimit = mutableStateOf("")
     val serverFastModel = mutableStateOf("")
+    /** Generic mirror of config/read replies, keyed by config key — the phone-writable
+     *  server settings channel (schedule times, etc.). */
+    val serverConfig = androidx.compose.runtime.mutableStateMapOf<String, String>()
+
+    /** Read + write server-side goose config (the deliver.sh schedule keys live there). */
+    fun readServerConfig(vararg keys: String) { keys.forEach { client?.readConfig(it) } }
+    fun writeServerConfig(key: String, value: String) {
+        client?.upsertConfig(key, value)
+        serverConfig[key] = value   // optimistic
+    }
 
     /** Read the app-editable global goose settings so Settings can show current values. */
     fun loadServerConfig() {
@@ -1030,6 +1040,7 @@ class ConnectionManager private constructor(context: Context) {
                     "GOOSE_CONTEXT_LIMIT" -> serverContextLimit.value = ev.value
                     "GOOSE_FAST_MODEL" -> serverFastModel.value = ev.value
                 }
+                serverConfig[ev.key] = ev.value   // generic mirror for settings UIs
             }
             is AcpEvent.Commands -> commands.value = ev.names
             is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }
