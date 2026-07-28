@@ -658,7 +658,7 @@ private fun prettyOption(raw: String) = when (raw) {
  *  everything here is the app's main menu, not a separate screen. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit) {
+fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (String) -> Unit) {
     var showNewProject by remember { mutableStateOf(false) }
     var menuFor by remember { mutableStateOf<SessionInfo?>(null) }
     var renameFor by remember { mutableStateOf<SessionInfo?>(null) }
@@ -763,20 +763,25 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit) {
             val inProject = byProject[p].orEmpty()
             val open = p in expanded
             item(key = "project:$p") {
-                Row(Modifier.fillMaxWidth()
-                    .clickable { expanded = if (open) expanded - p else expanded + p }
-                    .padding(horizontal = 10.dp, vertical = 9.dp),
+                // Name -> the project page; the chevron alone toggles the inline dropdown.
+                Row(Modifier.fillMaxWidth().padding(start = 10.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.Folder, contentDescription = null,
-                        modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(10.dp))
-                    Text(p, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (inProject.isNotEmpty()) Text("${inProject.size}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline)
-                    Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                        contentDescription = null, tint = MaterialTheme.colorScheme.outline)
+                    Row(Modifier.weight(1f).clickable { onOpenProject(p) }.padding(vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Folder, contentDescription = null,
+                            modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(10.dp))
+                        Text(p, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (inProject.isNotEmpty()) Text("${inProject.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline)
+                    }
+                    IconButton(onClick = { expanded = if (open) expanded - p else expanded + p }) {
+                        Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                            contentDescription = if (open) "collapse" else "expand",
+                            tint = MaterialTheme.colorScheme.outline)
+                    }
                 }
             }
             if (open) {
@@ -838,6 +843,199 @@ private fun NewProjectDialog(cm: ConnectionManager, onCreated: (String) -> Unit,
         },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } },
     )
+}
+
+/** A project's home: its chats, its .goosehints and local memory (fetched on demand -- there
+ *  is no file read over ACP, so a throwaway fast-model session cats them and echoes the output),
+ *  and deletion. Delete archives the project's chats and rmdir's the server directory ONLY if
+ *  empty -- a project with files keeps them and merely leaves the list. */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
+    LaunchedEffect(Unit) { cm.listSessions() }
+    var menuFor by remember { mutableStateOf<SessionInfo?>(null) }
+    var renameFor by remember { mutableStateOf<SessionInfo?>(null) }
+    var confirmArchive by remember { mutableStateOf<SessionInfo?>(null) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var deleteBusy by remember { mutableStateOf(false) }
+    var deleteNote by remember { mutableStateOf<String?>(null) }
+    var info by remember { mutableStateOf<String?>(null) }
+    var infoBusy by remember { mutableStateOf(false) }
+    fun goToChat() = nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+
+    menuFor?.let { s ->
+        AlertDialog(
+            onDismissRequest = { menuFor = null },
+            title = { Text(s.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column {
+                    TextButton(onClick = { renameFor = s; menuFor = null }) { Text("Rename…") }
+                    TextButton(onClick = { confirmArchive = s; menuFor = null }) { Text("Archive…") }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { menuFor = null }) { Text("Cancel") } },
+        )
+    }
+    renameFor?.let { s ->
+        var newName by remember(s.sessionId) { mutableStateOf(s.title) }
+        AlertDialog(
+            onDismissRequest = { renameFor = null },
+            title = { Text("Rename chat") },
+            text = { OutlinedTextField(newName, { newName = it }, singleLine = true,
+                modifier = Modifier.fillMaxWidth()) },
+            confirmButton = {
+                TextButton(enabled = newName.isNotBlank(), onClick = {
+                    cm.renameSession(s.sessionId, newName); renameFor = null
+                }) { Text("Rename") }
+            },
+            dismissButton = { TextButton(onClick = { renameFor = null }) { Text("Cancel") } },
+        )
+    }
+    confirmArchive?.let { s ->
+        AlertDialog(
+            onDismissRequest = { confirmArchive = null },
+            title = { Text("Archive chat?") },
+            text = { Text("“${s.title.ifBlank { "Untitled chat" }}” leaves this list. goose keeps the " +
+                "history on disk — it has no delete.") },
+            confirmButton = { TextButton(onClick = {
+                cm.archiveSession(s.sessionId); confirmArchive = null
+            }) { Text("Archive") } },
+            dismissButton = { TextButton(onClick = { confirmArchive = null }) { Text("Cancel") } },
+        )
+    }
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { if (!deleteBusy) confirmDelete = false },
+        title = { Text("Delete project?") },
+        text = { Column {
+            Text("Archives this project's chats and removes /workspace/$project from the " +
+                "server — but ONLY if the directory is empty. A project with files keeps " +
+                "them and just leaves this list.")
+            if (deleteBusy) {
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp)); Text("Working…")
+                }
+            }
+        } },
+        confirmButton = {
+            TextButton(enabled = !deleteBusy, onClick = {
+                deleteBusy = true
+                cm.deleteProject(project) { note ->
+                    deleteBusy = false; confirmDelete = false; deleteNote = note
+                }
+            }) { Text("Delete") }
+        },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }, enabled = !deleteBusy) { Text("Cancel") } },
+    )
+    deleteNote?.let { note ->
+        AlertDialog(
+            onDismissRequest = { deleteNote = null; nav.popBackStack() },
+            title = { Text("Project deleted") },
+            text = { Text(note) },
+            confirmButton = { TextButton(onClick = { deleteNote = null; nav.popBackStack() }) { Text("OK") } },
+        )
+    }
+
+    val chats = cm.sessions.value.filter { ConnectionManager.projectOf(it.cwd) == project }
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text(project, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            }
+        )
+    }) { pad ->
+        LazyColumn(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
+            item {
+                Text("CHATS", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 6.dp, top = 10.dp, bottom = 4.dp))
+            }
+            item {
+                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    .clickable { cm.newCodeSession(project); goToChat() }) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Spacer(Modifier.width(10.dp))
+                        Text("New chat", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+            }
+            items(chats, key = { it.sessionId }) { s ->
+                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    .combinedClickable(onClick = { cm.openSession(s.sessionId); goToChat() },
+                        onLongClick = { menuFor = s })) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Spacer(Modifier.height(2.dp))
+                            Text(listOf("${s.messageCount} msgs", s.model, relativeTime(s.updatedAt))
+                                .filter { it.isNotBlank() }.joinToString("  ·  "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis)
+                        }
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.outline)
+                    }
+                }
+            }
+            item {
+                Text("GOOSEHINTS & MEMORY", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 6.dp, top = 18.dp, bottom = 4.dp))
+            }
+            item {
+                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        when {
+                            infoBusy -> Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(10.dp))
+                                Text("Asking the fast model to read them…",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                            info != null -> {
+                                Text(info!!, style = MaterialTheme.typography.bodySmall)
+                                Spacer(Modifier.height(6.dp))
+                                TextButton(onClick = {
+                                    infoBusy = true
+                                    cm.fetchProjectInfo(project) { err, text ->
+                                        infoBusy = false; info = err ?: text
+                                    }
+                                }) { Text("Reload") }
+                            }
+                            else -> {
+                                Text("The project's .goosehints and local memory " +
+                                    "(.goose/memory) live on the server; loading them runs a " +
+                                    "quick fast-model session.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline)
+                                Spacer(Modifier.height(6.dp))
+                                TextButton(onClick = {
+                                    infoBusy = true
+                                    cm.fetchProjectInfo(project) { err, text ->
+                                        infoBusy = false; info = err ?: text
+                                    }
+                                }) { Text("Load") }
+                            }
+                        }
+                    }
+                }
+            }
+            item {
+                TextButton(onClick = { confirmDelete = true },
+                    modifier = Modifier.padding(top = 18.dp, bottom = 24.dp)) {
+                    Text("Delete project…", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+    }
 }
 
 // ---- Settings ---------------------------------------------------------------

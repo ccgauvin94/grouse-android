@@ -361,49 +361,42 @@ class ConnectionManager private constructor(context: Context) {
         newSession(cwd = "/workspace/$clean", kind = SessionKind.CODE)
     }
 
-    /** Create /workspace/<name> on the server, then report back (null = success, else error).
+    /** Run one prompt in a throwaway fast-model session and report (error, agentReplyText).
      *
-     *  There is no ACP method to create a directory and session/new hard-rejects nonexistent
-     *  cwds, so this runs a BOOTSTRAP session: a second, throwaway AcpClient (the UI session's
-     *  client and its state machine stay untouched) opens at /state on the fast model, asks it
-     *  to run `mkdir -p`, and archives itself. The developer extension's shell is always_allow
-     *  server-side, so the command runs without an approval round-trip; if some other approval
-     *  is requested anyway, it is answered allow_once (the prompt is ours and fixed).
-     *  Success is verified by the caller's newCodeSession() -- if the mkdir silently failed,
-     *  that session/new rejects and surfaces its error. */
-    fun createProject(rawName: String, onResult: (String?) -> Unit) {
-        val name = rawName.trim().trim('/').removePrefix("workspace/").trim('/')
-        if (name.isEmpty() || name.contains("..") || name.contains('/') || name.any { it.isWhitespace() }) {
-            onResult("Single folder name — no slashes or spaces."); return
-        }
+     *  There is no ACP method to touch server files (no mkdir, no read -- checked the full
+     *  custom-method table), so server-side file work rides a BOOTSTRAP session: a second,
+     *  short-lived AcpClient (the UI session's client and its state machine stay untouched)
+     *  opens at /state on the fast model, sends the prompt, collects the reply, and archives
+     *  ITSELF through its own still-connected client -- combined with the archivedAt filter in
+     *  parseSessions, the helper session never shows in any list. The developer extension's
+     *  shell is always_allow server-side, so commands run without an approval round-trip; any
+     *  other approval request is answered allow_once (the prompt is ours and fixed). */
+    private fun runUtilitySession(prompt: String, timeoutMs: Long = 90_000, onDone: (String?, String) -> Unit) {
         val url = "wss://${store.host}:${store.port}/acp"
         var boot: AcpClient? = null
         var bootSid: String? = null
         var finished = false
+        val reply = StringBuilder()
         lateinit var watchdog: Runnable
         fun finish(err: String?) {
             if (finished) return
             finished = true
             main.removeCallbacks(watchdog)
-            // Archive through the MAIN client so the throwaway session never clutters the list;
-            // harmless no-op if we're offline (the session then just lingers server-side).
-            bootSid?.let { client?.archiveSession(it) }
-            boot?.close()
-            onResult(err)
+            bootSid?.let { boot?.archiveSession(it) }
+            // Give the archive frame a moment on the wire before the socket closes.
+            val b = boot
+            main.postDelayed({ b?.close() }, 1_500)
+            boot = null
+            onDone(err, reply.toString())
         }
-        watchdog = Runnable { finish("Timed out creating the project.") }
-        main.postDelayed(watchdog, 90_000)
+        watchdog = Runnable { finish("Timed out talking to the server.") }
+        main.postDelayed(watchdog, timeoutMs)
         boot = AcpClient(url, store.secretKey) { ev ->
             main.post {
                 if (finished) return@post
                 when (ev) {
-                    is AcpEvent.Ready -> {
-                        bootSid = ev.sessionId
-                        boot?.sendPrompt(
-                            "Run exactly this shell command: mkdir -p /workspace/$name\n" +
-                                "Then reply with just: done"
-                        )
-                    }
+                    is AcpEvent.Ready -> { bootSid = ev.sessionId; boot?.sendPrompt(prompt) }
+                    is AcpEvent.AgentChunk -> reply.append(ev.text)
                     is AcpEvent.Permission -> boot?.respondPermission(
                         ev.toolCallId,
                         ev.options.firstOrNull { it.kind == "allow_once" }?.optionId
@@ -415,12 +408,64 @@ class ConnectionManager private constructor(context: Context) {
                 }
             }
         }.also {
-            // Pin the bootstrap to the fast model (the mkdir needs no intelligence); blank if
-            // the server config read hasn't landed yet -- applyDesired skips blanks and the
-            // session just uses the default model instead.
+            // Pin to the fast model (these tasks need no intelligence); blank if the server
+            // config read hasn't landed yet -- applyDesired skips blanks and the session
+            // just uses the default model instead.
             it.desiredOptions = mapOf("model" to serverFastModel.value.trim())
             it.desiredCwd = "/state"
             it.connect()
+        }
+    }
+
+    private fun cleanProjectName(raw: String): String? {
+        val name = raw.trim().trim('/').removePrefix("workspace/").trim('/')
+        if (name.isEmpty() || name.contains("..") || name.contains('/') ||
+            name.any { it.isWhitespace() } || name.contains('\'') || name.contains('"')) return null
+        return name
+    }
+
+    /** Create /workspace/<name> on the server (null = success, else error). Success is verified
+     *  by the caller's newCodeSession() -- if the mkdir silently failed, that session/new
+     *  rejects the nonexistent cwd and surfaces its error. */
+    fun createProject(rawName: String, onResult: (String?) -> Unit) {
+        val name = cleanProjectName(rawName)
+            ?: run { onResult("Single folder name — no slashes, spaces, or quotes."); return }
+        runUtilitySession(
+            "Run exactly this shell command: mkdir -p /workspace/$name\nThen reply with just: done"
+        ) { err, _ -> onResult(err) }
+    }
+
+    /** Read a project's .goosehints and local memory (goose's memory extension stores its
+     *  local scope at <cwd>/.goose/memory). Model-mediated: the fast model runs cat/ls and
+     *  echoes the output -- there is no direct file read over ACP. */
+    fun fetchProjectInfo(project: String, onResult: (String?, String) -> Unit) {
+        val name = cleanProjectName(project) ?: run { onResult("bad project name", ""); return }
+        runUtilitySession(
+            "Run exactly this shell command:\n" +
+                "sh -c 'echo ===GOOSEHINTS===; cat /workspace/$name/.goosehints 2>/dev/null || echo (none); " +
+                "echo ===MEMORY===; ls /workspace/$name/.goose/memory 2>/dev/null || echo (none)'\n" +
+                "Then output ONLY the command's raw output, verbatim. No commentary, no code fences."
+        ) { err, text -> onResult(err, text) }
+    }
+
+    /** Delete a project: archive its chats, drop it from recents, and remove the server
+     *  directory ONLY if empty (rmdir, never rm -rf -- a non-empty project keeps its files
+     *  and merely disappears from the list). Reports a human-readable outcome note. */
+    fun deleteProject(project: String, onResult: (String) -> Unit) {
+        val name = cleanProjectName(project) ?: run { onResult("bad project name"); return }
+        sessions.value.filter { ConnectionManager.projectOf(it.cwd) == name }
+            .forEach { archiveSession(it.sessionId) }
+        store.removeRecentWorkspaceProject(name)
+        runUtilitySession(
+            "Run exactly this shell command: rmdir /workspace/$name\n" +
+                "If it succeeds reply with just: removed\n" +
+                "If it fails reply with just: kept"
+        ) { err, text ->
+            onResult(when {
+                err != null -> "Chats archived; server said: $err"
+                text.contains("removed") -> "Project removed."
+                else -> "Chats archived. The directory has files in it, so it was left in place."
+            })
         }
     }
 

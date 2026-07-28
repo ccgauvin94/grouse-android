@@ -150,6 +150,11 @@ class SecureStore(context: Context) {
         cfg.edit().putString("recent_workspace_projects", next.joinToString("\n")).apply()
     }
 
+    fun removeRecentWorkspaceProject(name: String) {
+        val next = recentWorkspaceProjects().filterNot { it == name }
+        cfg.edit().putString("recent_workspace_projects", next.joinToString("\n")).apply()
+    }
+
     // --- Server-side speech (LocalAI) ---------------------------------------------------
     // Android's own SpeechRecognizer/TextToSpeech stay the default: no network, streaming partials,
     // works offline. These opt into the box's own models instead -- Kokoro sounds far better than

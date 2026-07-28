@@ -202,6 +202,9 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
                         DrawerChats(cm, onOpen = {
                             closeDrawer()
                             nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+                        }, onOpenProject = { p ->
+                            closeDrawer()
+                            nav.navigate("project/" + Uri.encode(p)) { launchSingleTop = true }
                         })
                     }
                     HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
@@ -221,6 +224,10 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
                 ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
             }
             composable("chat") { ChatScreen(cm, onOpenDrawer = ::openDrawer) }
+            composable("project/{pname}") { back ->
+                val pname = Uri.decode(back.arguments?.getString("pname") ?: "")
+                ProjectScreen(cm, nav, pname)
+            }
             composable("settings") { SettingsScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("extensions") { ExtensionsScreen(cm, nav) }
         }
