@@ -999,8 +999,10 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     companion object {
-        /** Server-side name of the persistent assistant thread (see docker/llm/goose-recipes). */
-        const val ASSISTANT_TITLE = "goose-assistant"
+        /** Server-side name of the persistent assistant thread (see docker/llm/goose-recipes).
+         *  Renamed from "goose-assistant" 2026-07-28 -- coordinated with sessions.db and
+         *  deliver.sh's SESSION_NAME, since resolution on all sides is an exact title match. */
+        const val ASSISTANT_TITLE = "Assistant"
         /** goose has no session tags/labels -- cwd is the native signal. A project session is one
          *  scoped to a project directory; everything else on the default /state is Chat, unless
          *  its title marks it as the privileged Assistant thread. */
