@@ -135,6 +135,10 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
 
 // ---- Chat -------------------------------------------------------------------
 
+/** Reading position before a replay wipe: reverseLayout list position (from the bottom) plus a
+ *  transcript fingerprint, so the position is restored only when the rebuild changed nothing. */
+private data class ScrollAnchor(val item: Int, val offset: Int, val msgCount: Int, val tailLen: Int)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
@@ -240,18 +244,42 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // Driven off snapshotFlow so per-token text growth doesn't recompose the whole ChatScreen (this
     // used to read the last message's length in the composable body). Instant scrollToItem avoids
     // restarting a scroll animation on every token.
+    // Where the user was before a replay wiped the list: reverseLayout indexes count from the
+    // bottom, so (item, offset) survives an identical rebuild. msgCount/tailLen fingerprint the
+    // transcript so we only restore when nothing new arrived. Updated continuously except during
+    // the rebuild itself (which would overwrite the anchor with transient positions).
+    var anchor by remember { mutableStateOf<ScrollAnchor?>(null) }
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            Triple(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, cm.messages.size)
+        }.collect { (item, offset, count) ->
+            if (!cm.replayActive.value)
+                anchor = ScrollAnchor(item, offset, count, cm.messages.lastOrNull()?.text?.length ?: 0)
+        }
+    }
     LaunchedEffect(listState) {
         snapshotFlow { cm.messages.size to (cm.messages.lastOrNull()?.text?.length ?: 0) }
-            // During a replay rebuild, pin unconditionally: keyed items inserted at index 0 can
-            // drift the anchor off the exact bottom, which would flip atBottom false and stop
-            // the autoscroll halfway up the restored history.
-            .collect { if (atBottom || cm.replayActive.value) listState.scrollToItem(0) }
+            // During a replay rebuild, pin: keyed items inserted at index 0 can drift the
+            // key-anchor off the exact bottom, which would flip atBottom false and stop the
+            // autoscroll halfway up the restored history. Skip when the user was scrolled up —
+            // their position is restored (or superseded) once the rebuild finishes.
+            .collect {
+                val wasAtBottom = (anchor?.item ?: 0) == 0
+                if (atBottom || (cm.replayActive.value && wasAtBottom)) listState.scrollToItem(0)
+            }
     }
     // Opening/switching a session: snap to the bottom (index 0). reverseLayout keeps it pinned
     // as history replays in.
-    LaunchedEffect(cm.currentSession.value) { listState.scrollToItem(0) }
-    // One final snap when a replay finishes, in case the last chunks landed between collects.
-    LaunchedEffect(cm.replayDoneTick.value) { listState.scrollToItem(0) }
+    LaunchedEffect(cm.currentSession.value) { anchor = null; listState.scrollToItem(0) }
+    // A replay finished rebuilding: if the transcript came back unchanged, put the user back
+    // where they were; if anything new arrived (or they were at the bottom), go to the bottom.
+    LaunchedEffect(cm.replayDoneTick.value) {
+        val a = anchor
+        if (a != null && a.item > 0 && cm.messages.size == a.msgCount &&
+            (cm.messages.lastOrNull()?.text?.length ?: 0) == a.tailLen)
+            listState.scrollToItem(a.item, a.offset)
+        else listState.scrollToItem(0)
+    }
     // Speak the reply aloud when a turn finishes (busy true→false), if enabled.
     var wasBusy by remember { mutableStateOf(false) }
     LaunchedEffect(cm.busy.value) {
