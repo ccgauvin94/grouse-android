@@ -62,6 +62,8 @@ class ConnectionManager private constructor(context: Context) {
     // True between sendPrompt and TurnDone. `busy` is UI state and is also set while merely
     // queued, so it cannot answer "is the wire busy" -- this can.
     private var turnInFlight = false
+    // messageId of the chunk currently streaming into the open bubble (replay only).
+    private var streamMsgId: String? = null
 
     val messages = mutableStateListOf<ChatMessage>()
     val status = mutableStateOf("not connected")
@@ -981,7 +983,14 @@ class ConnectionManager private constructor(context: Context) {
                 streamingRole = null
                 replayWiped = true
             }
-            is AcpEvent.AgentChunk -> appendStream("assistant", ev.text)
+            is AcpEvent.AgentChunk -> {
+                // Replay boundary: a NEW messageId means a new source message — break the
+                // bubble instead of gluing (consecutive assistant messages, e.g. a briefing
+                // relay followed by an appended digest, used to merge into one).
+                if (ev.messageId != null && ev.messageId != streamMsgId) streamingRole = null
+                if (ev.messageId != null) streamMsgId = ev.messageId
+                appendStream("assistant", ev.text)
+            }
             is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
             is AcpEvent.UserChunk -> { messages.add(ChatMessage("user", ev.text)); streamingRole = null }
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) {

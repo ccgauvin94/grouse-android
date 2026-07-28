@@ -55,9 +55,12 @@ data class ExtInfo(
 /** Events surfaced from the ACP connection to the UI layer. */
 sealed interface AcpEvent {
     data class Status(val text: String) : AcpEvent
-    data class AgentChunk(val text: String) : AcpEvent
+    /** messageId is set on REPLAYED chunks (goose stamps _meta.goose.messageId per source
+     *  message) and null on live streaming deltas — it is the message-boundary signal that
+     *  keeps consecutive same-role history messages from merging into one bubble. */
+    data class AgentChunk(val text: String, val messageId: String? = null) : AcpEvent
     data class ThoughtChunk(val text: String) : AcpEvent
-    data class UserChunk(val text: String) : AcpEvent
+    data class UserChunk(val text: String, val messageId: String? = null) : AcpEvent
     /** `detail` is the tool's rawInput (command/args), same extraction the permission sheet already
      *  does — Desktop shows this; Grouse was discarding it and only showing `title`.
      *  `toolCallId` correlates later ToolCallUpdate events (status + output) to this call. */
@@ -740,10 +743,12 @@ class AcpClient(
         // duplicate bubbles, but it couldn't tell "what I already show" from "turns another client
         // added while I was away", so those turns were silently dropped.
         fun text() = (update["content"] as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
+        fun msgId() = ((update["_meta"] as? JsonObject)?.get("goose") as? JsonObject)
+            ?.get("messageId")?.jsonPrimitive?.contentOrNull
         when (tag) {
             // user_message_chunk only appears during a session/load replay (live prompts aren't echoed).
-            "user_message_chunk" -> text()?.let { onEvent(AcpEvent.UserChunk(it)) }
-            "agent_message_chunk" -> text()?.let { onEvent(AcpEvent.AgentChunk(it)) }
+            "user_message_chunk" -> text()?.let { onEvent(AcpEvent.UserChunk(it, msgId())) }
+            "agent_message_chunk" -> text()?.let { onEvent(AcpEvent.AgentChunk(it, msgId())) }
             // Thoughts stream live (own collapsible bubble); skipped in a rebuilt transcript.
             "agent_thought_chunk" -> if (!replaying) text()?.let { onEvent(AcpEvent.ThoughtChunk(it)) }
             "tool_call" -> {
