@@ -675,54 +675,10 @@ private fun prettyOption(raw: String) = when (raw) {
 @Composable
 fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (String) -> Unit) {
     var showNewProject by remember { mutableStateOf(false) }
-    var menuFor by remember { mutableStateOf<SessionInfo?>(null) }
-    var renameFor by remember { mutableStateOf<SessionInfo?>(null) }
-    var confirmArchive by remember { mutableStateOf<SessionInfo?>(null) }
+    var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
     var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
 
-    menuFor?.let { s ->
-        AlertDialog(
-            onDismissRequest = { menuFor = null },
-            title = { Text(s.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            text = {
-                Column {
-                    TextButton(onClick = { renameFor = s; menuFor = null }) { Text("Rename…") }
-                    TextButton(onClick = { confirmArchive = s; menuFor = null }) { Text("Archive…") }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { menuFor = null }) { Text("Cancel") } },
-        )
-    }
-    renameFor?.let { s ->
-        var newName by remember(s.sessionId) { mutableStateOf(s.title) }
-        AlertDialog(
-            onDismissRequest = { renameFor = null },
-            title = { Text("Rename chat") },
-            text = {
-                OutlinedTextField(newName, { newName = it }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-            },
-            confirmButton = {
-                TextButton(enabled = newName.isNotBlank(), onClick = {
-                    cm.renameSession(s.sessionId, newName); renameFor = null
-                }) { Text("Rename") }
-            },
-            dismissButton = { TextButton(onClick = { renameFor = null }) { Text("Cancel") } },
-        )
-    }
-    confirmArchive?.let { s ->
-        AlertDialog(
-            onDismissRequest = { confirmArchive = null },
-            title = { Text("Archive chat?") },
-            text = { Text("“${s.title.ifBlank { "Untitled chat" }}” leaves this list. goose keeps the " +
-                "history on disk — it has no delete.") },
-            confirmButton = { TextButton(onClick = {
-                cm.archiveSession(s.sessionId); confirmArchive = null
-            }) { Text("Archive") } },
-            dismissButton = { TextButton(onClick = { confirmArchive = null }) { Text("Cancel") } },
-        )
-    }
+    actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
     if (showNewProject) NewProjectDialog(
         cm = cm,
         onCreated = { name -> showNewProject = false; cm.newCodeSession(name); onOpen() },
@@ -739,7 +695,7 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     fun sessionRow(s: SessionInfo, indent: Boolean) {
         Row(Modifier.fillMaxWidth()
             .combinedClickable(onClick = { cm.openSession(s.sessionId); onOpen() },
-                onLongClick = { menuFor = s })
+                onLongClick = { actionsFor = s })
             .padding(start = if (indent) 34.dp else 10.dp, end = 8.dp)
             .padding(vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -815,6 +771,92 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     }
 }
 
+/** Long-press actions for one session: Rename / Move to project / Archive / Delete.
+ *  Archive hides (history stays server-side, restorable via unarchive); Delete is goose's real
+ *  session/delete (≥1.44 -- the old "-32601 no delete" note is obsolete) and is permanent.
+ *  Move is the sanctioned working_dir rewrite -- also the repair for chats stranded by a
+ *  renamed project directory. */
+@Composable
+private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: () -> Unit) {
+    var mode by remember(s.sessionId) { mutableStateOf("menu") }
+    when (mode) {
+        "menu" -> AlertDialog(
+            onDismissRequest = onDone,
+            title = { Text(s.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column {
+                    TextButton(onClick = { mode = "rename" }) { Text("Rename…") }
+                    TextButton(onClick = { mode = "move" }) { Text("Move to project…") }
+                    TextButton(onClick = { mode = "archive" }) { Text("Archive…") }
+                    TextButton(onClick = { mode = "delete" }) {
+                        Text("Delete…", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
+        )
+        "rename" -> {
+            var newName by remember(s.sessionId) { mutableStateOf(s.title) }
+            AlertDialog(
+                onDismissRequest = onDone,
+                title = { Text("Rename chat") },
+                text = { OutlinedTextField(newName, { newName = it }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth()) },
+                confirmButton = {
+                    TextButton(enabled = newName.isNotBlank(), onClick = {
+                        cm.renameSession(s.sessionId, newName); onDone()
+                    }) { Text("Rename") }
+                },
+                dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
+            )
+        }
+        "move" -> {
+            val current = ConnectionManager.projectOf(s.cwd)
+            val projects = (cm.sessions.value.mapNotNull { ConnectionManager.projectOf(it.cwd) } +
+                cm.recentProjects.value).distinct().sortedBy { it.lowercase() }
+            AlertDialog(
+                onDismissRequest = onDone,
+                title = { Text("Move to project") },
+                text = {
+                    Column {
+                        TextButton(enabled = current != null, onClick = {
+                            cm.moveSession(s.sessionId, "/state"); onDone()
+                        }) { Text("Chats (no project)") }
+                        projects.forEach { p ->
+                            TextButton(enabled = p != current, onClick = {
+                                cm.moveSession(s.sessionId, "/workspace/" + p); onDone()
+                            }) { Text(p) }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
+            )
+        }
+        "archive" -> AlertDialog(
+            onDismissRequest = onDone,
+            title = { Text("Archive chat?") },
+            text = { Text("“${s.title.ifBlank { "Untitled chat" }}” leaves this list; the history " +
+                "stays on the server.") },
+            confirmButton = { TextButton(onClick = {
+                cm.archiveSession(s.sessionId); onDone()
+            }) { Text("Archive") } },
+            dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
+        )
+        "delete" -> AlertDialog(
+            onDismissRequest = onDone,
+            title = { Text("Delete chat?") },
+            text = { Text("Permanently deletes “${s.title.ifBlank { "Untitled chat" }}” and its " +
+                "history from the server. Archive instead if you might want it back.") },
+            confirmButton = { TextButton(onClick = {
+                cm.deleteSession(s.sessionId); onDone()
+            }) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
+        )
+    }
+}
+
 /** Create a project on the server, then open its first chat. No ACP directory-listing or mkdir
  *  method exists, so ConnectionManager.createProject runs a throwaway fast-model session that
  *  executes the mkdir (see its doc) — the busy state here covers that round trip. */
@@ -868,9 +910,7 @@ private fun NewProjectDialog(cm: ConnectionManager, onCreated: (String) -> Unit,
 @Composable
 fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     LaunchedEffect(Unit) { cm.listSessions() }
-    var menuFor by remember { mutableStateOf<SessionInfo?>(null) }
-    var renameFor by remember { mutableStateOf<SessionInfo?>(null) }
-    var confirmArchive by remember { mutableStateOf<SessionInfo?>(null) }
+    var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var deleteBusy by remember { mutableStateOf(false) }
     var deleteNote by remember { mutableStateOf<String?>(null) }
@@ -878,47 +918,7 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     var infoBusy by remember { mutableStateOf(false) }
     fun goToChat() = nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
 
-    menuFor?.let { s ->
-        AlertDialog(
-            onDismissRequest = { menuFor = null },
-            title = { Text(s.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            text = {
-                Column {
-                    TextButton(onClick = { renameFor = s; menuFor = null }) { Text("Rename…") }
-                    TextButton(onClick = { confirmArchive = s; menuFor = null }) { Text("Archive…") }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { menuFor = null }) { Text("Cancel") } },
-        )
-    }
-    renameFor?.let { s ->
-        var newName by remember(s.sessionId) { mutableStateOf(s.title) }
-        AlertDialog(
-            onDismissRequest = { renameFor = null },
-            title = { Text("Rename chat") },
-            text = { OutlinedTextField(newName, { newName = it }, singleLine = true,
-                modifier = Modifier.fillMaxWidth()) },
-            confirmButton = {
-                TextButton(enabled = newName.isNotBlank(), onClick = {
-                    cm.renameSession(s.sessionId, newName); renameFor = null
-                }) { Text("Rename") }
-            },
-            dismissButton = { TextButton(onClick = { renameFor = null }) { Text("Cancel") } },
-        )
-    }
-    confirmArchive?.let { s ->
-        AlertDialog(
-            onDismissRequest = { confirmArchive = null },
-            title = { Text("Archive chat?") },
-            text = { Text("“${s.title.ifBlank { "Untitled chat" }}” leaves this list. goose keeps the " +
-                "history on disk — it has no delete.") },
-            confirmButton = { TextButton(onClick = {
-                cm.archiveSession(s.sessionId); confirmArchive = null
-            }) { Text("Archive") } },
-            dismissButton = { TextButton(onClick = { confirmArchive = null }) { Text("Cancel") } },
-        )
-    }
+    actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
     if (confirmDelete) AlertDialog(
         onDismissRequest = { if (!deleteBusy) confirmDelete = false },
         title = { Text("Delete project?") },
@@ -986,7 +986,7 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
             items(chats, key = { it.sessionId }) { s ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                     .combinedClickable(onClick = { cm.openSession(s.sessionId); goToChat() },
-                        onLongClick = { menuFor = s })) {
+                        onLongClick = { actionsFor = s })) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.titleMedium,
@@ -1705,7 +1705,7 @@ fun MessageBubble(m: ChatMessage, streaming: Boolean = false, usage: AcpEvent.Me
     when (m.role) {
         "user" -> UserBubble(m)
         "thought" -> ThoughtBubble(m.text)
-        "tool" -> ToolChip(m.text, m.detail)
+        "tool" -> ToolChip(m)
         "error" -> ErrorBubble(m.text)
         "chart" -> ChartView(m.text)
         else -> AssistantBubble(m.text, streaming, usage)
@@ -1918,7 +1918,7 @@ private fun ToolChipGroup(items: List<ChatMessage>) {
         }
         AnimatedVisibility(expanded) {
             Column(Modifier.padding(start = 20.dp, top = 2.dp)) {
-                items.forEach { ToolChip(it.text, it.detail) }
+                items.forEach { ToolChip(it) }
             }
         }
     }
@@ -1927,18 +1927,27 @@ private fun ToolChipGroup(items: List<ChatMessage>) {
 /** Tap to expand and see the tool's rawInput (command/args) — Desktop shows this inline; here it's
  *  collapsed by default (matches ThoughtBubble's pattern) so a wall of tool calls stays scannable. */
 @Composable
-private fun ToolChip(title: String, detail: String = "") {
+private fun ToolChip(m: ChatMessage) {
+    val title = m.text; val detail = m.detail
     var expanded by remember { mutableStateOf(false) }
     val (name, inlineDetail) = splitToolTitle(title)
+    val hasBody = detail.isNotBlank() || m.output.isNotBlank()
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
             contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
             shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.let { if (detail.isNotBlank()) it.clickable { expanded = !expanded } else it }) {
+            modifier = Modifier.let { if (hasBody) it.clickable { expanded = !expanded } else it }) {
             Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(13.dp),
-                    tint = MaterialTheme.colorScheme.primary)
+                when (m.status) {
+                    // Live lifecycle from tool_call_update: spinner while running, error tint on
+                    // failure, plain wrench once done (or for replayed history, which has no status).
+                    "in_progress" -> CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.5.dp)
+                    "failed" -> Icon(Icons.Filled.Close, contentDescription = "failed",
+                        modifier = Modifier.size(13.dp), tint = MaterialTheme.colorScheme.error)
+                    else -> Icon(Icons.Filled.Build, contentDescription = null,
+                        modifier = Modifier.size(13.dp), tint = MaterialTheme.colorScheme.primary)
+                }
                 Spacer(Modifier.width(8.dp))
                 Text(name.replace('_', ' '), style = MaterialTheme.typography.labelLarge)
                 if (inlineDetail.isNotBlank()) {
@@ -1947,19 +1956,36 @@ private fun ToolChip(title: String, detail: String = "") {
                         color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f),
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 } else Spacer(Modifier.weight(1f))
-                if (detail.isNotBlank()) Icon(
+                if (hasBody) Icon(
                     if (expanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                     contentDescription = null, modifier = Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.outline)
             }
         }
-        if (detail.isNotBlank()) AnimatedVisibility(expanded) {
+        if (hasBody) AnimatedVisibility(expanded) {
             Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier.padding(start = 16.dp, top = 3.dp, bottom = 2.dp).fillMaxWidth()) {
-                Text(detail, style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+                Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                    val mono = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    if (detail.isNotBlank()) {
+                        Text("input", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary)
+                        Text(detail, style = mono, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (m.output.isNotBlank()) {
+                        if (detail.isNotBlank()) Spacer(Modifier.height(6.dp))
+                        Text("output", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary)
+                        // Cap the rendered output — tool results can be enormous.
+                        Text(m.output.take(4000), style = mono,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (m.output.length > 4000) Text("… (${m.output.length} chars total)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline)
+                    }
+                }
             }
         }
     }

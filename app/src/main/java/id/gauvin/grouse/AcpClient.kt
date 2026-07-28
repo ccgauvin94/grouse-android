@@ -59,8 +59,16 @@ sealed interface AcpEvent {
     data class ThoughtChunk(val text: String) : AcpEvent
     data class UserChunk(val text: String) : AcpEvent
     /** `detail` is the tool's rawInput (command/args), same extraction the permission sheet already
-     *  does — Desktop shows this; Grouse was discarding it and only showing `title`. */
-    data class ToolCall(val title: String, val detail: String = "") : AcpEvent
+     *  does — Desktop shows this; Grouse was discarding it and only showing `title`.
+     *  `toolCallId` correlates later ToolCallUpdate events (status + output) to this call. */
+    data class ToolCall(val title: String, val detail: String = "", val toolCallId: String = "") : AcpEvent
+    /** Progress for an in-flight tool call: status is in_progress/completed/failed; `output`
+     *  carries the tool's result text when the update includes content (usually on completion). */
+    data class ToolCallUpdate(val toolCallId: String, val status: String, val output: String) : AcpEvent
+    /** A session's title/updatedAt changed server-side (auto-naming, a rename from any client). */
+    data class SessionInfoChanged(val sessionId: String, val title: String?, val updatedAt: String?) : AcpEvent
+    /** The session's approval mode changed (e.g. from another client). */
+    data class ModeChanged(val modeId: String) : AcpEvent
     /** Per-message generation stats (goose-custom `_goose/unstable/session/update`, sessionUpdate
      *  "message_usage") — tok/s derived client-side from outputTokens/elapsedMs. Separate from the
      *  aggregate [Usage] (context window used/size), which comes from the STANDARD ACP usage_update. */
@@ -138,6 +146,11 @@ class AcpClient(
      *  working_dir -- session/load's cwd param silently REWRITES working_dir if it differs, so
      *  passing the wrong value here would un-scope a Code session back to whatever's passed. */
     var resumeCwd: String = "/state"
+    /** False when the caller could NOT determine the session's real cwd: the client then asks
+     *  the server (_goose/unstable/session/info) before session/load, instead of guessing --
+     *  a wrong guess is a silent working_dir rewrite (this re-homed the assistant thread once). */
+    var resumeCwdKnown: Boolean = true
+    private var loadAwaitingInfo = false
     /** The cwd for a brand-new session (session/new) when resumeSessionId is null. "/state" for
      *  Chat/Assistant; "/workspace/<project>" for a Code session. */
     var desiredCwd: String = "/state"
@@ -252,10 +265,28 @@ class AcpClient(
             put("sessionId", targetSessionId); put("title", title)
         })
 
-    /** Archive a session. goose exposes no session/delete (confirmed: -32601 Method not found), so
-     *  this is the delete-equivalent -- the session leaves session/list, history stays on disk. */
+    /** Archive a session: leaves session/list, history stays on disk (reversible via
+     *  unarchiveSession). The soft option next to deleteSession. */
     fun archiveSession(targetSessionId: String) =
         rpc("_goose/unstable/session/archive", buildJsonObject { put("sessionId", targetSessionId) })
+
+    /** Delete a session outright (goose ≥1.44 has real session/delete; the old "-32601 Method
+     *  not found" note predates it). Archive remains the soft option. Reply re-lists. */
+    fun deleteSession(targetSessionId: String) =
+        rpc("session/delete", buildJsonObject { put("sessionId", targetSessionId) })
+
+    /** Bring an archived session back into session/list. No UI browses archived sessions yet,
+     *  but the capability is wired for parity with delete. */
+    fun unarchiveSession(targetSessionId: String) =
+        rpc("_goose/unstable/session/unarchive", buildJsonObject { put("sessionId", targetSessionId) })
+
+    /** Rewrite a session's working_dir server-side -- the sanctioned form of the rewrite that
+     *  session/load does silently. Used to move a chat into/out of a project and to repair
+     *  sessions stranded by a renamed project directory. */
+    fun updateWorkingDir(targetSessionId: String, workingDir: String) =
+        rpc("_goose/unstable/session/working-dir/update", buildJsonObject {
+            put("sessionId", targetSessionId); put("workingDir", workingDir)
+        })
 
     /** Invoke a tool DIRECTLY -- no model turn, no prompt, deterministic. Name is the
      *  `extension__tool` form (e.g. "developer__shell"). Reply arrives as DirectToolResult.
@@ -387,12 +418,30 @@ class AcpClient(
             id?.let { pendingConfigKeys.remove(it) }   // an errored config/read never reaches its dispatch — clean its key map so it can't leak
             // A stale/expired session can't be resumed — fall back to a fresh one.
             if (method == "session/load") { replaying = false; startNewSession(); return }
+            // Info probe failed (very old goose?): resume with /state rather than hanging.
+            if (method == "_goose/unstable/session/info" && loadAwaitingInfo) {
+                loadAwaitingInfo = false
+                val resume = resumeSessionId
+                if (resume != null) {
+                    replaying = true
+                    onEvent(AcpEvent.ReplayStart)
+                    rpc("session/load", buildJsonObject {
+                        put("sessionId", resume); put("cwd", resumeCwd)
+                        putJsonArray("mcpServers") {}
+                    })
+                }
+                return
+            }
             onEvent(AcpEvent.Error("$method: $error")); return
         }
         when (method) {
             "initialize" -> {
                 val resume = resumeSessionId
-                if (resume != null) {
+                if (resume != null && !resumeCwdKnown) {
+                    // Ask the server for the session's real cwd rather than guessing.
+                    loadAwaitingInfo = true
+                    rpc("_goose/unstable/session/info", buildJsonObject { put("sessionId", resume) })
+                } else if (resume != null) {
                     replaying = true
                     onEvent(AcpEvent.ReplayStart)
                     rpc("session/load", buildJsonObject {
@@ -475,6 +524,28 @@ class AcpClient(
                     result?.get("isError")?.jsonPrimitive?.booleanOrNull ?: false))
             }
             "_goose/unstable/session/archive" -> listSessions()
+            "session/delete" -> listSessions()
+            "_goose/unstable/session/unarchive" -> listSessions()
+            "_goose/unstable/session/working-dir/update" -> {}   // caller updates optimistically
+            "_goose/unstable/session/info" -> {
+                val cwd = (result?.get("session") as? JsonObject)
+                    ?.get("cwd")?.jsonPrimitive?.contentOrNull
+                if (loadAwaitingInfo) {
+                    loadAwaitingInfo = false
+                    resumeCwd = cwd?.takeIf { it.isNotBlank() } ?: "/state"
+                    resumeCwdKnown = true
+                    val resume = resumeSessionId
+                    if (resume != null) {
+                        replaying = true
+                        onEvent(AcpEvent.ReplayStart)
+                        rpc("session/load", buildJsonObject {
+                            put("sessionId", resume)
+                            put("cwd", resumeCwd)
+                            putJsonArray("mcpServers") {}
+                        })
+                    }
+                }
+            }
             "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))
             "session/set_mode" -> {}
             "session/prompt" ->
@@ -630,7 +701,8 @@ class AcpClient(
                             ?: ri.toString().takeIf { it != "{}" } ?: ""
                     } ?: ""
                     onEvent(AcpEvent.ToolCall(
-                        update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call", detail))
+                        update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call", detail,
+                        update["toolCallId"]?.jsonPrimitive?.contentOrNull ?: ""))
                 }
             }
             "usage_update" -> {
@@ -640,6 +712,31 @@ class AcpClient(
                 onEvent(AcpEvent.Usage(used, size,
                     cost?.get("amount")?.jsonPrimitive?.doubleOrNull ?: 0.0,
                     cost?.get("currency")?.jsonPrimitive?.contentOrNull ?: ""))
+            }
+            "tool_call_update" -> {
+                val id = update["toolCallId"]?.jsonPrimitive?.contentOrNull ?: return
+                val status = update["status"]?.jsonPrimitive?.contentOrNull ?: ""
+                // content: [{type:"content", content:{type:"text", text:...}}, ...]
+                val output = (update["content"] as? JsonArray).orEmpty().mapNotNull { el ->
+                    ((el as? JsonObject)?.get("content") as? JsonObject)
+                        ?.get("text")?.jsonPrimitive?.contentOrNull
+                }.joinToString("\n")
+                onEvent(AcpEvent.ToolCallUpdate(id, status, output))
+            }
+            "session_info_update" -> {
+                val sid = params["sessionId"]?.jsonPrimitive?.contentOrNull ?: return
+                onEvent(AcpEvent.SessionInfoChanged(
+                    sid,
+                    update["title"]?.jsonPrimitive?.contentOrNull,
+                    update["updatedAt"]?.jsonPrimitive?.contentOrNull))
+            }
+            "config_option_update" -> {
+                val opts = parseConfig(update)
+                if (opts.isNotEmpty()) onEvent(AcpEvent.Config(opts))
+            }
+            "current_mode_update" -> {
+                update["currentModeId"]?.jsonPrimitive?.contentOrNull
+                    ?.let { onEvent(AcpEvent.ModeChanged(it)) }
             }
             "available_commands_update" -> {
                 val names = (update["availableCommands"] as? JsonArray).orEmpty().mapNotNull {

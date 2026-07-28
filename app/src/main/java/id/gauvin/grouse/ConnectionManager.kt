@@ -26,6 +26,12 @@ data class ChatMessage(
     // Extra detail for a "tool" message: the tool's rawInput (command/args) — Desktop shows this,
     // Grouse was discarding it and only keeping the title. Unused by other roles.
     val detail: String = "",
+    // Tool-role only: goose's toolCallId (correlates tool_call_update notifications),
+    // lifecycle status (in_progress/completed/failed), and the tool's OUTPUT text when the
+    // completion update carried content. Live sessions only — replays don't reconstruct these.
+    val toolCallId: String = "",
+    val status: String = "",
+    val output: String = "",
     val id: Long = chatMessageSeq.getAndIncrement(),
 )
 
@@ -327,12 +333,29 @@ class ConnectionManager private constructor(context: Context) {
 
     fun listSessions() = client?.listSessions()
 
-    /** Archive a session -- goose has NO session/delete (verified: "Method not found"), so archive
-     *  is the strongest available. History stays on disk; it just leaves the list. */
+    /** Archive a session: history stays on disk, it just leaves the list. The soft option --
+     *  deleteSession is the permanent one (goose ≥1.44; the old "no delete" note is obsolete). */
     fun archiveSession(sessionId: String) {
         client?.archiveSession(sessionId)
         sessions.value = sessions.value.filterNot { it.sessionId == sessionId }   // optimistic
         if (sessionId == store.assistantSessionId) store.assistantSessionId = null
+    }
+
+    /** Delete a session outright (history gone server-side). Archive remains the soft option. */
+    fun deleteSession(sessionId: String) {
+        client?.deleteSession(sessionId)
+        sessions.value = sessions.value.filterNot { it.sessionId == sessionId }   // optimistic
+        if (sessionId == store.assistantSessionId) store.assistantSessionId = null
+    }
+
+    /** Move a chat into a project (or back to /state): the sanctioned working_dir rewrite.
+     *  Also the in-app repair for sessions stranded by a renamed project directory. */
+    fun moveSession(sessionId: String, cwd: String) {
+        client?.updateWorkingDir(sessionId, cwd)
+        sessions.value = sessions.value.map {          // optimistic
+            if (it.sessionId == sessionId) it.copy(cwd = cwd) else it
+        }
+        store.rememberSessionCwds(listOf(sessionId to cwd))
     }
 
     /** Set a session's title (goose _goose/unstable/session/rename; the reply re-lists). */
@@ -737,15 +760,15 @@ class ConnectionManager private constructor(context: Context) {
         // start before any session/list round-trip has happened. session/load's cwd param SILENTLY
         // REWRITES the session's working_dir if wrong, so this must be right, not just "close enough".
         // Resolution order for a resume: live cache -> assistant hard rule (that thread lives at
-        // /state BY CONSTRUCTION, never guess it) -> the per-session cwd map -> /state. NEVER a
-        // "whatever was last used" global: session/load rewrites working_dir when handed the
-        // wrong cwd, and the global guess re-homed the assistant thread into a project once.
-        val resolvedCwd = cwd ?: if (resume == null) "/state" else
+        // /state BY CONSTRUCTION, never guess it) -> the per-session cwd map -> ASK THE SERVER
+        // (null: the client queries _goose/unstable/session/info before session/load). NEVER a
+        // guess: session/load rewrites working_dir when handed the wrong cwd, and a global
+        // last-used guess re-homed the assistant thread into a project once.
+        val resolvedCwd: String? = cwd ?: if (resume == null) "/state" else
             sessions.value.firstOrNull { it.sessionId == resume }?.cwd?.takeIf { it.isNotBlank() }
                 ?: (if (resume == store.assistantSessionId) "/state" else null)
                 ?: store.sessionCwd(resume)
-                ?: "/state"
-        pendingOpenCwd = resolvedCwd
+        pendingOpenCwd = resolvedCwd ?: ""
         // Tag this client's events with a generation; a just-closed client still fires
         // onClosed/onFailure asynchronously and its stale "disconnected" must not flip us offline
         // after the new client is already live.
@@ -753,8 +776,9 @@ class ConnectionManager private constructor(context: Context) {
         client = AcpClient(url, store.secretKey) { ev -> main.post { if (gen == clientGen) onEvent(ev) } }.also {
             it.desiredOptions = if (resume == null) saved else emptyMap()
             it.resumeSessionId = resume
-            it.resumeCwd = resolvedCwd
-            it.desiredCwd = resolvedCwd
+            it.resumeCwd = resolvedCwd ?: "/state"
+            it.resumeCwdKnown = resolvedCwd != null
+            it.desiredCwd = resolvedCwd ?: "/state"
             it.connect()
         }
     }
@@ -775,7 +799,35 @@ class ConnectionManager private constructor(context: Context) {
                 compacting.value = false   // safety net: a dropped/garbled status must never stick
                 if (voiceReplyPending) { voiceReplyPending = false; restoreModel() }
             }
-            is AcpEvent.ToolCall -> { messages.add(ChatMessage("tool", ev.title, detail = ev.detail)); streamingRole = null }
+            is AcpEvent.ToolCall -> {
+                messages.add(ChatMessage("tool", ev.title, detail = ev.detail,
+                    toolCallId = ev.toolCallId, status = "in_progress"))
+                streamingRole = null
+            }
+            is AcpEvent.ToolCallUpdate -> {
+                if (ev.toolCallId.isNotBlank()) {
+                    val i = messages.indexOfLast { it.role == "tool" && it.toolCallId == ev.toolCallId }
+                    if (i >= 0) messages[i] = messages[i].copy(
+                        status = ev.status.ifBlank { messages[i].status },
+                        output = if (ev.output.isNotBlank()) ev.output else messages[i].output,
+                    )
+                }
+            }
+            is AcpEvent.SessionInfoChanged -> {
+                // Live title/updatedAt sync (auto-naming after the first turn, renames from any
+                // client) — previously only visible after a full session re-list.
+                sessions.value = sessions.value.map {
+                    if (it.sessionId == ev.sessionId) it.copy(
+                        title = ev.title ?: it.title,
+                        updatedAt = ev.updatedAt ?: it.updatedAt,
+                    ) else it
+                }
+            }
+            is AcpEvent.ModeChanged -> {
+                config.value = config.value.map {
+                    if (it.id == "mode") it.copy(currentValue = ev.modeId) else it
+                }
+            }
             is AcpEvent.Usage -> usage.value = ev
             is AcpEvent.CompactionStatus -> {
                 // Substring match on goose's own status copy — see agents/agent.rs (aaif-goose/goose,
@@ -867,7 +919,10 @@ class ConnectionManager private constructor(context: Context) {
                 live = true; connecting = false; online.value = true
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
                 // Ready itself carries no cwd -- record what this open resolved (see open()).
-                store.rememberSessionCwds(listOf(ev.sessionId to pendingOpenCwd))
+                // Blank = the server was asked via session/info; the next session/list merge
+                // records the authoritative value instead.
+                if (pendingOpenCwd.isNotBlank())
+                    store.rememberSessionCwds(listOf(ev.sessionId to pendingOpenCwd))
                 if (droppedMidTurn) {
                     // The turn we lost is still finishing server-side; poll it back into view.
                     droppedMidTurn = false
