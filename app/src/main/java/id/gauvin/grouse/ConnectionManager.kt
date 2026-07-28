@@ -316,6 +316,16 @@ class ConnectionManager private constructor(context: Context) {
         if (sessionId == store.assistantSessionId) store.assistantSessionId = null
     }
 
+    /** Set a session's title (goose _goose/unstable/session/rename; the reply re-lists). */
+    fun renameSession(sessionId: String, title: String) {
+        val t = title.trim()
+        if (t.isEmpty()) return
+        client?.renameSession(sessionId, t)
+        sessions.value = sessions.value.map {          // optimistic
+            if (it.sessionId == sessionId) it.copy(title = t) else it
+        }
+    }
+
     fun openSession(sessionId: String, knownKind: SessionKind? = null) {
         // Cancel any deferred "open the assistant thread" -- the user has since picked a specific
         // session and that choice wins. Without this, a pendingOpenAssistant set while offline (its

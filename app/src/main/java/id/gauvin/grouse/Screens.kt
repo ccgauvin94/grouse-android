@@ -650,19 +650,52 @@ private fun prettyOption(raw: String) = when (raw) {
 
 // ---- Sessions ---------------------------------------------------------------
 
-/** goose has no session tags — projects and free chats are ONE session list grouped by cwd
- *  (ConnectionManager.projectOf unifies /workspace with the Desktop cwd-shim spellings, which
- *  goose stores verbatim). The project list is the union of names seen in session cwds and the
- *  typed-recents store, so a just-created project with no sessions yet still shows. Peer drawer
- *  destination, so navigation is explicit (navigate to "chat"), not popBackStack — this screen
- *  may be reached directly from the drawer without a "chat" entry below it on the back stack. */
-@OptIn(ExperimentalMaterial3Api::class)
+/** The drawer's chats area: projects (collapsible groups of sessions, grouped by cwd —
+ *  ConnectionManager.projectOf unifies /workspace with the Desktop cwd-shim spellings) on top,
+ *  free chats below. The project list is the union of names seen in session cwds and the
+ *  typed-recents store, so a just-created project with no sessions yet still shows.
+ *  Tap opens a session; long-press offers Rename / Archive. Lives INSIDE ModalDrawerSheet —
+ *  everything here is the app's main menu, not a separate screen. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun SessionListScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Unit) {
-    LaunchedEffect(Unit) { cm.listSessions() }
+fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit) {
     var showNewProject by remember { mutableStateOf(false) }
+    var menuFor by remember { mutableStateOf<SessionInfo?>(null) }
+    var renameFor by remember { mutableStateOf<SessionInfo?>(null) }
     var confirmArchive by remember { mutableStateOf<SessionInfo?>(null) }
     var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
+
+    menuFor?.let { s ->
+        AlertDialog(
+            onDismissRequest = { menuFor = null },
+            title = { Text(s.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column {
+                    TextButton(onClick = { renameFor = s; menuFor = null }) { Text("Rename…") }
+                    TextButton(onClick = { confirmArchive = s; menuFor = null }) { Text("Archive…") }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { menuFor = null }) { Text("Cancel") } },
+        )
+    }
+    renameFor?.let { s ->
+        var newName by remember(s.sessionId) { mutableStateOf(s.title) }
+        AlertDialog(
+            onDismissRequest = { renameFor = null },
+            title = { Text("Rename chat") },
+            text = {
+                OutlinedTextField(newName, { newName = it }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth())
+            },
+            confirmButton = {
+                TextButton(enabled = newName.isNotBlank(), onClick = {
+                    cm.renameSession(s.sessionId, newName); renameFor = null
+                }) { Text("Rename") }
+            },
+            dismissButton = { TextButton(onClick = { renameFor = null }) { Text("Cancel") } },
+        )
+    }
     confirmArchive?.let { s ->
         AlertDialog(
             onDismissRequest = { confirmArchive = null },
@@ -675,150 +708,90 @@ fun SessionListScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: (
             dismissButton = { TextButton(onClick = { confirmArchive = null }) { Text("Cancel") } },
         )
     }
-    fun goToChat() = nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
     if (showNewProject) NewProjectDialog(
         cm = cm,
-        onCreated = { name -> showNewProject = false; cm.newCodeSession(name); goToChat() },
+        onCreated = { name -> showNewProject = false; cm.newCodeSession(name); onOpen() },
         onDismiss = { showNewProject = false },
     )
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text("Chats") },
-            navigationIcon = {
-                IconButton(onClick = onOpenDrawer) { Icon(Icons.Filled.Menu, contentDescription = "menu") }
-            }
-        )
-    }) { pad ->
-        val all = cm.sessions.value
-        val byProject = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CODE }
-            .groupBy { ConnectionManager.projectOf(it.cwd) ?: "?" }
-        val freeChats = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CHAT }
-        // Union: sessions win for grouping, but recents keep sessionless projects visible
-        // (a project created moments ago has no sessions yet — it must not vanish).
-        val projects = (byProject.keys + cm.store.recentWorkspaceProjects()).distinct().sortedBy { it.lowercase() }
-        LazyColumn(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
-            item {
-                Text("PROJECTS", style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(start = 6.dp, top = 10.dp, bottom = 4.dp))
-            }
-            item {
-                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .clickable { showNewProject = true }) {
-                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(10.dp))
-                        Text("New project", style = MaterialTheme.typography.titleMedium)
-                    }
-                }
-            }
-            projects.forEach { p ->
-                val inProject = byProject[p].orEmpty()
-                val open = p in expanded
-                item(key = "project:$p") {
-                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                        .clickable { expanded = if (open) expanded - p else expanded + p }) {
-                        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Folder, contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(10.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(p, style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (inProject.isNotEmpty()) Text(
-                                    "${inProject.size} chat${if (inProject.size == 1) "" else "s"}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline)
-                            }
-                            Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                                contentDescription = null, tint = MaterialTheme.colorScheme.outline)
-                        }
-                    }
-                }
-                if (open) {
-                    item(key = "project:$p:new") {
-                        Row(Modifier.fillMaxWidth().padding(start = 24.dp)
-                            .clickable { cm.newCodeSession(p); goToChat() }
-                            .padding(vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Add, contentDescription = null,
-                                modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
-                            Spacer(Modifier.width(8.dp))
-                            Text("New chat in $p", style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.outline)
-                        }
-                    }
-                    items(inProject, key = { "s:" + it.sessionId }) { s ->
-                        Box(Modifier.padding(start = 24.dp)) {
-                            SessionRow(s, showProject = false,
-                                onOpen = { cm.openSession(s.sessionId); goToChat() },
-                                onArchive = { confirmArchive = s })
-                        }
-                    }
-                }
-            }
-            item {
-                Text("CHATS", style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(start = 6.dp, top = 18.dp, bottom = 4.dp))
-            }
-            item {
-                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .clickable { cm.newSession(); goToChat() }) {
-                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(10.dp))
-                        Text("New chat", style = MaterialTheme.typography.titleMedium)
-                    }
-                }
-            }
-            if (freeChats.isEmpty()) item {
-                Column(Modifier.fillMaxWidth().padding(vertical = 40.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Filled.History, contentDescription = null,
-                        modifier = Modifier.size(44.dp), tint = MaterialTheme.colorScheme.outline)
-                    Spacer(Modifier.height(8.dp))
-                    Text("No past chats yet",
-                        style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.outline)
-                    Text("Start one above — it'll show here to resume later.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
-                        textAlign = TextAlign.Center)
-                }
-            }
-            items(freeChats, key = { "s:" + it.sessionId }) { s ->
-                SessionRow(s, showProject = false,
-                    onOpen = { cm.openSession(s.sessionId); goToChat() },
-                    onArchive = { confirmArchive = s })
+
+    val all = cm.sessions.value
+    val byProject = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CODE }
+        .groupBy { ConnectionManager.projectOf(it.cwd) ?: "?" }
+    val freeChats = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CHAT }
+    val projects = (byProject.keys + cm.store.recentWorkspaceProjects()).distinct().sortedBy { it.lowercase() }
+
+    @Composable
+    fun sessionRow(s: SessionInfo, indent: Boolean) {
+        Row(Modifier.fillMaxWidth()
+            .combinedClickable(onClick = { cm.openSession(s.sessionId); onOpen() },
+                onLongClick = { menuFor = s })
+            .padding(start = if (indent) 34.dp else 10.dp, end = 8.dp)
+            .padding(vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(listOf("${s.messageCount} msgs", relativeTime(s.updatedAt))
+                    .filter { it.isNotBlank() }.joinToString("  ·  "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline, maxLines = 1)
             }
         }
     }
-}
 
-/** One session row: title, meta line, archive control. Extracted so project groups and free
- *  chats render identically. */
-@Composable
-private fun SessionRow(s: SessionInfo, showProject: Boolean, onOpen: () -> Unit, onArchive: () -> Unit) {
-    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onOpen() }) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Spacer(Modifier.height(2.dp))
-                val project = if (showProject) ConnectionManager.projectOf(s.cwd) else null
-                val bits = listOfNotNull(project, "${s.messageCount} msgs", s.model, relativeTime(s.updatedAt))
-                    .filter { it.isNotBlank() }
-                Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            // goose exposes no session/delete (it answers "Method not found"), so this
-            // archives: the session leaves the list, its history stays on disk.
-            IconButton(onClick = onArchive) {
-                Icon(Icons.Filled.Close, contentDescription = "archive chat",
-                    tint = MaterialTheme.colorScheme.outline)
-            }
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
-                tint = MaterialTheme.colorScheme.outline)
+    @Composable
+    fun addRow(label: String, indent: Boolean, onClick: () -> Unit) {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onClick)
+            .padding(start = if (indent) 34.dp else 10.dp)
+            .padding(vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Add, contentDescription = null,
+                modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.width(8.dp))
+            Text(label, style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.outline)
         }
+    }
+
+    LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
+        item {
+            Text("PROJECTS", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
+        }
+        projects.forEach { p ->
+            val inProject = byProject[p].orEmpty()
+            val open = p in expanded
+            item(key = "project:$p") {
+                Row(Modifier.fillMaxWidth()
+                    .clickable { expanded = if (open) expanded - p else expanded + p }
+                    .padding(horizontal = 10.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Folder, contentDescription = null,
+                        modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(10.dp))
+                    Text(p, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (inProject.isNotEmpty()) Text("${inProject.size}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline)
+                    Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                        contentDescription = null, tint = MaterialTheme.colorScheme.outline)
+                }
+            }
+            if (open) {
+                item(key = "project:$p:new") { addRow("New chat", indent = true) { cm.newCodeSession(p); onOpen() } }
+                items(inProject, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = true) }
+            }
+        }
+        item { addRow("New project", indent = false) { showNewProject = true } }
+        item {
+            Text("CHATS", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
+        }
+        item { addRow("New chat", indent = false) { cm.newSession(); onOpen() } }
+        items(freeChats, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = false) }
     }
 }
 

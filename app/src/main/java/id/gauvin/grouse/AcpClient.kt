@@ -451,8 +451,8 @@ class AcpClient(
                     .mapNotNull { it.jsonPrimitive.contentOrNull }
                 onEvent(AcpEvent.SupportedModels(providerId, models))
             }
-            // Rename returns empty; the caller re-lists sessions to see the new title.
-            "_goose/unstable/session/rename" -> {}
+            // Rename returns empty; re-list so every consumer sees the new title.
+            "_goose/unstable/session/rename" -> listSessions()
             "_goose/unstable/session/archive" -> listSessions()
             "session/set_config_option" -> onEvent(AcpEvent.Config(parseConfig(result)))
             "session/set_mode" -> {}
@@ -497,6 +497,10 @@ class AcpClient(
             // clutter the list. (Belt-and-suspenders: the proactive job now runs --no-session anyway.)
             if (title.startsWith("Scheduled job:")) return@mapNotNull null
             val meta = o["_meta"] as? JsonObject
+            // goose's archive only stamps archivedAt — session/list has NO archived filter
+            // (verified in source: list_sessions_paged never checks it), so every client must
+            // filter for itself or archived sessions pop right back on the next refresh.
+            if (meta?.get("archivedAt") != null) return@mapNotNull null
             SessionInfo(
                 sessionId = sid,
                 title = title,

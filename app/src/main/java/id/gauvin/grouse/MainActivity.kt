@@ -12,7 +12,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.core.content.IntentCompat
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
@@ -181,6 +180,9 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
         gesturesEnabled = cm.configured && route != "connect",
         drawerContent = {
             ModalDrawerSheet {
+                // Re-fetch the session list whenever the menu opens — it IS the chats list now,
+                // so it must reflect renames/archives/new sessions from any client.
+                LaunchedEffect(drawerState.isOpen) { if (drawerState.isOpen) cm.listSessions() }
                 Column(Modifier.fillMaxHeight().padding(vertical = 12.dp)) {
                     NavigationDrawerItem(
                         label = { Text("Assistant") },
@@ -192,14 +194,16 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
                         },
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
-                    NavigationDrawerItem(
-                        label = { Text("Chats") },
-                        icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null) },
-                        selected = route == "sessions_chat" || (route == "chat" && !cm.onAssistant),
-                        onClick = { closeDrawer(); nav.navigate("sessions_chat") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
-                    Spacer(Modifier.weight(1f))
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    // The whole chats world lives in the menu: projects (collapsible) then free
+                    // chats. Tap opens; long-press renames/archives. Scrolls independently so
+                    // Settings stays pinned at the bottom.
+                    Box(Modifier.weight(1f)) {
+                        DrawerChats(cm, onOpen = {
+                            closeDrawer()
+                            nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+                        })
+                    }
                     HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                     NavigationDrawerItem(
                         label = { Text("Settings") },
@@ -217,7 +221,6 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
                 ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
             }
             composable("chat") { ChatScreen(cm, onOpenDrawer = ::openDrawer) }
-            composable("sessions_chat") { SessionListScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("settings") { SettingsScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("extensions") { ExtensionsScreen(cm, nav) }
         }
