@@ -248,6 +248,12 @@ class ConnectionManager private constructor(context: Context) {
     // True between a ReplayStart wiping `messages` and the following Ready, which re-adds the
     // bubbles of any still-queued prompts (they aren't in the server history the replay rebuilt).
     private var replayWiped = false
+    // Replay scroll-pinning: the chat list is keyed, so each replayed bubble inserted at index 0
+    // can drift the key-anchored viewport off the exact bottom, after which the atBottom-gated
+    // autoscroll stops and history lands scrolled mid-list. While a replay is rebuilding, the UI
+    // pins unconditionally; the tick fires one final snap when the rebuild completes.
+    val replayActive = mutableStateOf(false)
+    val replayDoneTick = mutableStateOf(0)
     // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
     private var pendingOpenCwd: String = "/state"
@@ -293,11 +299,18 @@ class ConnectionManager private constructor(context: Context) {
     /** Connect using the already-saved host/port/key (post-unlock auto-connect). */
     fun connectSaved() { if (store.hasKey()) open(resume = null) }
 
-    /** Startup: land directly on the privileged Assistant thread (its home). Uses the cached id to
-     *  resume it with no churn; on first run (no cache) connects fresh and opens it once the list
-     *  arrives. */
+    // connectHome() re-enters composition every time the lock screen (or any recreation) swaps
+    // AppRoot back in; only the FIRST call per process should land on the Assistant. Later calls
+    // resume whatever session was open instead.
+    private var homeOpened = false
+
+    /** Fresh start: land directly on the privileged Assistant thread (its home). Uses the cached
+     *  id to resume it with no churn; on first run (no cache) connects fresh and opens it once the
+     *  list arrives. After the first call this only re-establishes the connection. */
     fun connectHome() {
         if (!store.hasKey()) return
+        if (homeOpened) { ensureConnected(); return }
+        homeOpened = true
         // Master switch off: connect to the last regular session instead of the Assistant.
         if (!store.assistantEnabled) { ensureConnected(); return }
         val a = store.assistantSessionId
@@ -854,6 +867,7 @@ class ConnectionManager private constructor(context: Context) {
             turnInFlight = false
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         replayWiped = false
+        replayActive.value = false
         val url = "wss://${store.host}:${store.port}/acp"
         status.value = if (resume == null) "connecting to $url" else "loading session…"
         val saved = store.savedOptions(optionIds)
@@ -982,6 +996,7 @@ class ConnectionManager private constructor(context: Context) {
                 messages.clear()
                 streamingRole = null
                 replayWiped = true
+                replayActive.value = true
             }
             is AcpEvent.AgentChunk -> {
                 // Replay boundary: a NEW messageId means a new source message — break the
@@ -1071,6 +1086,10 @@ class ConnectionManager private constructor(context: Context) {
                 if (replayWiped) {
                     replayWiped = false
                     pendingSends.forEach { messages.add(ChatMessage("user", it.text, it.images)) }
+                }
+                if (replayActive.value) {
+                    replayActive.value = false
+                    replayDoneTick.value++
                 }
                 // Send ONE queued prompt (bubbles were already added when queued); TurnDone drains
                 // the rest. This used to `while`-loop the whole deque, firing every queued prompt

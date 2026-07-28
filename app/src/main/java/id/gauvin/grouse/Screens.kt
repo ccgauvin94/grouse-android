@@ -242,11 +242,16 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // restarting a scroll animation on every token.
     LaunchedEffect(listState) {
         snapshotFlow { cm.messages.size to (cm.messages.lastOrNull()?.text?.length ?: 0) }
-            .collect { if (atBottom) listState.scrollToItem(0) }
+            // During a replay rebuild, pin unconditionally: keyed items inserted at index 0 can
+            // drift the anchor off the exact bottom, which would flip atBottom false and stop
+            // the autoscroll halfway up the restored history.
+            .collect { if (atBottom || cm.replayActive.value) listState.scrollToItem(0) }
     }
     // Opening/switching a session: snap to the bottom (index 0). reverseLayout keeps it pinned
     // as history replays in.
     LaunchedEffect(cm.currentSession.value) { listState.scrollToItem(0) }
+    // One final snap when a replay finishes, in case the last chunks landed between collects.
+    LaunchedEffect(cm.replayDoneTick.value) { listState.scrollToItem(0) }
     // Speak the reply aloud when a turn finishes (busy true→false), if enabled.
     var wasBusy by remember { mutableStateOf(false) }
     LaunchedEffect(cm.busy.value) {

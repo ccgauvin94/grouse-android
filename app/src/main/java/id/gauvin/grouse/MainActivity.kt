@@ -146,7 +146,9 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
     }
 
     val nav = rememberNavController()
-    LaunchedEffect(Unit) { cm.connectHome() }   // auto-connect + land on the Assistant thread
+    // Fresh start lands on the Assistant thread; re-entry after the lock screen (or any
+    // recreation) only reconnects to whatever session was already open.
+    LaunchedEffect(Unit) { cm.connectHome() }
     // "New chat" from a shortcut/tile: start fresh and land on the chat screen.
     LaunchedEffect(cm.pendingNewChat.value) {
         if (cm.pendingNewChat.value && cm.configured) {
