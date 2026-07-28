@@ -4,6 +4,9 @@ import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Shapes
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
@@ -38,5 +41,18 @@ fun GooseTheme(
         window.statusBarColor = scheme.surface.toArgb()
     }
 
-    MaterialTheme(colorScheme = scheme, typography = GooseTypography, content = content)
+    MaterialTheme(
+        colorScheme = scheme,
+        typography = GooseTypography,
+        // Rounder-than-default shape scale so every M3 component (cards, dialogs, text
+        // fields, sheets) reads soft/Material-You rather than squared-off holo.
+        shapes = Shapes(
+            extraSmall = RoundedCornerShape(10.dp),
+            small = RoundedCornerShape(14.dp),
+            medium = RoundedCornerShape(20.dp),
+            large = RoundedCornerShape(26.dp),
+            extraLarge = RoundedCornerShape(32.dp),
+        ),
+        content = content,
+    )
 }

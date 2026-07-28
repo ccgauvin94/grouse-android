@@ -501,35 +501,50 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                     modifier = Modifier.padding(start = 4.dp, top = 2.dp))
             }
 
-            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = {
-                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                }) { Icon(Icons.Filled.Image, contentDescription = "attach image") }
-                IconButton(onClick = {
-                    if (listening) stopListening()
-                    else if (androidx.core.content.ContextCompat.checkSelfPermission(
-                            ctx, android.Manifest.permission.RECORD_AUDIO) ==
-                            android.content.pm.PackageManager.PERMISSION_GRANTED) startListening()
-                    else micPerm.launch(android.Manifest.permission.RECORD_AUDIO)
-                }) {
-                    Icon(if (listening) Icons.Filled.MicOff else Icons.Filled.Mic,
-                        contentDescription = if (listening) "stop listening" else "voice input",
-                        tint = if (listening) MaterialTheme.colorScheme.error else LocalContentColor.current)
-                }
-                OutlinedTextField(input, { input = it }, modifier = Modifier.weight(1f),
-                    placeholder = { Text("message goose…") })
-                Spacer(Modifier.width(6.dp))
-                // Stop and Send coexist while a turn runs. Send used to be REPLACED by Stop, which
-                // made the send queue in ConnectionManager unreachable -- it was implemented and
-                // working, but nothing could put anything into it.
-                if (cm.busy.value) {
-                    FilledIconButton(onClick = { cm.cancel() }) {
-                        Icon(Icons.Filled.Stop, contentDescription = "stop")
+            // Two-line composer: the field gets the FULL width (it was squeezed to a sliver
+            // between four buttons), actions sit on their own row beneath. Chat-style pill
+            // field: filled, rounded, no underline, grows to a few lines as you type.
+            Column(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp)) {
+                TextField(
+                    input, { input = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Message goose…") },
+                    shape = RoundedCornerShape(24.dp),
+                    maxLines = 6,
+                    colors = TextFieldDefaults.colors(
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        disabledIndicatorColor = Color.Transparent,
+                    ),
+                )
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = {
+                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    }) { Icon(Icons.Filled.Image, contentDescription = "attach image") }
+                    IconButton(onClick = {
+                        if (listening) stopListening()
+                        else if (androidx.core.content.ContextCompat.checkSelfPermission(
+                                ctx, android.Manifest.permission.RECORD_AUDIO) ==
+                                android.content.pm.PackageManager.PERMISSION_GRANTED) startListening()
+                        else micPerm.launch(android.Manifest.permission.RECORD_AUDIO)
+                    }) {
+                        Icon(if (listening) Icons.Filled.MicOff else Icons.Filled.Mic,
+                            contentDescription = if (listening) "stop listening" else "voice input",
+                            tint = if (listening) MaterialTheme.colorScheme.error else LocalContentColor.current)
                     }
-                    Spacer(Modifier.width(6.dp))
-                }
-                FilledIconButton(onClick = { doSend() }) {
-                    Icon(Icons.Filled.Send, contentDescription = if (cm.busy.value) "queue" else "send")
+                    Spacer(Modifier.weight(1f))
+                    // Stop and Send coexist while a turn runs. Send used to be REPLACED by Stop,
+                    // which made the send queue in ConnectionManager unreachable -- it was
+                    // implemented and working, but nothing could put anything into it.
+                    if (cm.busy.value) {
+                        FilledIconButton(onClick = { cm.cancel() }) {
+                            Icon(Icons.Filled.Stop, contentDescription = "stop")
+                        }
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    FilledIconButton(onClick = { doSend() }) {
+                        Icon(Icons.Filled.Send, contentDescription = if (cm.busy.value) "queue" else "send")
+                    }
                 }
             }
         }
