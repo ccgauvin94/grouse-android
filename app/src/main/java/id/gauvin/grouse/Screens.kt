@@ -264,6 +264,12 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         onDispose { owner.lifecycle.removeObserver(obs) }
     }
 
+    cm.elicitations.firstOrNull()?.let { e ->
+        ElicitationSheet(e,
+            onAccept = { values -> cm.answerElicitation(e, values) },
+            onDecline = { cm.answerElicitation(e, null) },
+            onCancel = { cm.answerElicitation(e, null, cancelled = true) })
+    }
     cm.permissions.firstOrNull()?.let { req ->
         PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
     }
@@ -585,6 +591,91 @@ fun PermissionSheet(req: AcpEvent.Permission, onChoose: (String?) -> Unit) {
                     Button(onClick = { onChoose(opt.optionId) },
                         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { Text(prettyOption(opt.label)) }
                 }
+            }
+        }
+    }
+}
+
+/** Form elicitation (MCP/ACP): a tool asked for structured input. Renders the requested
+ *  schema as native controls — switch for booleans, choice chips for enums, keyboard-typed
+ *  fields otherwise — and answers accept/decline/cancel. Dismissing the sheet cancels. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ElicitationSheet(
+    e: AcpEvent.Elicitation,
+    onAccept: (Map<String, kotlinx.serialization.json.JsonPrimitive>) -> Unit,
+    onDecline: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val text = remember(e.requestKey) { mutableStateMapOf<String, String>() }
+    val bools = remember(e.requestKey) { mutableStateMapOf<String, Boolean>() }
+    ModalBottomSheet(onDismissRequest = onCancel) {
+        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)
+            .verticalScroll(rememberScrollState())) {
+            Text(e.title.ifBlank { "Input requested" }, style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(4.dp))
+            Text(e.message, style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            e.fields.forEach { f ->
+                Spacer(Modifier.height(14.dp))
+                when {
+                    f.type == "boolean" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(checked = bools[f.name] ?: false,
+                            onCheckedChange = { bools[f.name] = it })
+                        Spacer(Modifier.width(10.dp))
+                        Text(f.title, style = MaterialTheme.typography.bodyLarge)
+                    }
+                    f.options.isNotEmpty() -> Column {
+                        Text(f.title + if (f.required) " *" else "",
+                            style = MaterialTheme.typography.labelLarge)
+                        Spacer(Modifier.height(6.dp))
+                        Row(Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            f.options.forEach { c ->
+                                FilterChip(selected = text[f.name] == c.value,
+                                    onClick = { text[f.name] = c.value },
+                                    label = { Text(c.label) })
+                            }
+                        }
+                    }
+                    else -> OutlinedTextField(
+                        text[f.name] ?: "", { text[f.name] = it }, singleLine = true,
+                        label = { Text(f.title + if (f.required) " *" else "") },
+                        supportingText = if (f.description.isNotBlank())
+                            ({ Text(f.description) }) else null,
+                        keyboardOptions = if (f.type == "number" || f.type == "integer")
+                            KeyboardOptions(keyboardType = KeyboardType.Number)
+                        else KeyboardOptions.Default,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+            val complete = e.fields.filter { it.required }.all { f ->
+                if (f.type == "boolean") true else !text[f.name].isNullOrBlank()
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onDecline) { Text("Decline") }
+                Spacer(Modifier.width(8.dp))
+                Button(enabled = complete, onClick = {
+                    val values = buildMap {
+                        e.fields.forEach { f ->
+                            when {
+                                f.type == "boolean" ->
+                                    put(f.name, kotlinx.serialization.json.JsonPrimitive(bools[f.name] ?: false))
+                                f.type == "number" || f.type == "integer" ->
+                                    text[f.name]?.toDoubleOrNull()?.let { n ->
+                                        if (f.type == "integer")
+                                            put(f.name, kotlinx.serialization.json.JsonPrimitive(n.toLong()))
+                                        else put(f.name, kotlinx.serialization.json.JsonPrimitive(n))
+                                    }
+                                else -> text[f.name]?.takeIf { it.isNotBlank() }
+                                    ?.let { put(f.name, kotlinx.serialization.json.JsonPrimitive(it)) }
+                            }
+                        }
+                    }
+                    onAccept(values)
+                }) { Text("Submit") }
             }
         }
     }

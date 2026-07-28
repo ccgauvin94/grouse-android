@@ -108,6 +108,20 @@ sealed interface AcpEvent {
     /** Reply to a DIRECT tool invocation (_goose/unstable/tools/call — no model turn involved).
      *  `text` is the concatenated text content blocks. */
     data class DirectToolResult(val text: String, val isError: Boolean) : AcpEvent
+    /** One field of a form elicitation. `type` is string/number/integer/boolean; a non-empty
+     *  `options` list means single-select (rendered as choices instead of free text). */
+    data class ElicitField(
+        val name: String, val type: String, val title: String, val description: String,
+        val options: List<Choice>, val required: Boolean,
+    )
+    /** A tool/extension is requesting structured input (MCP elicitation, ACP form mode).
+     *  Answer with respondElicitation(requestKey, ...): accept with values, decline, or cancel.
+     *  Previously these got the generic empty-result reply, silently no-op'ing any tool that
+     *  asked — now they render as a real form. */
+    data class Elicitation(
+        val requestKey: String, val message: String, val title: String,
+        val fields: List<ElicitField>,
+    ) : AcpEvent
 }
 
 /**
@@ -134,6 +148,9 @@ class AcpClient(
     // Outstanding tool-approval requests: toolCallId -> the JSON-RPC id we must answer.
     // Inserted on the WS thread, removed on the main thread — must be concurrent.
     private val pendingPermissions = ConcurrentHashMap<String, JsonElement>()
+    // Outstanding elicitation requests: requestKey -> the JSON-RPC id to answer.
+    private val pendingElicitations = ConcurrentHashMap<String, JsonElement>()
+    private val elicitSeq = AtomicInteger(1)
 
     /** Config values to re-apply once a session opens (persisted picks). id -> value. */
     var desiredOptions: Map<String, String> = emptyMap()
@@ -339,6 +356,22 @@ class AcpClient(
         }.toString())
     }
 
+    /** Answer a pending elicitation. accept=true sends `values`; accept=false declines;
+     *  values ignored when declining. Cancel (sheet dismissed) is decline=false+cancel. */
+    fun respondElicitation(requestKey: String, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
+        val id = pendingElicitations.remove(requestKey) ?: return
+        respond(id, buildJsonObject {
+            when {
+                cancelled -> put("action", "cancel")
+                values == null -> put("action", "decline")
+                else -> {
+                    put("action", "accept")
+                    putJsonObject("content") { values.forEach { (k, v) -> put(k, v) } }
+                }
+            }
+        })
+    }
+
     /** Answer a pending tool-approval request; null optionId = cancelled/deny. */
     fun respondPermission(toolCallId: String, optionId: String?) {
         val id = pendingPermissions.remove(toolCallId) ?: return
@@ -372,6 +405,10 @@ class AcpClient(
                 put("protocolVersion", 1)
                 putJsonObject("clientCapabilities") {
                     putJsonObject("fs") { put("readTextFile", false); put("writeTextFile", false) }
+                    // Form elicitation: tools can request structured input and we render a real
+                    // form (see AcpEvent.Elicitation). Without this goose cancels elicitations
+                    // server-side ("client does not support form elicitation").
+                    putJsonObject("elicitation") { putJsonObject("form") {} }
                     // Opt into goose's custom notifications (currently: compaction status lines).
                     // Purely additive — the standard usage_update still always fires regardless,
                     // so this can't regress anything already working.
@@ -766,6 +803,44 @@ class AcpClient(
             }
             pendingPermissions[toolCallId] = id
             onEvent(AcpEvent.Permission(toolCallId, title, detail, opts))
+        } else if (method == "elicitation/create") {
+            val mode = params?.get("mode")?.jsonPrimitive?.contentOrNull
+            val schema = params?.get("requestedSchema") as? JsonObject
+            if (mode != "form" || schema == null) {
+                respond(id, buildJsonObject { put("action", "cancel") }); return
+            }
+            val required = (schema["required"] as? JsonArray).orEmpty()
+                .mapNotNull { it.jsonPrimitive.contentOrNull }.toSet()
+            val fields = (schema["properties"] as? JsonObject).orEmpty().entries.map { (name, raw) ->
+                val o = raw as? JsonObject ?: JsonObject(emptyMap())
+                // Single-select comes as either untagged `enum` values or titled `oneOf`
+                // [{const, title}] options; both collapse to Choice(value, label).
+                val options =
+                    (o["oneOf"] as? JsonArray).orEmpty().mapNotNull { el ->
+                        val eo = el as? JsonObject ?: return@mapNotNull null
+                        val v = eo["const"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        Choice(v, eo["title"]?.jsonPrimitive?.contentOrNull ?: v)
+                    }.ifEmpty {
+                        (o["enum"] as? JsonArray).orEmpty().mapNotNull { el ->
+                            el.jsonPrimitive.contentOrNull?.let { Choice(it, it) }
+                        }
+                    }
+                AcpEvent.ElicitField(
+                    name = name,
+                    type = o["type"]?.jsonPrimitive?.contentOrNull ?: "string",
+                    title = o["title"]?.jsonPrimitive?.contentOrNull ?: name,
+                    description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                    options = options,
+                    required = name in required,
+                )
+            }
+            val key = "elicit-" + elicitSeq.getAndIncrement()
+            pendingElicitations[key] = id
+            onEvent(AcpEvent.Elicitation(
+                key,
+                params["message"]?.jsonPrimitive?.contentOrNull ?: "Input requested",
+                schema["title"]?.jsonPrimitive?.contentOrNull ?: "",
+                fields))
         } else {
             respond(id, buildJsonObject {})   // unknown request: empty result so the agent doesn't hang
         }

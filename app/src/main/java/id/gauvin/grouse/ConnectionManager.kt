@@ -81,6 +81,7 @@ class ConnectionManager private constructor(context: Context) {
     val compacting = mutableStateOf(false)
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
+    val elicitations = mutableStateListOf<AcpEvent.Elicitation>() // pending input forms, oldest first
     // Handed in by OS entry points (share sheet, shortcut, tile), consumed by the UI.
     val pendingShareText = mutableStateOf<String?>(null)
     val pendingShareImages = mutableStateListOf<ImageBlock>()
@@ -341,6 +342,12 @@ class ConnectionManager private constructor(context: Context) {
         if (sessionId == store.assistantSessionId) store.assistantSessionId = null
     }
 
+    /** Answer a pending elicitation form and drop it from the queue. */
+    fun answerElicitation(e: AcpEvent.Elicitation, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
+        client?.respondElicitation(e.requestKey, values, cancelled)
+        elicitations.remove(e)
+    }
+
     /** Delete a session outright (history gone server-side). Archive remains the soft option. */
     fun deleteSession(sessionId: String) {
         client?.deleteSession(sessionId)
@@ -440,6 +447,8 @@ class ConnectionManager private constructor(context: Context) {
                     is AcpEvent.DirectToolResult ->
                         if (ev.isError) finish(ev.text.ifBlank { "tool call failed" }, ev.text)
                         else finish(null, ev.text)
+                    // No UI here — never let a form request hang the utility call.
+                    is AcpEvent.Elicitation -> boot?.respondElicitation(ev.requestKey, null, cancelled = true)
                     is AcpEvent.Error -> finish(ev.text, "")
                     else -> {}
                 }
@@ -787,6 +796,7 @@ class ConnectionManager private constructor(context: Context) {
         when (ev) {
             // Direct tool replies only occur on utility clients, which have their own handler.
             is AcpEvent.DirectToolResult -> {}
+            is AcpEvent.Elicitation -> elicitations.add(ev)
             is AcpEvent.Status -> {
                 status.value = ev.text
                 if (ev.text == "disconnected") {
