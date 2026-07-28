@@ -254,16 +254,13 @@ class ConnectionManager private constructor(context: Context) {
     // pins unconditionally; the tick fires one final snap when the rebuild completes.
     val replayActive = mutableStateOf(false)
     val replayDoneTick = mutableStateOf(0)
-    // Transcript fingerprint taken just before a replay wipes `messages`, so the UI can tell an
-    // identical rebuild (restore the reading position) from one with new content (go to bottom).
-    var preReplayCount = 0; private set
-    var preReplayTailLen = 0; private set
-    // Set by ChatScreen while composed: reads the list position (reverseLayout: item counted from
-    // the bottom, plus pixel offset). Called synchronously in the ReplayStart handler BEFORE the
-    // wipe — coroutine dispatch order between the UI's collectors is unspecified, so capturing
-    // from an effect was racy; a direct call in the same stack cannot be.
-    var readScrollAnchor: (() -> Pair<Int, Int>)? = null
-    var preReplayAnchor = 0 to 0; private set
+    // Replays rebuild into this buffer instead of mutating `messages`; Ready swaps it in only
+    // when the content actually differs. The common background-reconnect replay is identical,
+    // so the visible list is never touched and the scroll position survives by construction —
+    // every capture/restore scheme raced the UI's own collectors and lost.
+    private val replayBuffer = mutableListOf<ChatMessage>()
+    private fun t(): MutableList<ChatMessage> =
+        if (replayActive.value) replayBuffer else messages
     // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
     private var pendingOpenCwd: String = "/state"
@@ -928,16 +925,16 @@ class ConnectionManager private constructor(context: Context) {
                 if (voiceReplyPending) { voiceReplyPending = false; restoreModel() }
             }
             is AcpEvent.ToolCall -> {
-                messages.add(ChatMessage("tool", ev.title, detail = ev.detail,
+                t().add(ChatMessage("tool", ev.title, detail = ev.detail,
                     toolCallId = ev.toolCallId, status = "in_progress"))
                 streamingRole = null
             }
             is AcpEvent.ToolCallUpdate -> {
                 if (ev.toolCallId.isNotBlank()) {
-                    val i = messages.indexOfLast { it.role == "tool" && it.toolCallId == ev.toolCallId }
-                    if (i >= 0) messages[i] = messages[i].copy(
-                        status = ev.status.ifBlank { messages[i].status },
-                        output = if (ev.output.isNotBlank()) ev.output else messages[i].output,
+                    val i = t().indexOfLast { it.role == "tool" && it.toolCallId == ev.toolCallId }
+                    if (i >= 0) t()[i] = t()[i].copy(
+                        status = ev.status.ifBlank { t()[i].status },
+                        output = if (ev.output.isNotBlank()) ev.output else t()[i].output,
                     )
                 }
             }
@@ -969,7 +966,7 @@ class ConnectionManager private constructor(context: Context) {
                 if (m.contains("compact")) compacting.value = true
                 if (m.contains("complete") || m.contains("error")) compacting.value = false
             }
-            is AcpEvent.Chart -> { messages.add(ChatMessage("chart", ev.spec)); streamingRole = null }
+            is AcpEvent.Chart -> { t().add(ChatMessage("chart", ev.spec)); streamingRole = null }
             is AcpEvent.TurnDone -> {
                 streamingRole = null; compacting.value = false
                 turnInFlight = false
@@ -1002,11 +999,9 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.ReplayStart -> {
                 // A session/load replay is about to stream: the server transcript is ground truth
                 // (it may hold turns Desktop or deliver.sh added while this app wasn't looking),
-                // so rebuild from scratch instead of appending onto the local copy.
-                preReplayCount = messages.size
-                preReplayTailLen = messages.lastOrNull()?.text?.length ?: 0
-                preReplayAnchor = readScrollAnchor?.invoke() ?: (0 to 0)
-                messages.clear()
+                // so rebuild from scratch — into the side buffer; `messages` stays visible and
+                // untouched until Ready decides whether anything actually changed.
+                replayBuffer.clear()
                 streamingRole = null
                 replayWiped = true
                 replayActive.value = true
@@ -1020,7 +1015,7 @@ class ConnectionManager private constructor(context: Context) {
                 appendStream("assistant", ev.text)
             }
             is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
-            is AcpEvent.UserChunk -> { messages.add(ChatMessage("user", ev.text)); streamingRole = null }
+            is AcpEvent.UserChunk -> { t().add(ChatMessage("user", ev.text)); streamingRole = null }
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) {
                 config.value = ev.options
                 // Persist the true current values so re-apply on reconnect can't drift
@@ -1092,17 +1087,32 @@ class ConnectionManager private constructor(context: Context) {
                     store.assistantSessionId = ev.sessionId
                 }
                 client?.listSessions()   // so the Assistant thread can be resolved by title
-                // If a replay wiped the transcript this connection, the rebuilt history now holds
-                // everything the server knows -- but prompts still waiting in the queue aren't in
-                // it (they haven't been sent). Re-add their bubbles on top, in queue order, so the
-                // user's unsent messages don't vanish from the screen.
+                if (replayActive.value) {
+                    replayActive.value = false
+                    // Swap the rebuilt transcript in only when it differs from what's shown.
+                    // The common background-reconnect replay is byte-identical, and leaving
+                    // `messages` untouched preserves the reading position by construction.
+                    // Compare content fields, not ChatMessage itself: `id` is per-instance.
+                    val same = replayBuffer.size == messages.size && replayBuffer.indices.all { i ->
+                        val a = replayBuffer[i]; val b = messages[i]
+                        a.role == b.role && a.text == b.text && a.detail == b.detail &&
+                            a.status == b.status && a.output == b.output &&
+                            a.images.size == b.images.size
+                    }
+                    if (!same) {
+                        messages.clear(); messages.addAll(replayBuffer)
+                        replayDoneTick.value++   // ChatScreen: new content -> snap to bottom
+                    }
+                    replayBuffer.clear()
+                }
+                // Prompts still waiting in the queue aren't in the server history (they haven't
+                // been sent). Re-add their bubbles on top, in queue order, so the user's unsent
+                // messages don't vanish from the screen. After the swap: a queued bubble was in
+                // the shown list but never in the buffer, so `same` is false and the swap
+                // dropped it.
                 if (replayWiped) {
                     replayWiped = false
                     pendingSends.forEach { messages.add(ChatMessage("user", it.text, it.images)) }
-                }
-                if (replayActive.value) {
-                    replayActive.value = false
-                    replayDoneTick.value++
                 }
                 // Send ONE queued prompt (bubbles were already added when queued); TurnDone drains
                 // the rest. This used to `while`-loop the whole deque, firing every queued prompt
@@ -1214,12 +1224,13 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Merge a streamed chunk into the last bubble of the same role, else start a new one. */
     private fun appendStream(role: String, chunk: String) {
-        val last = messages.lastOrNull()
+        val list = t()
+        val last = list.lastOrNull()
         if (streamingRole == role && last != null && last.role == role) {
-            messages[messages.lastIndex] = last.copy(text = last.text + chunk)
+            list[list.lastIndex] = last.copy(text = last.text + chunk)
         } else {
             streamingRole = role
-            messages.add(ChatMessage(role, chunk))
+            list.add(ChatMessage(role, chunk))
         }
     }
 

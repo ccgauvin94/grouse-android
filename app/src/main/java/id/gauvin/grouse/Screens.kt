@@ -240,36 +240,17 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // Driven off snapshotFlow so per-token text growth doesn't recompose the whole ChatScreen (this
     // used to read the last message's length in the composable body). Instant scrollToItem avoids
     // restarting a scroll animation on every token.
-    // Give CM a way to read the reading position synchronously at ReplayStart, before the wipe
-    // (see readScrollAnchor there for why an effect-based capture was racy).
-    DisposableEffect(cm, listState) {
-        cm.readScrollAnchor =
-            { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-        onDispose { cm.readScrollAnchor = null }
-    }
     LaunchedEffect(listState) {
         snapshotFlow { cm.messages.size to (cm.messages.lastOrNull()?.text?.length ?: 0) }
-            // During a replay rebuild, pin: keyed items inserted at index 0 can drift the
-            // key-anchor off the exact bottom, which would flip atBottom false and stop the
-            // autoscroll halfway up the restored history. Skip when the user was scrolled up —
-            // their position is restored (or superseded) once the rebuild finishes.
-            .collect {
-                if (atBottom || (cm.replayActive.value && cm.preReplayAnchor.first == 0))
-                    listState.scrollToItem(0)
-            }
+            .collect { if (atBottom) listState.scrollToItem(0) }
     }
     // Opening/switching a session: snap to the bottom (index 0). reverseLayout keeps it pinned
     // as history replays in.
     LaunchedEffect(cm.currentSession.value) { listState.scrollToItem(0) }
-    // A replay finished rebuilding: if the transcript came back unchanged, put the user back
-    // where they were; if anything new arrived (or they were at the bottom), go to the bottom.
-    LaunchedEffect(cm.replayDoneTick.value) {
-        val (item, offset) = cm.preReplayAnchor
-        if (item > 0 && cm.messages.size == cm.preReplayCount &&
-            (cm.messages.lastOrNull()?.text?.length ?: 0) == cm.preReplayTailLen)
-            listState.scrollToItem(item, offset)
-        else listState.scrollToItem(0)
-    }
+    // A replay swapped in a genuinely different transcript: go to the bottom. Identical
+    // rebuilds never touch `messages`, so the reading position survives untouched and this
+    // never fires for them.
+    LaunchedEffect(cm.replayDoneTick.value) { listState.scrollToItem(0) }
     // Speak the reply aloud when a turn finishes (busy true→false), if enabled.
     var wasBusy by remember { mutableStateOf(false) }
     LaunchedEffect(cm.busy.value) {
