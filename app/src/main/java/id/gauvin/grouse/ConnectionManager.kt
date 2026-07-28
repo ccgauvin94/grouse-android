@@ -342,6 +342,13 @@ class ConnectionManager private constructor(context: Context) {
         if (sessionId == store.assistantSessionId) store.assistantSessionId = null
     }
 
+    /** Publish this device's UnifiedPush endpoint into goose's config.yaml (server-side),
+     *  where deliver.sh prefers it over the static .env value -- endpoint rotation then
+     *  self-heals instead of silently killing pushes. Best-effort. */
+    fun publishPushEndpoint(url: String) {
+        if (url.isNotBlank()) client?.upsertConfig("GROUSE_PUSH_ENDPOINT", url)
+    }
+
     /** Answer a pending elicitation form and drop it from the queue. */
     fun answerElicitation(e: AcpEvent.Elicitation, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
         client?.respondElicitation(e.requestKey, values, cancelled)

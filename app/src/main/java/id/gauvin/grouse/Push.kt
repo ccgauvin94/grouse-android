@@ -87,6 +87,12 @@ class GoosePushService : PushService() {
     override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) {
         SecureStore(this).pushEndpoint = endpoint.url
         PushRegistry.publish(this, endpoint.url)
+        // Self-heal for rotation (2026-07-28: six APK reinstalls minted a second uppush
+        // registration; phaethon kept POSTing the dead one and the morning push vanished):
+        // publish the endpoint into goose's server-side config over the ACP socket, where
+        // deliver.sh reads it before every push. Best-effort — if the socket is down now,
+        // the next app start re-registers (Push.refresh) and lands here again.
+        ConnectionManager.get(this).publishPushEndpoint(endpoint.url)
     }
 
     override fun onRegistrationFailed(reason: FailedReason, instance: String) {}
