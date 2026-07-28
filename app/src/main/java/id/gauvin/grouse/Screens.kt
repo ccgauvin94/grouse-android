@@ -718,7 +718,7 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     val byProject = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CODE }
         .groupBy { ConnectionManager.projectOf(it.cwd) ?: "?" }
     val freeChats = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CHAT }
-    val projects = (byProject.keys + cm.store.recentWorkspaceProjects()).distinct().sortedBy { it.lowercase() }
+    val projects = (byProject.keys + cm.recentProjects.value).distinct().sortedBy { it.lowercase() }
 
     @Composable
     fun sessionRow(s: SessionInfo, indent: Boolean) {
@@ -938,7 +938,10 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
         )
     }
 
-    val chats = cm.sessions.value.filter { ConnectionManager.projectOf(it.cwd) == project }
+    val chats = cm.sessions.value.filter {
+        ConnectionManager.projectOf(it.cwd) == project &&
+            ConnectionManager.sessionKind(it) != SessionKind.ASSISTANT
+    }
     Scaffold(topBar = {
         TopAppBar(
             title = { Text(project, maxLines = 1, overflow = TextOverflow.Ellipsis) },

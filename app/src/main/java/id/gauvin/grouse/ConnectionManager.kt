@@ -62,6 +62,10 @@ class ConnectionManager private constructor(context: Context) {
     val online = mutableStateOf(false)   // true between Ready and disconnect — for a UI status pill
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
+    /** Observable mirror of store.recentWorkspaceProjects() — SharedPreferences aren't Compose
+     *  state, so a delete that only touched the store left the drawer stale until app restart.
+     *  store is declared above (line ~38), so reading it at init here is safe. */
+    val recentProjects = mutableStateOf(store.recentWorkspaceProjects())
     val currentSession = mutableStateOf<String?>(null)   // id of the session on screen (for the Assistant binding)
     val busy = mutableStateOf(false)
     val usage = mutableStateOf<AcpEvent.Usage?>(null)   // context window used/size + cost
@@ -358,6 +362,7 @@ class ConnectionManager private constructor(context: Context) {
         val clean = project.trim().trim('/').removePrefix("workspace/").trim('/')
         require(clean.isNotEmpty() && !clean.contains("..")) { "invalid project name" }
         store.addRecentWorkspaceProject(clean)
+        recentProjects.value = store.recentWorkspaceProjects()
         newSession(cwd = "/workspace/$clean", kind = SessionKind.CODE)
     }
 
@@ -456,6 +461,7 @@ class ConnectionManager private constructor(context: Context) {
         sessions.value.filter { ConnectionManager.projectOf(it.cwd) == name }
             .forEach { archiveSession(it.sessionId) }
         store.removeRecentWorkspaceProject(name)
+        recentProjects.value = store.recentWorkspaceProjects()
         runUtilitySession(
             "Run exactly this shell command: rmdir /workspace/$name\n" +
                 "If it succeeds reply with just: removed\n" +
@@ -731,9 +737,15 @@ class ConnectionManager private constructor(context: Context) {
         // (sessions.value, if already loaded) and fall back to the last-persisted cwd for a cold
         // start before any session/list round-trip has happened. session/load's cwd param SILENTLY
         // REWRITES the session's working_dir if wrong, so this must be right, not just "close enough".
+        // Resolution order for a resume: live cache -> assistant hard rule (that thread lives at
+        // /state BY CONSTRUCTION, never guess it) -> the per-session cwd map -> /state. NEVER a
+        // "whatever was last used" global: session/load rewrites working_dir when handed the
+        // wrong cwd, and the global guess re-homed the assistant thread into a project once.
         val resolvedCwd = cwd ?: if (resume == null) "/state" else
             sessions.value.firstOrNull { it.sessionId == resume }?.cwd?.takeIf { it.isNotBlank() }
-                ?: store.lastSessionCwd
+                ?: (if (resume == store.assistantSessionId) "/state" else null)
+                ?: store.sessionCwd(resume)
+                ?: "/state"
         pendingOpenCwd = resolvedCwd
         // Tag this client's events with a generation; a just-closed client still fires
         // onClosed/onFailure asynchronously and its stale "disconnected" must not flip us offline
@@ -850,7 +862,8 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Ready -> {
                 live = true; connecting = false; online.value = true
                 lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
-                store.lastSessionCwd = pendingOpenCwd   // Ready itself carries no cwd -- see open()
+                // Ready itself carries no cwd -- record what this open resolved (see open()).
+                store.rememberSessionCwds(listOf(ev.sessionId to pendingOpenCwd))
                 currentSession.value = ev.sessionId
                 // Populate the in-chat "N tools" indicator and the per-extension tool lists.
                 // MCP-backed extensions come up asynchronously AFTER the session is ready: a
@@ -897,6 +910,7 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
+                store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })
                 // Validate the cached assistant id against the list. The cache wins over a title
                 // lookup on open (an empty, freshly-reset thread is invisible to session/list, so
                 // absence alone proves nothing) -- but if the server SHOWS the cached session under

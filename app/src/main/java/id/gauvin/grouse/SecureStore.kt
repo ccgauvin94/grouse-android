@@ -131,12 +131,26 @@ class SecureStore(context: Context) {
         get() = cfg.getString("pending_push_session", null)
         set(v) = cfg.edit().putString("pending_push_session", v).apply()
 
-    /** The cwd lastSessionId was opened with — a cold-start fallback for resolving a resume's cwd
-     *  before any session/list round-trip has populated the in-memory cache (see
-     *  ConnectionManager.open()). Wrong here just means a stale-cwd guess, never a crash. */
-    var lastSessionCwd: String
-        get() = cfg.getString("last_session_cwd", "/state") ?: "/state"
-        set(v) = cfg.edit().putString("last_session_cwd", v).apply()
+    /** Last known cwd PER session id, merged from every session/list and every open. The resume
+     *  path MUST hand session/load the session's REAL cwd — a wrong value silently REWRITES the
+     *  session's working_dir server-side. The old global last_session_cwd fallback ("wrong here
+     *  just means a stale guess, never a crash") did exactly that on 2026-07-27: a cold-start
+     *  assistant open inherited the previous chat's project cwd and re-homed the assistant
+     *  thread into /workspace/Cooking. Newline-delimited "id<TAB>cwd", newest first, capped. */
+    fun sessionCwd(id: String): String? =
+        (cfg.getString("session_cwds", "") ?: "").split("\n")
+            .firstOrNull { it.substringBefore("\t") == id }
+            ?.substringAfter("\t")?.takeIf { it.isNotBlank() }
+
+    fun rememberSessionCwds(entries: List<Pair<String, String>>) {
+        val fresh = entries.filter { it.first.isNotBlank() && it.second.isNotBlank() }
+        if (fresh.isEmpty()) return
+        val freshIds = fresh.map { it.first }.toSet()
+        val kept = (cfg.getString("session_cwds", "") ?: "").split("\n")
+            .filter { it.isNotBlank() && it.substringBefore("\t") !in freshIds }
+        val next = (fresh.map { "${it.first}\t${it.second}" } + kept).take(200)
+        cfg.edit().putString("session_cwds", next.joinToString("\n")).apply()
+    }
 
     /** Recently used /workspace project names for the "New Code session" dialog, most-recent-first,
      *  capped at 10. A delimited string (not a StringSet) because order matters here — unlike
