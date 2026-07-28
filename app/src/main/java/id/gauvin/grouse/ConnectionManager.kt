@@ -254,6 +254,16 @@ class ConnectionManager private constructor(context: Context) {
     // pins unconditionally; the tick fires one final snap when the rebuild completes.
     val replayActive = mutableStateOf(false)
     val replayDoneTick = mutableStateOf(0)
+    // Transcript fingerprint taken just before a replay wipes `messages`, so the UI can tell an
+    // identical rebuild (restore the reading position) from one with new content (go to bottom).
+    var preReplayCount = 0; private set
+    var preReplayTailLen = 0; private set
+    // Set by ChatScreen while composed: reads the list position (reverseLayout: item counted from
+    // the bottom, plus pixel offset). Called synchronously in the ReplayStart handler BEFORE the
+    // wipe — coroutine dispatch order between the UI's collectors is unspecified, so capturing
+    // from an effect was racy; a direct call in the same stack cannot be.
+    var readScrollAnchor: (() -> Pair<Int, Int>)? = null
+    var preReplayAnchor = 0 to 0; private set
     // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
     private var pendingOpenCwd: String = "/state"
@@ -993,6 +1003,9 @@ class ConnectionManager private constructor(context: Context) {
                 // A session/load replay is about to stream: the server transcript is ground truth
                 // (it may hold turns Desktop or deliver.sh added while this app wasn't looking),
                 // so rebuild from scratch instead of appending onto the local copy.
+                preReplayCount = messages.size
+                preReplayTailLen = messages.lastOrNull()?.text?.length ?: 0
+                preReplayAnchor = readScrollAnchor?.invoke() ?: (0 to 0)
                 messages.clear()
                 streamingRole = null
                 replayWiped = true
