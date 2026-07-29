@@ -429,17 +429,18 @@ class ConnectionManager private constructor(context: Context) {
         open(resume = null, cwd = cwd, kind = kind)
     }
 
-    /** A Code session: scoped to a project directory under the server's /workspace bind mount
+    /** A project session: scoped to a directory under the server's /projects bind mount
      *  (the user's ~/dev) instead of the default /state. This IS the "designation" -- goose has no
      *  tags/labels, so cwd is the native, protocol-level signal sessionKind() reads back later. */
     fun newCodeSession(project: String) {
         // Forgive "/workspace/foo" and "workspace/foo" -- typing the full path used to build
         // /workspace/workspace/foo, whose session/new rejection looked like a silent no-op.
-        val clean = project.trim().trim('/').removePrefix("workspace/").trim('/')
+        val clean = project.trim().trim('/').removePrefix("projects/")
+            .removePrefix("workspace/").trim('/')
         require(clean.isNotEmpty() && !clean.contains("..")) { "invalid project name" }
         store.addRecentWorkspaceProject(clean)
         recentProjects.value = store.recentWorkspaceProjects()
-        newSession(cwd = "/workspace/$clean", kind = SessionKind.CODE)
+        newSession(cwd = "/projects/$clean", kind = SessionKind.CODE)
     }
 
     /** Run one shell command server-side via a DIRECT tool call and report (error, output).
@@ -497,18 +498,19 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun cleanProjectName(raw: String): String? {
-        val name = raw.trim().trim('/').removePrefix("workspace/").trim('/')
+        val name = raw.trim().trim('/').removePrefix("projects/")
+            .removePrefix("workspace/").trim('/')
         if (name.isEmpty() || name.contains("..") || name.contains('/') ||
             name.any { it.isWhitespace() } || name.contains('\'') || name.contains('"')) return null
         return name
     }
 
-    /** Create /workspace/<name> on the server (null = success, else error). Deterministic
+    /** Create /projects/<name> on the server (null = success, else error). Deterministic
      *  direct mkdir -- no model. */
     fun createProject(rawName: String, onResult: (String?) -> Unit) {
         val name = cleanProjectName(rawName)
             ?: run { onResult("Single folder name — no slashes, spaces, or quotes."); return }
-        runUtilityTool("mkdir -p '/workspace/$name'") { err, _ -> onResult(err) }
+        runUtilityTool("mkdir -p '/projects/$name'") { err, _ -> onResult(err) }
     }
 
     /** Read a project's .goosehints and local memory (goose's memory extension stores its
@@ -1252,7 +1254,12 @@ class ConnectionManager private constructor(context: Context) {
          *  (Grouse-created sessions); the other two are the SAME host directory (~/dev) reached
          *  through the Desktop cwd-shims -- goose stores cwd verbatim as each client sent it
          *  (no canonicalize on session/new), so the spellings coexist and must be unified here. */
-        private val PROJECT_PREFIXES = listOf("/workspace/", "/Users/colin/dev/", "/home/colin/dev/")
+        // /projects is the real home for goose projects (host ~/goose-projects). The other three
+        // are legacy: projects used to be created under /workspace alongside source code, and
+        // the two dev-shim paths are what a Desktop client's local picker produces. Kept so
+        // pre-2026-07-28 sessions still group instead of falling into the free-chat list.
+        private val PROJECT_PREFIXES = listOf("/projects/", "/workspace/",
+            "/Users/colin/dev/", "/home/colin/dev/")
 
         /** The project name a session cwd belongs to, or null for non-project paths. */
         fun projectOf(cwd: String): String? = PROJECT_PREFIXES.firstNotNullOfOrNull { p ->
