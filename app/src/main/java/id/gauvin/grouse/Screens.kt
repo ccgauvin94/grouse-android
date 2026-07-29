@@ -1165,7 +1165,8 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
     LaunchedEffect(cm.online.value) {
         if (cm.online.value) {
             cm.readServerConfig("MORNING_ENABLED", "MORNING_TIME", "MORNING_MODEL", "MORNING_PROMPT",
-                "BRIEFING_ENABLED", "BRIEFING_INTERVAL_HOURS", "BRIEFING_MODEL", "BRIEFING_PROMPT")
+                "BRIEFING_ENABLED", "BRIEFING_INTERVAL_HOURS", "BRIEFING_MODEL", "BRIEFING_PROMPT",
+                "MORNING_PROVIDER", "BRIEFING_PROVIDER")
             cm.loadAssistantExtensions()
             cm.refreshAssistantTools()
         }
@@ -1176,12 +1177,54 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
     fun modelPicker(label: String, key: String) {
         val current = cm.serverConfig[key].orEmpty().ifBlank { "Qwen3.6-35B-A3B" }
         var open by remember { mutableStateOf(false) }
+        var typing by remember { mutableStateOf(false) }
+        var draft by remember(current) { mutableStateOf(current) }
         Box {
             SettingsNavRow(label, current) { open = true }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                 (cm.knownModels.value + current).distinct().sorted().forEach { m ->
                     DropdownMenuItem(text = { Text(m) },
                         onClick = { cm.writeServerConfig(key, m); open = false })
+                }
+                HorizontalDivider()
+                // knownModels only holds the ACTIVE provider's list, so a cloud model
+                // (openrouter's "deepseek/deepseek-v4-flash") can never appear there. Typed
+                // entry is the only way to reach one -- goose accepts arbitrary model slugs.
+                DropdownMenuItem(text = { Text("Enter model ID…") },
+                    onClick = { open = false; typing = true })
+            }
+        }
+        if (typing) {
+            AlertDialog(
+                onDismissRequest = { typing = false },
+                title = { Text(label) },
+                text = {
+                    OutlinedTextField(draft, { draft = it }, singleLine = true,
+                        label = { Text("Model ID") },
+                        supportingText = { Text("e.g. deepseek/deepseek-v4-flash — set the matching provider below") })
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        cm.writeServerConfig(key, draft.trim()); typing = false
+                    }) { Text("Save") }
+                },
+                dismissButton = { TextButton(onClick = { typing = false }) { Text("Cancel") } },
+            )
+        }
+    }
+
+    @Composable
+    fun providerPicker(key: String) {
+        // deliver.sh passes --provider explicitly; a cloud model under provider "openai"
+        // goes to LocalAI and 404s, so this has to move with the model.
+        val current = cm.serverConfig[key].orEmpty().ifBlank { "openai" }
+        var open by remember { mutableStateOf(false) }
+        Box {
+            SettingsNavRow("Provider", current) { open = true }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                listOf("openai", "openrouter", "openrouter_custom").forEach { p ->
+                    DropdownMenuItem(text = { Text(if (p == "openai") "openai (local)" else p) },
+                        onClick = { cm.writeServerConfig(key, p); open = false })
                 }
             }
         }
@@ -1260,6 +1303,7 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
                             onClick = { cm.writeServerConfig("MORNING_TIME", morning.trim()) }) { Text("Save") }
                     }
                     modelPicker("Model", "MORNING_MODEL")
+                    providerPicker("MORNING_PROVIDER")
                     promptField("MORNING_PROMPT")
                     testRow("morning")
                 }
@@ -1283,6 +1327,7 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
                     SettingCaption("Runs 07:00–22:00; the interval counts from 07:00. Pushes " +
                         "only when something is genuinely imminent.")
                     modelPicker("Model", "BRIEFING_MODEL")
+                    providerPicker("BRIEFING_PROVIDER")
                     promptField("BRIEFING_PROMPT")
                     testRow("briefing")
                 }
