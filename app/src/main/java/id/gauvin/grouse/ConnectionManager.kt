@@ -492,7 +492,7 @@ class ConnectionManager private constructor(context: Context) {
                 }
             }
         }.also {
-            it.desiredCwd = "/state"
+            it.desiredCwd = DEFAULT_CWD
             it.connect()
         }
     }
@@ -902,9 +902,9 @@ class ConnectionManager private constructor(context: Context) {
         client = AcpClient(url, store.secretKey) { ev -> main.post { if (gen == clientGen) onEvent(ev) } }.also {
             it.desiredOptions = if (resume == null) saved else emptyMap()
             it.resumeSessionId = resume
-            it.resumeCwd = resolvedCwd ?: "/state"
+            it.resumeCwd = resolvedCwd ?: DEFAULT_CWD
             it.resumeCwdKnown = resolvedCwd != null
-            it.desiredCwd = resolvedCwd ?: "/state"
+            it.desiredCwd = resolvedCwd ?: DEFAULT_CWD
             it.connect()
         }
     }

@@ -6,6 +6,21 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * Default container-side cwd for conversational sessions.
+ *
+ * NOT "/state", which it was until 2026-07-29. Goose Desktop has no project API and never asks
+ * the server for one -- it derives its whole project list by grouping sessions on cwd and
+ * labelling each group with the LAST PATH SEGMENT. So a cwd is a project name, and parking
+ * everything in /state drew one project called "state" containing all 52 chats.
+ *
+ * Must EXIST inside the goose container or session/new rejects it; it is one of the
+ * goose-projects mounts (host ~/services/goose-projects, mounted at /projects and under both
+ * homedir shims). Safe to move sessions around because the assistant carries no
+ * developer/shell extension, so its cwd is cosmetic.
+ */
+const val DEFAULT_CWD = "/home/colin/Projects/Inbox"
+
 /** A selectable value inside a [ConfigOption] (goose "select" config). */
 data class Choice(val value: String, val label: String)
 
@@ -169,15 +184,16 @@ class AcpClient(
     /** The cwd to resume `resumeSessionId` with (session/load). Must match the session's actual
      *  working_dir -- session/load's cwd param silently REWRITES working_dir if it differs, so
      *  passing the wrong value here would un-scope a Code session back to whatever's passed. */
-    var resumeCwd: String = "/state"
+    var resumeCwd: String = DEFAULT_CWD
     /** False when the caller could NOT determine the session's real cwd: the client then asks
      *  the server (_goose/unstable/session/info) before session/load, instead of guessing --
      *  a wrong guess is a silent working_dir rewrite (this re-homed the assistant thread once). */
     var resumeCwdKnown: Boolean = true
     private var loadAwaitingInfo = false
-    /** The cwd for a brand-new session (session/new) when resumeSessionId is null. "/state" for
-     *  Chat/Assistant; "/workspace/<project>" for a Code session. */
-    var desiredCwd: String = "/state"
+    /** The cwd for a brand-new session (session/new) when resumeSessionId is null. Defaults to
+     *  [DEFAULT_CWD] (the Inbox project) for Chat/Assistant; set a project path for anything
+     *  filed. Whatever this is becomes the session's project name in Goose Desktop. */
+    var desiredCwd: String = DEFAULT_CWD
     // True between sending session/load and its response (i.e. while history replays).
     private var replaying = false
 
