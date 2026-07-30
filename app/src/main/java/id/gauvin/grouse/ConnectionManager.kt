@@ -436,11 +436,15 @@ class ConnectionManager private constructor(context: Context) {
         // Forgive "/workspace/foo" and "workspace/foo" -- typing the full path used to build
         // /workspace/workspace/foo, whose session/new rejection looked like a silent no-op.
         val clean = project.trim().trim('/').removePrefix("projects/")
-            .removePrefix("workspace/").trim('/')
+            .removePrefix("Projects/").removePrefix("workspace/").trim('/')
         require(clean.isNotEmpty() && !clean.contains("..")) { "invalid project name" }
         store.addRecentWorkspaceProject(clean)
         recentProjects.value = store.recentWorkspaceProjects()
-        newSession(cwd = "/projects/$clean", kind = SessionKind.CODE)
+        // PROJECT_ROOT, not "/projects/", so a project opened here and the same project opened
+        // from Goose Desktop produce the SAME cwd string. Desktop groups its project list by
+        // exact cwd, so two spellings of one directory render as two projects with identical
+        // names. All three spellings are the same host dir; only the string matters.
+        newSession(cwd = "$PROJECT_ROOT$clean", kind = SessionKind.CODE)
     }
 
     /** Run one shell command server-side via a DIRECT tool call and report (error, output).
@@ -1254,11 +1258,21 @@ class ConnectionManager private constructor(context: Context) {
          *  (Grouse-created sessions); the other two are the SAME host directory (~/dev) reached
          *  through the Desktop cwd-shims -- goose stores cwd verbatim as each client sent it
          *  (no canonicalize on session/new), so the spellings coexist and must be unified here. */
-        // /projects is the real home for goose projects (host ~/goose-projects). The other three
-        // are legacy: projects used to be created under /workspace alongside source code, and
-        // the two dev-shim paths are what a Desktop client's local picker produces. Kept so
-        // pre-2026-07-28 sessions still group instead of falling into the free-chat list.
-        private val PROJECT_PREFIXES = listOf("/projects/", "/workspace/",
+        /** Where WE create projects. Matches what Goose Desktop's directory picker produces on
+         *  Linux, because Desktop's project list is a grouping of the raw cwd string and two
+         *  spellings of one directory show up as two identically-named projects. Desktop on a
+         *  Mac still yields /Users/colin/Projects/<name>; no single path is native to both, so
+         *  that one duplicate is accepted (see goose.container). */
+        const val PROJECT_ROOT = "/home/colin/Projects/"
+
+        // Order matters only for readability; each is a distinct spelling of the same host dir
+        // (~/services/goose-projects, mounted at /projects and under both homedir shims).
+        // PROJECT_ROOT is canonical for new sessions; /projects/ is what Grouse itself used
+        // until 2026-07-30 and /workspace/ before 2026-07-28, when projects lived alongside
+        // source code. The dev-shim paths are what an older Desktop picker produced. All kept
+        // so existing sessions keep grouping instead of dropping into the free-chat list.
+        private val PROJECT_PREFIXES = listOf(
+            PROJECT_ROOT, "/Users/colin/Projects/", "/projects/", "/workspace/",
             "/Users/colin/dev/", "/home/colin/dev/")
 
         /** The project name a session cwd belongs to, or null for non-project paths. */
