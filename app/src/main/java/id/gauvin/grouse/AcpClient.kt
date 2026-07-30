@@ -619,10 +619,20 @@ class AcpClient(
     }
 
     private fun startNewSession() = rpc("session/new", buildJsonObject {
-        // cwd must exist INSIDE the goose container (not the host). /state is bind-mounted +
-        // writable + persistent (Chat/Assistant); /workspace/<project> for a Code session.
+        // cwd must exist INSIDE the goose container (not the host). Conversational chats live
+        // under /home/colin/Projects/<Name> (Inbox for unfiled) -- that path is also what Goose
+        // Desktop groups on to build its project list, so the cwd IS the project.
         put("cwd", desiredCwd)
         putJsonArray("mcpServers") {}
+        // WITHOUT THIS, EVERY CHAT STARTED HERE IS INVISIBLE IN GOOSE DESKTOP.
+        // goose types a new session from this one field (acp/server/new_session.rs):
+        //     _meta.client present -> SessionType::User ; absent -> SessionType::Acp
+        // and Desktop asks session/list for types ['user','scheduled'] only. Omitting it meant
+        // Grouse chats were 'acp' and structurally unlistable there -- measured 3 sessions
+        // visible against 50 actually present. The goose CLI's `session list` filters the same
+        // way, which is what let deliver.sh create a duplicate Assistant it could not see
+        // (the 2026-07-26 fork). The value is not interpreted; only its presence matters.
+        putJsonObject("_meta") { put("client", "grouse") }
     })
 
     private fun parseConfig(result: JsonObject?): List<ConfigOption> {
