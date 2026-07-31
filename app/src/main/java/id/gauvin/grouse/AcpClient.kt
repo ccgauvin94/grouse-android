@@ -613,7 +613,7 @@ class AcpClient(
                     ?.get("cwd")?.jsonPrimitive?.contentOrNull
                 if (loadAwaitingInfo) {
                     loadAwaitingInfo = false
-                    resumeCwd = cwd?.takeIf { it.isNotBlank() } ?: "/state"
+                    resumeCwd = cwd?.takeIf { it.isNotBlank() } ?: DEFAULT_CWD
                     resumeCwdKnown = true
                     val resume = resumeSessionId
                     if (resume != null) {

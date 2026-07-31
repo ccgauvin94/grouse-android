@@ -263,7 +263,7 @@ class ConnectionManager private constructor(context: Context) {
         if (replayActive.value) replayBuffer else messages
     // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
-    private var pendingOpenCwd: String = "/state"
+    private var pendingOpenCwd: String = DEFAULT_CWD
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
 
     // Voice: the voice sheet has a short lifecycle, so CM owns speaking the reply (it survives the
@@ -423,7 +423,7 @@ class ConnectionManager private constructor(context: Context) {
         open(resume = sessionId, kind = kind)
     }
 
-    fun newSession(cwd: String = "/state", kind: SessionKind = SessionKind.CHAT) {
+    fun newSession(cwd: String = DEFAULT_CWD, kind: SessionKind = SessionKind.CHAT) {
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
         open(resume = null, cwd = cwd, kind = kind)
@@ -889,14 +889,21 @@ class ConnectionManager private constructor(context: Context) {
         // (sessions.value, if already loaded) and fall back to the last-persisted cwd for a cold
         // start before any session/list round-trip has happened. session/load's cwd param SILENTLY
         // REWRITES the session's working_dir if wrong, so this must be right, not just "close enough".
-        // Resolution order for a resume: live cache -> assistant hard rule (that thread lives at
-        // /state BY CONSTRUCTION, never guess it) -> the per-session cwd map -> ASK THE SERVER
+        // There used to be an "assistant hard rule" here pinning that thread to /state BY
+        // CONSTRUCTION. It stopped being true on 2026-07-30, when conversational sessions moved
+        // under /home/colin/Projects/ so Goose Desktop would group them as projects -- and
+        // because session/load REWRITES working_dir, this line did not merely guess wrong, it
+        // actively dragged the Assistant back to /state within seconds of every correction,
+        // including edits made directly in the sessions DB. Ask the server instead; after
+        // DEFAULT_CWD was fixed this was the ONE remaining hardcoded /state, and it silently
+        // undid that fix.
+        //
+        // Resolution order for a resume: live cache -> the per-session cwd map -> ASK THE SERVER
         // (null: the client queries _goose/unstable/session/info before session/load). NEVER a
         // guess: session/load rewrites working_dir when handed the wrong cwd, and a global
         // last-used guess re-homed the assistant thread into a project once.
-        val resolvedCwd: String? = cwd ?: if (resume == null) "/state" else
+        val resolvedCwd: String? = cwd ?: if (resume == null) DEFAULT_CWD else
             sessions.value.firstOrNull { it.sessionId == resume }?.cwd?.takeIf { it.isNotBlank() }
-                ?: (if (resume == store.assistantSessionId) "/state" else null)
                 ?: store.sessionCwd(resume)
         pendingOpenCwd = resolvedCwd ?: ""
         // Tag this client's events with a generation; a just-closed client still fires

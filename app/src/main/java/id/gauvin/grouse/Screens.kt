@@ -916,11 +916,11 @@ private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: 
                 text = {
                     Column {
                         TextButton(enabled = current != null, onClick = {
-                            cm.moveSession(s.sessionId, "/state"); onDone()
+                            cm.moveSession(s.sessionId, DEFAULT_CWD); onDone()
                         }) { Text("Chats (no project)") }
                         projects.forEach { p ->
                             TextButton(enabled = p != current, onClick = {
-                                cm.moveSession(s.sessionId, "/workspace/" + p); onDone()
+                                cm.moveSession(s.sessionId, ConnectionManager.PROJECT_ROOT + p); onDone()
                             }) { Text(p) }
                         }
                     }
