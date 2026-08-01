@@ -2376,7 +2376,11 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
             }
 
             SettingsSection("Schedule") {
-                var cron by remember(r.id, job?.cron) { mutableStateOf(job?.cron ?: "") }
+                // The recipe reports its own cron, so this no longer depends on matching the
+                // job by path -- one fewer thing to get wrong, and it stays right even if the
+                // job list has not loaded yet.
+                val currentCron = r.cron ?: job?.cron ?: ""
+                var cron by remember(r.id, currentCron) { mutableStateOf(currentCron) }
                 OutlinedTextField(cron, { cron = it }, singleLine = true,
                     label = { Text("Cron") },
                     supportingText = {
@@ -2385,7 +2389,7 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
                     },
                     modifier = Modifier.fillMaxWidth())
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(enabled = cron.trim() != (job?.cron ?: ""), onClick = {
+                    TextButton(enabled = cron.trim() != currentCron, onClick = {
                         cm.setRecipeCron(r.id, cron.trim().ifBlank { null })
                     }) { Text(if (cron.isBlank()) "Unschedule" else "Save schedule") }
                 }

@@ -937,7 +937,10 @@ class AcpClient(
                 id = e["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
                 title = r["title"]?.jsonPrimitive?.contentOrNull ?: "(untitled)",
                 description = r["description"]?.jsonPrimitive?.contentOrNull ?: "",
-                cron = e["scheduleCron"]?.jsonPrimitive?.contentOrNull,
+                // snake_case, like recipes/schedule's cron_schedule and unlike most of goose's
+                // ACP surface. Read as camelCase these came back null, which does not fail --
+                // it just makes every recipe look unscheduled and unlinkable to its job.
+                cron = e["schedule_cron"]?.jsonPrimitive?.contentOrNull,
                 // settings keys are snake_case here, like the recipe YAML they came from
                 provider = settings?.get("goose_provider")?.jsonPrimitive?.contentOrNull,
                 model = settings?.get("goose_model")?.jsonPrimitive?.contentOrNull,
@@ -958,7 +961,7 @@ class AcpClient(
                 extensions = (r["extensions"] as? JsonArray).orEmpty().mapNotNull {
                     (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
                 },
-                filePath = e["filePath"]?.jsonPrimitive?.contentOrNull ?: "",
+                filePath = e["file_path"]?.jsonPrimitive?.contentOrNull ?: "",
                 raw = r,
             )
         }.sortedBy { it.title.lowercase() }
