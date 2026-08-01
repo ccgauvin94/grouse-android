@@ -1351,13 +1351,14 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
             }
 
             SettingsSection("Scheduled jobs") {
-                SettingsNavRow("Schedules & recipes",
+                SettingsNavRow("Scheduler",
                     cm.schedules.value.let { j ->
                         if (j.isEmpty()) "none scheduled"
                         else j.count { !it.paused }.toString() + " of " + j.size + " active"
                     }) { nav.navigate("schedules") }
-                SettingCaption("The morning digest and the hourly briefing, with their cron, " +
-                    "model and prompt. Pausing one here is what \"off\" used to mean.")
+                SettingCaption("The morning digest, the hourly briefing and the nightly " +
+                    "compaction. Pausing one is what \"off\" used to mean; what each one runs " +
+                    "is its recipe, under Recipes in the menu.")
             }
 
                 SettingsSection("Thread") {
@@ -2268,7 +2269,7 @@ fun SchedulesScreen(cm: ConnectionManager, nav: NavController) {
 
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Schedules") },
+            title = { Text("Scheduler") },
             navigationIcon = {
                 IconButton(onClick = { nav.popBackStack() }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
@@ -2337,23 +2338,6 @@ fun SchedulesScreen(cm: ConnectionManager, nav: NavController) {
                 }
             }
 
-            SettingsSection("Recipes") {
-                if (recipes.isEmpty()) {
-                    SettingCaption("No saved recipes on the server.")
-                }
-                recipes.forEach { r ->
-                    val isScheduled = r.filePath in scheduledPaths
-                    SettingsNavRow(
-                        r.title,
-                        listOfNotNull(
-                            r.model,
-                            if (isScheduled) null else "not scheduled",
-                        ).joinToString(" · ").ifBlank { r.description.take(60) },
-                    ) { nav.navigate("recipe/${r.id}") }
-                }
-                SettingCaption("A recipe is what a schedule runs. Editing one here changes its " +
-                    "next run — there is nothing to re-register.")
-            }
         }
     }
 }
@@ -2823,6 +2807,140 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                     "full catalog.")
             }
 
+            Spacer(Modifier.height(28.dp))
+        }
+    }
+}
+
+
+/** Every saved recipe, whether or not anything runs it on a timer.
+ *
+ *  Split out of the Scheduler screen, which listed recipes underneath the cron table and made
+ *  an unscheduled recipe look like a broken schedule. They are separate things: a recipe is
+ *  what to run, a schedule is when. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun RecipesScreen(cm: ConnectionManager, nav: NavController) {
+    LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
+    val scheduled = cm.schedules.value.map { it.source }.toSet()
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Recipes") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+            actions = {
+                IconButton(onClick = { cm.refreshSchedules() }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "refresh")
+                }
+            },
+        )
+    }) { pad ->
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+            if (cm.recipes.value.isEmpty()) {
+                SettingCaption("No saved recipes on the server.")
+            }
+            cm.recipes.value.forEach { r ->
+                SettingsNavRow(
+                    r.title,
+                    listOfNotNull(
+                        r.model,
+                        if (r.filePath in scheduled) "scheduled" else null,
+                    ).joinToString(" · ").ifBlank { r.description.take(70) },
+                ) { nav.navigate("recipe/" + r.id) }
+            }
+            SettingCaption("A recipe is what a job runs. Editing one changes its next run — " +
+                "there is nothing to re-register.")
+            Spacer(Modifier.height(28.dp))
+        }
+    }
+}
+
+/** Skills: the per-domain notes goose pulls in with load_skill only when they are relevant.
+ *
+ *  Worth being able to read from the phone precisely because they are invisible in normal use —
+ *  unlike .goosehints, which sits in every prompt, a skill costs nothing until something loads
+ *  it, so a wrong one can sit there being wrong for weeks. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SkillsScreen(cm: ConnectionManager, nav: NavController) {
+    LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSkills() }
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Skills") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+            actions = {
+                IconButton(onClick = { cm.refreshSkills() }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "refresh")
+                }
+            },
+        )
+    }) { pad ->
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+            if (cm.skills.value.isEmpty()) SettingCaption("No skills installed.")
+            cm.skills.value.forEach { sk ->
+                SettingsNavRow(sk.name, sk.description.take(90)) {
+                    nav.navigate("skill/" + Uri.encode(sk.name))
+                }
+            }
+            SettingCaption("Listed one line each to the model; the body is only read when it " +
+                "calls load_skill. That is why detailed tool procedure belongs here rather " +
+                "than in the hints, which are in context every single turn.")
+            Spacer(Modifier.height(28.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
+    LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSkills() }
+    val sk = cm.skills.value.firstOrNull { it.name == name }
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text(sk?.name ?: "Skill") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+        )
+    }) { pad ->
+        if (sk == null) {
+            Box(Modifier.padding(pad).fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Skill not found.", color = MaterialTheme.colorScheme.outline)
+            }
+            return@Scaffold
+        }
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+            Text(sk.description, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(vertical = 8.dp))
+            var body by remember(sk.path, sk.content) { mutableStateOf(sk.content) }
+            OutlinedTextField(body, { body = it }, minLines = 10, maxLines = 40,
+                enabled = sk.writable,
+                label = { Text(if (sk.writable) "SKILL.md" else "SKILL.md (read-only)") },
+                modifier = Modifier.fillMaxWidth())
+            if (sk.writable) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(enabled = body != sk.content,
+                        onClick = { cm.saveSkill(sk, body) }) { Text("Save") }
+                }
+            } else {
+                // Bundled skills live inside goose's own directory; a save would fail, so the
+                // field is disabled rather than offering an edit that cannot land.
+                SettingCaption("Bundled with goose, so it cannot be edited here.")
+            }
+            SettingCaption(sk.path)
             Spacer(Modifier.height(28.dp))
         }
     }

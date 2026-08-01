@@ -82,6 +82,18 @@ class ConnectionManager private constructor(context: Context) {
     val schedules = mutableStateOf<List<ScheduleInfo>>(emptyList())
     val recipes = mutableStateOf<List<RecipeInfo>>(emptyList())
 
+    /** Skills: the tool-usage guides goose pulls in with load_skill. Server state, listed on
+     *  demand -- they change rarely and there is no notification when they do. */
+    val skills = mutableStateOf<List<SkillInfo>>(emptyList())
+
+    fun refreshSkills() { client?.listSkills() }
+
+    fun saveSkill(s: SkillInfo, content: String) {
+        client?.updateSkill(s.path, s.name, s.description, content)
+    }
+
+    fun deleteSkill(path: String) { client?.deleteSkill(path) }
+
     /** The recipe a job runs, matched by file path. `schedules/list` gives a path and
      *  `recipes/list` gives a path, and nothing gives an id linking them -- so this is the join,
      *  and it returns null for a job created with an inline recipe (which the library never
@@ -1335,6 +1347,7 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Projects -> projects.value = ev.list
             is AcpEvent.Schedules -> schedules.value = ev.list
             is AcpEvent.Recipes -> recipes.value = ev.list
+            is AcpEvent.Skills -> skills.value = ev.list
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
                 store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })

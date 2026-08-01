@@ -102,6 +102,20 @@ data class RecipeInfo(
     val raw: JsonObject,
 )
 
+/** One skill from `sources/list {type: skill}` -- the same API that backs projects.
+ *
+ *  `content` is the whole SKILL.md, returned inline by the list call, so a skill can be read
+ *  and edited without a second round trip. `writable` is false for the ones goose bundles:
+ *  offering an edit that cannot be saved is worse than showing it read-only. */
+data class SkillInfo(
+    val name: String,
+    val description: String,
+    val content: String,
+    val path: String,
+    val global: Boolean,
+    val writable: Boolean,
+)
+
 data class RecipeParam(
     val key: String,
     val requirement: String,
@@ -127,6 +141,8 @@ data class ExtInfo(
 )
 
 /** Events surfaced from the ACP connection to the UI layer. */
+private const val SKILLS_TAG = "_goose/unstable/sources/list#skill"
+
 sealed interface AcpEvent {
     data class Status(val text: String) : AcpEvent
     /** messageId is set on REPLAYED chunks (goose stamps _meta.goose.messageId per source
@@ -165,6 +181,7 @@ sealed interface AcpEvent {
     data class Projects(val list: List<ProjectInfo>) : AcpEvent
     data class Schedules(val list: List<ScheduleInfo>) : AcpEvent
     data class Recipes(val list: List<RecipeInfo>) : AcpEvent
+    data class Skills(val list: List<SkillInfo>) : AcpEvent
     data class Extensions(val list: List<ExtInfo>) : AcpEvent
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
      *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
@@ -326,6 +343,23 @@ class AcpClient(
 
     /** List saved recipes. Reply arrives as [AcpEvent.Recipes]. */
     fun listRecipes() = rpc("_goose/unstable/recipes/list", buildJsonObject {})
+
+    /** List skills. Reply arrives as [AcpEvent.Skills]. Recipes are NOT listable this way --
+     *  `sources/list` rejects type "recipe" outright; they have their own API above. */
+    fun listSkills() = rpc("_goose/unstable/sources/list",
+        buildJsonObject { put("type", "skill") }, tag = SKILLS_TAG)
+
+    /** Rewrite a skill. `path` identifies it, exactly as with projects. */
+    fun updateSkill(path: String, name: String, description: String, content: String) =
+        rpc("_goose/unstable/sources/update", buildJsonObject {
+            put("type", "skill"); put("path", path)
+            put("name", name); put("description", description); put("content", content)
+        })
+
+    fun deleteSkill(path: String) =
+        rpc("_goose/unstable/sources/delete", buildJsonObject {
+            put("type", "skill"); put("path", path)
+        })
 
     fun pauseSchedule(id: String, paused: Boolean) =
         rpc("_goose/unstable/schedules/" + (if (paused) "pause" else "unpause"),
@@ -578,9 +612,12 @@ class AcpClient(
         })
     }
 
-    private fun rpc(method: String, params: JsonObject): Int {
+    /** @param tag what the reply dispatcher matches on. Defaults to the method, and differs
+     *  only where one method serves two features -- `sources/list` backs both projects and
+     *  skills, and the reply carries nothing that says which was asked for. */
+    private fun rpc(method: String, params: JsonObject, tag: String = method): Int {
         val id = nextId.getAndIncrement()
-        pending[id] = method
+        pending[id] = tag
         ws?.send(buildJsonObject {
             put("jsonrpc", "2.0"); put("id", id); put("method", method); put("params", params)
         }.toString())
@@ -706,6 +743,8 @@ class AcpClient(
             "_goose/unstable/sources/list" -> onEvent(AcpEvent.Projects(parseProjects(result)))
             "_goose/unstable/schedules/list" -> onEvent(AcpEvent.Schedules(parseSchedules(result)))
             "_goose/unstable/recipes/list" -> onEvent(AcpEvent.Recipes(parseRecipes(result)))
+            SKILLS_TAG -> onEvent(AcpEvent.Skills(parseSkills(result)))
+            "_goose/unstable/sources/update" -> listSkills()
             // Every mutation re-lists rather than patching local state: the server owns the
             // paused/running flags, and run-now in particular changes them without telling us.
             "_goose/unstable/schedules/pause",
@@ -853,6 +892,21 @@ class AcpClient(
                 name = name,
                 description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
                 path = path,
+            )
+        }.sortedBy { it.name.lowercase() }
+    }
+
+    private fun parseSkills(result: JsonObject?): List<SkillInfo> {
+        val arr = result?.get("sources") as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            SkillInfo(
+                name = o["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                content = o["content"]?.jsonPrimitive?.contentOrNull ?: "",
+                path = o["path"]?.jsonPrimitive?.contentOrNull ?: "",
+                global = o["global"]?.jsonPrimitive?.booleanOrNull ?: false,
+                writable = o["writable"]?.jsonPrimitive?.booleanOrNull ?: false,
             )
         }.sortedBy { it.name.lowercase() }
     }

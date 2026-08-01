@@ -14,7 +14,10 @@ import androidx.compose.foundation.layout.*
 import androidx.core.content.IntentCompat
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
@@ -221,6 +224,31 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                         })
                     }
                     HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    // What the agent can be given, and when it runs: skills are the notes it
+                    // pulls in on demand, recipes are the jobs, the scheduler is their cron.
+                    // All three are server state that was previously only reachable by editing
+                    // files on the box.
+                    NavigationDrawerItem(
+                        label = { Text("Skills") },
+                        icon = { Icon(Icons.Filled.School, contentDescription = null) },
+                        selected = route == "skills",
+                        onClick = { closeDrawer(); nav.navigate("skills") { launchSingleTop = true } },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                    NavigationDrawerItem(
+                        label = { Text("Recipes") },
+                        icon = { Icon(Icons.Filled.MenuBook, contentDescription = null) },
+                        selected = route == "recipes",
+                        onClick = { closeDrawer(); nav.navigate("recipes") { launchSingleTop = true } },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                    NavigationDrawerItem(
+                        label = { Text("Scheduler") },
+                        icon = { Icon(Icons.Filled.Schedule, contentDescription = null) },
+                        selected = route == "schedules",
+                        onClick = { closeDrawer(); nav.navigate("schedules") { launchSingleTop = true } },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
                     NavigationDrawerItem(
                         label = { Text("Settings") },
                         icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
@@ -247,6 +275,11 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             composable("instance") { InstanceScreen(cm, nav) }
             composable("providers") { ProvidersScreen(cm, nav) }
             composable("schedules") { SchedulesScreen(cm, nav) }
+            composable("recipes") { RecipesScreen(cm, nav) }
+            composable("skills") { SkillsScreen(cm, nav) }
+            composable("skill/{name}") { back ->
+                SkillScreen(cm, nav, Uri.decode(back.arguments?.getString("name") ?: ""))
+            }
             composable("recipe/{rid}") { back ->
                 RecipeScreen(cm, nav, back.arguments?.getString("rid") ?: "")
             }
