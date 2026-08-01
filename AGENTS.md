@@ -34,9 +34,28 @@ The APK lands in `app/build/outputs/apk/debug/`. `:app:compileDebugKotlin` is th
 `./gradlew --stop` before moving or renaming the checkout — the transform cache records absolute
 paths and a moved tree confuses it.
 
-`env.sh` hardcodes one JDK install path. If gradle dies with `JAVA_HOME is set to an invalid
-directory`, the JDK that path names is simply not on that machine — fix `JAVA_HOME` in `env.sh`
-(and install a JDK 17 if need be) before anything else.
+`env.sh` DETECTS the JDK rather than naming one, and that is deliberate — see the next section.
+If it reports no Java 17, install one or set `JAVA_HOME` before sourcing it; do not hardcode a
+path back into the file.
+
+## Two agents share this checkout
+
+It is worked on from the host (`~/dev/grouse`) and from inside the goose container, which mounts
+the same tree read-write at `/workspace/grouse` and builds the APK itself. There is no locking
+and no coordination: both can edit the same file in the same minute, and one can commit the
+other's uncommitted work without noticing whose it was.
+
+What follows from that, and it is not theoretical — every line here is something that already
+happened:
+
+- **Check `git status` and `git diff` before you start.** Uncommitted changes in this tree may
+  not be yours. They are more likely to be the other agent's than stale.
+- **Never write a machine-specific path into a shared file.** `env.sh` pointed at
+  `/usr/lib/jvm/...` (correct on the host, absent in the container), then at `$HOME/.jdk17`
+  (correct in the container, absent on the host). Each edit was right for its author and broke
+  the other. It detects now.
+- **Do not commit or push unless asked.** A sweeping `git add -A` will pick up whatever the
+  other agent is midway through, and attribute it to you.
 
 ## Layout
 
