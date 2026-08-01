@@ -2236,25 +2236,150 @@ private fun TypingIndicator() {
 // phone has no filesystem in common with the server, which is why the recipe library API
 // (recipes/list returns whole recipes) is the only workable way to show any of this here.
 
+private enum class CronKind { HOURLY, DAILY, WEEKLY, CUSTOM }
+
+/** A cron expression in the shapes people actually schedule things in.
+ *
+ *  Not a general cron editor: the field stays for anything this cannot express, and anything it
+ *  cannot PARSE opens as Custom rather than being silently rewritten into something close. A
+ *  picker that quietly turns an expression you meant into one it understands is worse than a
+ *  text box. */
+private data class CronSpec(
+    val kind: CronKind,
+    val minute: Int = 0,
+    val hour: Int = 6,
+    val fromHour: Int = 0,
+    val toHour: Int = 23,
+    val dow: String = "Mon",
+    val raw: String = "",
+)
+
+private val CRON_DAYS = listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+
+private fun parseCron(cron: String): CronSpec {
+    val f = cron.trim().split(Regex("\\s+"))
+    // goose prefixes a seconds field to a 5-field expression, so accept both spellings.
+    val p = when (f.size) { 6 -> f; 5 -> listOf("0") + f; else -> return CronSpec(CronKind.CUSTOM, raw = cron) }
+    val (sec, min, hour) = Triple(p[0], p[1], p[2])
+    val (dom, mon, dow) = Triple(p[3], p[4], p[5])
+    val m = min.toIntOrNull()
+    if (sec != "0" || m == null || dom != "*" || mon != "*") return CronSpec(CronKind.CUSTOM, raw = cron)
+    return when {
+        hour == "*" && dow == "*" -> CronSpec(CronKind.HOURLY, minute = m, fromHour = 0, toHour = 23)
+        hour.matches(Regex("\\d+-\\d+")) && dow == "*" -> {
+            val (a, b) = hour.split("-").map { it.toInt() }
+            CronSpec(CronKind.HOURLY, minute = m, fromHour = a, toHour = b)
+        }
+        hour.toIntOrNull() != null && dow == "*" ->
+            CronSpec(CronKind.DAILY, minute = m, hour = hour.toInt())
+        hour.toIntOrNull() != null && CRON_DAYS.any { it.equals(dow, true) } ->
+            CronSpec(CronKind.WEEKLY, minute = m, hour = hour.toInt(),
+                dow = CRON_DAYS.first { it.equals(dow, true) })
+        else -> CronSpec(CronKind.CUSTOM, raw = cron)
+    }
+}
+
+private fun buildCron(s: CronSpec): String = when (s.kind) {
+    CronKind.HOURLY ->
+        if (s.fromHour == 0 && s.toHour == 23) "0 ${s.minute} * * * *"
+        else "0 ${s.minute} ${s.fromHour}-${s.toHour} * * *"
+    CronKind.DAILY -> "0 ${s.minute} ${s.hour} * * *"
+    CronKind.WEEKLY -> "0 ${s.minute} ${s.hour} * * ${s.dow}"
+    CronKind.CUSTOM -> s.raw
+}
+
+/** Schedule editor: frequency first, then only the fields that frequency needs. */
+@Composable
+private fun CronEditor(value: String, onChange: (String) -> Unit) {
+    var spec by remember(value) { mutableStateOf(parseCron(value)) }
+    fun set(next: CronSpec) { spec = next; onChange(buildCron(next)) }
+
+    @Composable
+    fun numberPicker(label: String, current: Int, range: IntRange, step: Int = 1,
+                     onPick: (Int) -> Unit) {
+        var open by remember { mutableStateOf(false) }
+        Box {
+            SettingsNavRow(label, "%02d".format(current)) { open = true }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                range.step(step).forEach { v ->
+                    DropdownMenuItem(text = { Text("%02d".format(v)) },
+                        onClick = { onPick(v); open = false })
+                }
+            }
+        }
+    }
+
+    var kindOpen by remember { mutableStateOf(false) }
+    Box {
+        SettingsNavRow("Frequency", when (spec.kind) {
+            CronKind.HOURLY -> "Hourly"; CronKind.DAILY -> "Daily"
+            CronKind.WEEKLY -> "Weekly"; CronKind.CUSTOM -> "Custom"
+        }) { kindOpen = true }
+        DropdownMenu(expanded = kindOpen, onDismissRequest = { kindOpen = false }) {
+            listOf(CronKind.HOURLY to "Hourly", CronKind.DAILY to "Daily",
+                   CronKind.WEEKLY to "Weekly", CronKind.CUSTOM to "Custom").forEach { (k, lbl) ->
+                DropdownMenuItem(text = { Text(lbl) }, onClick = {
+                    kindOpen = false
+                    set(spec.copy(kind = k, raw = if (k == CronKind.CUSTOM) buildCron(spec) else spec.raw))
+                })
+            }
+        }
+    }
+
+    when (spec.kind) {
+        CronKind.HOURLY -> {
+            numberPicker("At minute", spec.minute, 0..55, 5) { set(spec.copy(minute = it)) }
+            numberPicker("From hour", spec.fromHour, 0..23) {
+                set(spec.copy(fromHour = it, toHour = maxOf(it, spec.toHour)))
+            }
+            numberPicker("To hour", spec.toHour, 0..23) {
+                set(spec.copy(toHour = it, fromHour = minOf(it, spec.fromHour)))
+            }
+        }
+        CronKind.DAILY -> {
+            numberPicker("Hour", spec.hour, 0..23) { set(spec.copy(hour = it)) }
+            numberPicker("Minute", spec.minute, 0..55, 5) { set(spec.copy(minute = it)) }
+        }
+        CronKind.WEEKLY -> {
+            var dayOpen by remember { mutableStateOf(false) }
+            Box {
+                SettingsNavRow("Day", spec.dow) { dayOpen = true }
+                DropdownMenu(expanded = dayOpen, onDismissRequest = { dayOpen = false }) {
+                    CRON_DAYS.forEach { d ->
+                        DropdownMenuItem(text = { Text(d) },
+                            onClick = { set(spec.copy(dow = d)); dayOpen = false })
+                    }
+                }
+            }
+            numberPicker("Hour", spec.hour, 0..23) { set(spec.copy(hour = it)) }
+            numberPicker("Minute", spec.minute, 0..55, 5) { set(spec.copy(minute = it)) }
+        }
+        CronKind.CUSTOM -> {
+            var raw by remember(spec.raw) { mutableStateOf(spec.raw) }
+            OutlinedTextField(raw, { raw = it; set(spec.copy(raw = it)) }, singleLine = true,
+                label = { Text("Cron expression") },
+                supportingText = { Text("Six fields, seconds first.") },
+                modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
 /** "0 0 7-22 * * *" -> "hourly, 07:00-22:00". Falls back to the raw expression, which is the
  *  honest thing to show for anything this does not recognise -- a wrong plain-English reading of
  *  a cron is worse than the cron. */
 fun cronInEnglish(cron: String): String {
-    val f = cron.trim().split(Regex("\\s+"))
-    // 5-field crons are legal too; goose prefixes a "0" seconds field for them.
-    val p = when (f.size) { 6 -> f; 5 -> listOf("0") + f; else -> return cron }
-    val (sec, min, hour) = Triple(p[0], p[1], p[2])
-    if (sec != "0" || !min.all { it.isDigit() }) return cron
-    val m = min.toIntOrNull() ?: return cron
-    fun hhmm(h: Int) = "%02d:%02d".format(h, m)
-    return when {
-        hour.all { it.isDigit() } -> "daily at ${hhmm(hour.toInt())}"
-        hour == "*" -> "hourly at :%02d".format(m)
-        hour.matches(Regex("\\d+-\\d+")) -> {
-            val (a, b) = hour.split("-").map { it.toInt() }
-            "hourly, ${hhmm(a)}-${hhmm(b)}"
-        }
-        else -> cron
+    if (cron.isBlank()) return "not scheduled"
+    val s = parseCron(cron)
+    fun hhmm(h: Int) = "%02d:%02d".format(h, s.minute)
+    // Falls back to the raw expression for anything the picker cannot describe. A wrong
+    // plain-English reading of a cron is worse than the cron.
+    return when (s.kind) {
+        CronKind.HOURLY ->
+            if (s.fromHour == 0 && s.toHour == 23) "hourly at :%02d".format(s.minute)
+            else "hourly, ${hhmm(s.fromHour)}-${hhmm(s.toHour)}"
+        CronKind.DAILY -> "daily at ${hhmm(s.hour)}"
+        CronKind.WEEKLY -> "${s.dow} at ${hhmm(s.hour)}"
+        CronKind.CUSTOM -> cron
     }
 }
 
@@ -2376,25 +2501,27 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
             }
 
             SettingsSection("Schedule") {
-                // The recipe reports its own cron, so this no longer depends on matching the
-                // job by path -- one fewer thing to get wrong, and it stays right even if the
-                // job list has not loaded yet.
                 val currentCron = r.cron ?: job?.cron ?: ""
                 var cron by remember(r.id, currentCron) { mutableStateOf(currentCron) }
-                OutlinedTextField(cron, { cron = it }, singleLine = true,
-                    label = { Text("Cron") },
-                    supportingText = {
-                        Text(if (cron.isBlank()) "Empty = not scheduled"
-                             else cronInEnglish(cron))
-                    },
-                    modifier = Modifier.fillMaxWidth())
+                // Cron stays the stored format -- it is what goose takes and what every other
+                // client shows. This only chooses one.
+                CronEditor(cron) { cron = it }
+                Text(
+                    if (cron.isBlank()) "Not scheduled" else cronInEnglish(cron),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp))
+                Text(cron.ifBlank { "—" }, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(enabled = cron.trim() != currentCron, onClick = {
-                        cm.setRecipeCron(r.id, cron.trim().ifBlank { null })
-                    }) { Text(if (cron.isBlank()) "Unschedule" else "Save schedule") }
+                    if (currentCron.isNotBlank()) {
+                        TextButton(onClick = { cm.setRecipeCron(r.id, null); cron = "" }) {
+                            Text("Unschedule")
+                        }
+                    }
+                    TextButton(enabled = cron.isNotBlank() && cron.trim() != currentCron,
+                        onClick = { cm.setRecipeCron(r.id, cron.trim()) }) { Text("Save schedule") }
                 }
-                SettingCaption("Six fields, seconds first — \"0 0 6 * * *\" is 06:00 daily. " +
-                    "Server local time.")
+                SettingCaption("Server local time.")
                 job?.let {
                     SettingsSwitchRow("Enabled", !it.paused) { on ->
                         cm.setSchedulePaused(it.id, !on)
