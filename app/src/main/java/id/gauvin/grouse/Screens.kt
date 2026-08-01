@@ -2412,7 +2412,7 @@ fun cronInEnglish(cron: String): String {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
+fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String, onOpenChat: () -> Unit) {
     LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
     val r = cm.recipes.value.firstOrNull { it.id == recipeId }
     val job = cm.schedules.value.firstOrNull { it.source == r?.filePath }
@@ -2437,6 +2437,9 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
         Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
             .verticalScroll(rememberScrollState())) {
 
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Button(onClick = { cm.runRecipe(r.id); onOpenChat() }) { Text("Start session") }
+            }
             if (r.description.isNotBlank()) {
                 Text(r.description, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
@@ -2932,7 +2935,7 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
  *  what to run, a schedule is when. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RecipesScreen(cm: ConnectionManager, nav: NavController) {
+fun RecipesScreen(cm: ConnectionManager, nav: NavController, onOpenChat: () -> Unit) {
     LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
     var note by remember { mutableStateOf<String?>(null) }
     Scaffold(topBar = {
@@ -2985,6 +2988,12 @@ fun RecipesScreen(cm: ConnectionManager, nav: NavController) {
                             Switch(checked = !job.paused,
                                 onCheckedChange = { cm.setSchedulePaused(job.id, !it) })
                     }
+                }
+                Row {
+                    // Running a recipe = starting a session FROM it. goose applies its
+                    // extensions, settings and instructions and titles the session after it, so
+                    // this is the same object the scheduler runs, driven by hand.
+                    TextButton(onClick = { cm.runRecipe(r.id); onOpenChat() }) { Text("Start session") }
                 }
                 if (job != null) {
                     Row {

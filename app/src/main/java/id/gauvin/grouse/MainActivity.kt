@@ -277,7 +277,11 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             composable("extensions") { ExtensionsScreen(cm, nav) }
             composable("instance") { InstanceScreen(cm, nav) }
             composable("providers") { ProvidersScreen(cm, nav) }
-            composable("recipes") { RecipesScreen(cm, nav) }
+            composable("recipes") {
+                RecipesScreen(cm, nav, onOpenChat = {
+                    nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+                })
+            }
             composable("code") {
                 CodeScreen(cm, nav, onOpenChat = {
                     nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
@@ -288,7 +292,9 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                 SkillScreen(cm, nav, Uri.decode(back.arguments?.getString("name") ?: ""))
             }
             composable("recipe/{rid}") { back ->
-                RecipeScreen(cm, nav, back.arguments?.getString("rid") ?: "")
+                RecipeScreen(cm, nav, back.arguments?.getString("rid") ?: "", onOpenChat = {
+                    nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+                })
             }
         }
     }

@@ -346,6 +346,11 @@ class AcpClient(
      *  [DEFAULT_CWD] (the Inbox project) for Chat/Assistant; set a project path for anything
      *  filed. Whatever this is becomes the session's project name in Goose Desktop. */
     var desiredCwd: String = DEFAULT_CWD
+
+    /** Library id of a recipe to start the new session FROM. goose loads the recipe, applies its
+     *  extensions/settings/instructions, and titles the session after it -- which is also how a
+     *  client can later tell what the session is for. Null starts a plain chat. */
+    var desiredRecipeId: String? = null
     // True between sending session/load and its response (i.e. while history replays).
     private var replaying = false
 
@@ -953,7 +958,12 @@ class AcpClient(
         // visible against 50 actually present. The goose CLI's `session list` filters the same
         // way, which is what let deliver.sh create a duplicate Assistant it could not see
         // (the 2026-07-26 fork). The value is not interpreted; only its presence matters.
-        putJsonObject("_meta") { put("client", "grouse") }
+        putJsonObject("_meta") {
+            put("client", "grouse")
+            // Start FROM a recipe: goose resolves it server-side, applies its extensions,
+            // settings and instructions, and names the session after the recipe.
+            desiredRecipeId?.let { put("recipeId", it) }
+        }
     })
 
     private fun parseConfig(result: JsonObject?): List<ConfigOption> {

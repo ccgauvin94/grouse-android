@@ -110,25 +110,43 @@ class ConnectionManager private constructor(context: Context) {
     val codeProjectDirs = mutableStateOf<List<String>>(emptyList())
     private val scanPending = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-    /** Browse [path]. With no path, browse the first root the server reported -- and if no
-     *  roots are known yet, ask for "/" so the refusal names them (the server includes its
-     *  roots even when it rejects the path). */
-    fun browse(path: String? = null) {
+    /** Browse one server directory. */
+    fun browse(path: String) {
         val sid = currentSession.value ?: return
-        client?.listDirectory(sid, path ?: browseRoots.value.firstOrNull() ?: "/")
+        client?.listDirectory(sid, path)
     }
 
-    /** Find the coding projects: list each root, then look inside each child for AGENTS.md.
-     *  One listing per candidate directory, which is a handful of calls and is why the result
-     *  is kept rather than recomputed per screen. */
+    /** The open session's own working directory: always inside the server's browse roots, so it
+     *  is the one path guaranteed to be listable without knowing the roots first. */
+    private fun currentCwd(): String? = currentSession.value?.let { id ->
+        sessions.value.firstOrNull { it.sessionId == id }?.cwd?.takeIf { it.isNotBlank() }
+            ?: store.sessionCwd(id)
+    }
+
+    /** Find the coding projects: discover the roots, list each, then look inside each child for
+     *  AGENTS.md.
+     *
+     *  Bootstrapping is the fiddly part and got it wrong once: the roots are only learned FROM a
+     *  listing reply, and the first cut asked for "/" to learn them. "/" is outside the roots,
+     *  so the server refused it, the refusal carried no roots, and the scan reported "no
+     *  AGENTS.md found" having listed nothing at all. It starts from the open session's own cwd
+     *  instead, which is inside the roots by construction. */
     fun scanCodeProjects() {
         val sid = currentSession.value ?: return
         scanPending.clear()
         codeProjectDirs.value = emptyList()
         val roots = browseRoots.value
-        if (roots.isEmpty()) { browse(); return }
+        if (roots.isEmpty()) {
+            val seed = currentCwd() ?: return
+            scanSeeding = true
+            client?.listDirectory(sid, seed)
+            return
+        }
         roots.forEach { r -> scanPending.add(r); client?.listDirectory(sid, r) }
     }
+
+    /** True while waiting for the reply that will tell us what the roots are. */
+    @Volatile private var scanSeeding = false
 
     fun saveSkill(s: SkillInfo, content: String) {
         client?.updateSkill(s.path, s.name, s.description, content)
@@ -217,8 +235,15 @@ class ConnectionManager private constructor(context: Context) {
             .sortedByDescending { it.value.maxOfOrNull { s -> s.updatedAt } ?: "" }
             .map { (dir, list) -> dir to list.sortedByDescending { it.updatedAt } }
 
-    /** Start a coding session in [dir] -- an absolute path the server offered. */
-    fun newRepoSession(dir: String) = newSession(cwd = dir.trimEnd('/'), kind = SessionKind.CODE)
+    /** Start a coding session in [dir] -- an absolute path the server offered.
+     *
+     *  Started FROM the coding recipe when one is configured: that is what makes the session
+     *  identifiable as code afterwards, and it brings the recipe's tools with it. Without a
+     *  configured recipe it is still a session in the right directory, just not marked. */
+    fun newRepoSession(dir: String) {
+        val rid = recipes.value.firstOrNull { it.title == store.codingRecipe }?.id
+        newSession(cwd = dir.trimEnd('/'), kind = SessionKind.CODE, recipeId = rid)
+    }
 
     fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
         val byName = projects.value.associate { it.id to it.name }
@@ -612,11 +637,29 @@ class ConnectionManager private constructor(context: Context) {
         open(resume = sessionId, kind = kind)
     }
 
-    fun newSession(cwd: String = DEFAULT_CWD, kind: SessionKind = SessionKind.CHAT) {
+    fun newSession(
+        cwd: String = DEFAULT_CWD,
+        kind: SessionKind = SessionKind.CHAT,
+        recipeId: String? = null,
+    ) {
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
+        pendingRecipeId = recipeId
         open(resume = null, cwd = cwd, kind = kind)
     }
+
+    /** Carried to the next session/new. Cleared by open() once handed to the client, so a plain
+     *  chat started afterwards does not inherit the recipe. */
+    @Volatile private var pendingRecipeId: String? = null
+
+    /** Run a recipe: start a session from it, optionally in [cwd].
+     *
+     *  This is what "running" a recipe means interactively -- goose applies the recipe's
+     *  extensions, settings and instructions to a real session you then talk to, rather than
+     *  executing it once and discarding it. The scheduled jobs use the same recipes through the
+     *  scheduler; this is the same object driven by hand. */
+    fun runRecipe(recipeId: String, cwd: String? = null) =
+        newSession(cwd = cwd ?: DEFAULT_CWD, kind = SessionKind.CHAT, recipeId = recipeId)
 
     /** Start a chat in a directory under the chat-projects mount.
      *
@@ -1149,6 +1192,7 @@ class ConnectionManager private constructor(context: Context) {
             it.resumeCwd = resolvedCwd ?: DEFAULT_CWD
             it.resumeCwdKnown = resolvedCwd != null
             it.desiredCwd = resolvedCwd ?: DEFAULT_CWD
+            it.desiredRecipeId = pendingRecipeId.also { _ -> pendingRecipeId = null }
             it.connect()
         }
     }
@@ -1390,6 +1434,12 @@ class ConnectionManager private constructor(context: Context) {
                 browsedPath.value = ev.path
                 browsedDirs.value = ev.dirs
                 if (ev.roots.isNotEmpty()) browseRoots.value = ev.roots
+                // The seeding reply exists only to learn the roots; start the real scan now.
+                if (scanSeeding && ev.roots.isNotEmpty()) {
+                    scanSeeding = false
+                    scanCodeProjects()
+                    return
+                }
                 // A scan in flight: a root's reply queues its children, a child's reply is
                 // checked for AGENTS.md. Anything not part of a scan is plain browsing.
                 if (scanPending.remove(ev.path)) {
