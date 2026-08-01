@@ -1525,11 +1525,6 @@ private fun Context.findActivity(): android.app.Activity? {
 @Composable
 fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Unit) {
     val ctx = LocalContext.current
-    var host by remember { mutableStateOf(cm.store.host) }
-    var port by remember { mutableStateOf(cm.store.port) }
-    var newKey by remember { mutableStateOf("") }
-    var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
-    var persistent by remember { mutableStateOf(cm.persistent) }
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Settings") },
@@ -1577,28 +1572,6 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 SettingsNavRow("Assistant", "The persistent thread and its scheduled jobs") {
                     nav.navigate("assistant_settings")
                 }
-            }
-
-            SettingsSection("Notifications & background") {
-                var pushOn by remember { mutableStateOf(cm.store.pushEnabled) }
-                SettingsSwitchRow("Push notifications", pushOn) { on ->
-                    pushOn = on
-                    val act = ctx.findActivity()
-                    if (on && act != null) Push.enable(act) else Push.disable(ctx)
-                }
-                SettingCaption("Server-pushed briefings/alerts via your distributor (NextPush) — " +
-                    "no always-on socket, no FCM.")
-                val endpoint = cm.store.pushEndpoint
-                if (endpoint.isNotBlank()) {
-                    SelectionContainer {
-                        Text("Endpoint: $endpoint", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline)
-                    }
-                }
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
-                SettingCaption("On: stay connected in the background (persistent notification, more battery). " +
-                    "Off: connect while active; you still get a finished-turn notification.")
             }
 
             SettingsSection("Appearance") {
@@ -2569,7 +2542,6 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
     var host by remember { mutableStateOf(cm.store.host) }
     var port by remember { mutableStateOf(cm.store.port) }
     var newKey by remember { mutableStateOf("") }
-    var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
     var persistent by remember { mutableStateOf(cm.persistent) }
     val ctx = LocalContext.current
     Scaffold(topBar = {
@@ -2597,11 +2569,26 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
                 }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("Save & reconnect") }
             }
 
-            SettingsSection("Behaviour") {
+            SettingsSection("Notifications & background") {
+                var pushOn by remember { mutableStateOf(cm.store.pushEnabled) }
+                SettingsSwitchRow("Push notifications", pushOn) { on ->
+                    pushOn = on
+                    val act = ctx.findActivity()
+                    if (on && act != null) Push.enable(act) else Push.disable(ctx)
+                }
+                SettingCaption("Server-pushed briefings/alerts via your distributor (NextPush) — " +
+                    "no always-on socket, no FCM.")
+                val endpoint = cm.store.pushEndpoint
+                if (endpoint.isNotBlank()) {
+                    SelectionContainer {
+                        Text("Endpoint: $endpoint", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline)
+                    }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
                 SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
-                SettingCaption("On: stay connected in the background (persistent notification, " +
-                    "more battery). Off: connect while active; you still get a finished-turn " +
-                    "notification.")
+                SettingCaption("On: stay connected in the background (persistent notification, more battery). " +
+                    "Off: connect while active; you still get a finished-turn notification.")
             }
 
 
@@ -2613,11 +2600,7 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
-    var host by remember { mutableStateOf(cm.store.host) }
-    var port by remember { mutableStateOf(cm.store.port) }
-    var newKey by remember { mutableStateOf("") }
     var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
-    var persistent by remember { mutableStateOf(cm.persistent) }
     val ctx = LocalContext.current
     Scaffold(topBar = {
         TopAppBar(
