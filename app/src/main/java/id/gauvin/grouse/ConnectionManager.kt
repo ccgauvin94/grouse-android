@@ -92,20 +92,42 @@ class ConnectionManager private constructor(context: Context) {
 
     fun refreshSkills() { client?.listSkills() }
 
-    /** Directories under CODE_ROOT on the server, for adding a repo that has no session yet. */
+    /** Absolute directories the server is willing to browse, and what is inside the one asked
+     *  for. Both come from fs/list_directory: the roots are GOOSE_BROWSE_ROOTS on the server,
+     *  so the client never has to know where this particular box keeps code. */
+    val browseRoots = mutableStateOf<List<String>>(emptyList())
+    val browsedPath = mutableStateOf("")
     val browsedDirs = mutableStateOf<List<String>>(emptyList())
 
-    fun browseCodeRoot() {
-        val sid = currentSession.value
-        if (sid != null) client?.listDirectory(sid, CODE_ROOT)
-        // No session open yet (cold start): the throwaway utility session exists for exactly
-        // this -- a sessionId with no conversation attached.
-        else runToolDirect("shell", kotlinx.serialization.json.buildJsonObject {
-            put("command", kotlinx.serialization.json.JsonPrimitive(
-                "ls -1 $CODE_ROOT"))
-        }, timeoutMs = 20_000) { err, out ->
-            if (err == null) browsedDirs.value = out.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        }
+    /** Directories that contain an AGENTS.md, i.e. codebases that have told goose how to work
+     *  in them. These are the pinned coding projects.
+     *
+     *  AGENTS.md is goose's OWN context file (crates/goose/src/hints -- alongside .goosehints,
+     *  and configurable via CONTEXT_FILE_NAMES), discovered from a session's cwd up to the git
+     *  root. So a directory carrying one is already a place goose behaves differently, and
+     *  pinning exactly those needs no convention of ours and no per-machine configuration.
+     *  Scanned rather than remembered: adding one on the server should be enough. */
+    val codeProjectDirs = mutableStateOf<List<String>>(emptyList())
+    private val scanPending = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    /** Browse [path]. With no path, browse the first root the server reported -- and if no
+     *  roots are known yet, ask for "/" so the refusal names them (the server includes its
+     *  roots even when it rejects the path). */
+    fun browse(path: String? = null) {
+        val sid = currentSession.value ?: return
+        client?.listDirectory(sid, path ?: browseRoots.value.firstOrNull() ?: "/")
+    }
+
+    /** Find the coding projects: list each root, then look inside each child for AGENTS.md.
+     *  One listing per candidate directory, which is a handful of calls and is why the result
+     *  is kept rather than recomputed per screen. */
+    fun scanCodeProjects() {
+        val sid = currentSession.value ?: return
+        scanPending.clear()
+        codeProjectDirs.value = emptyList()
+        val roots = browseRoots.value
+        if (roots.isEmpty()) { browse(); return }
+        roots.forEach { r -> scanPending.add(r); client?.listDirectory(sid, r) }
     }
 
     fun saveSkill(s: SkillInfo, content: String) {
@@ -163,32 +185,34 @@ class ConnectionManager private constructor(context: Context) {
     /** Sessions grouped by project, most-recent project first, unfiled last. Unfiled is ONE
      *  bucket: the old cwd grouping made a separate group per directory, which is how a single
      *  "state" project ended up holding every chat. */
-    /** A session is CODE work if its working directory is inside the code mount.
+    /** The recipe that marks a session as coding work. Empty disables the Code section.
      *
-     *  goose has no field for what a session is FOR -- session_type is provenance (who created
-     *  it), project_id is grouping, and the one free-looking column is a legacy alias for the
-     *  title. What it does have is a working directory, and on this box that already carries the
-     *  answer: ~/dev is mounted at /workspace and holds repositories, while chats live at
-     *  /projects or /state. So the split is read off state goose already keeps, with nothing
-     *  added to the server and nothing to keep in sync.
-     *
-     *  This is only trustworthy because a resumed session's cwd is resolved from the session list
-     *  or asked of the server, never guessed -- see open(). A client that guessed would silently
-     *  reclassify sessions by opening them. */
-    fun isCode(s: SessionInfo): Boolean = s.cwd.startsWith("$CODE_ROOT/")
+     *  A NAME, not a path. The first cut keyed this off the working directory being under
+     *  "/workspace", which is one server's mount and nobody else's -- pointed at any other
+     *  goose the Code section would simply have been empty, with nothing to explain why.
+     *  Recipes exist on every goose, are already how a session's tools/model/instructions are
+     *  chosen, and travel with the server rather than being assumed by the client. */
+    var codingRecipe: String
+        get() = store.codingRecipe
+        set(v) { store.codingRecipe = v }
 
-    /** Repo path -> its sessions, newest first; repos ordered by most recent activity. One entry
-     *  per directory directly under the code root, which is what a "coding project" is here. */
+    /** True when this session was started from the coding recipe. */
+    fun isCode(s: SessionInfo): Boolean =
+        store.codingRecipe.isNotBlank() && s.recipeTitle == store.codingRecipe
+
+    /** Coding sessions grouped by the directory they work in, newest group first.
+     *
+     *  The recipe says a session IS code; its cwd says WHICH codebase. Neither is assumed --
+     *  the recipe name is configured and the directories come from the server. */
     fun codeProjects(): List<Pair<String, List<SessionInfo>>> =
         sessions.value.filter { isCode(it) }
-            .groupBy { s -> s.cwd.removePrefix("$CODE_ROOT/").substringBefore('/') }
+            .groupBy { it.cwd.trimEnd('/') }
             .entries
             .sortedByDescending { it.value.maxOfOrNull { s -> s.updatedAt } ?: "" }
-            .map { (repo, list) -> repo to list.sortedByDescending { it.updatedAt } }
+            .map { (dir, list) -> dir to list.sortedByDescending { it.updatedAt } }
 
-    /** Start a coding session in [repo], a directory name directly under the code root. */
-    fun newRepoSession(repo: String) =
-        newSession(cwd = "$CODE_ROOT/${repo.trim().trim('/')}", kind = SessionKind.CODE)
+    /** Start a coding session in [dir] -- an absolute path the server offered. */
+    fun newRepoSession(dir: String) = newSession(cwd = dir.trimEnd('/'), kind = SessionKind.CODE)
 
     fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
         val byName = projects.value.associate { it.id to it.name }
@@ -421,8 +445,6 @@ class ConnectionManager private constructor(context: Context) {
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
     private var pendingOpenCwd: String = DEFAULT_CWD
 
-    /** Where repositories live inside the container (host ~/dev). Sessions under it are code. */
-    val codeRoot: String get() = CODE_ROOT
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
 
     // Voice: the voice sheet has a short lifecycle, so CM owns speaking the reply (it survives the
@@ -1358,7 +1380,20 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Schedules -> schedules.value = ev.list
             is AcpEvent.Recipes -> recipes.value = ev.list
             is AcpEvent.Skills -> skills.value = ev.list
-            is AcpEvent.Directory -> browsedDirs.value = ev.dirs
+            is AcpEvent.Directory -> {
+                browsedPath.value = ev.path
+                browsedDirs.value = ev.dirs
+                if (ev.roots.isNotEmpty()) browseRoots.value = ev.roots
+                // A scan in flight: a root's reply queues its children, a child's reply is
+                // checked for AGENTS.md. Anything not part of a scan is plain browsing.
+                if (scanPending.remove(ev.path)) {
+                    val sid = currentSession.value
+                    ev.dirs.forEach { d -> scanPending.add(d); if (sid != null) client?.listDirectory(sid, d) }
+                } else if (ev.files.any { it.equals("AGENTS.md", true) }) {
+                    if (ev.path !in codeProjectDirs.value)
+                        codeProjectDirs.value = (codeProjectDirs.value + ev.path).sorted()
+                }
+            }
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
                 store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })

@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
@@ -2867,6 +2868,30 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 }
             }
 
+            SettingsSection("Code") {
+                // Which recipe means "coding work". A recipe rather than a directory, so the
+                // same app works against any goose -- and blank by default, because a fresh
+                // install cannot know which recipe, if any, means code on that server.
+                LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
+                var open by remember { mutableStateOf(false) }
+                val current = cm.codingRecipe.ifBlank { "(none)" }
+                var chosen by remember(cm.codingRecipe) { mutableStateOf(cm.codingRecipe) }
+                Box {
+                    SettingsNavRow("Coding recipe", chosen.ifBlank { current }) { open = true }
+                    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                        DropdownMenuItem(text = { Text("(none)") },
+                            onClick = { chosen = ""; cm.codingRecipe = ""; open = false })
+                        cm.recipes.value.forEach { r ->
+                            DropdownMenuItem(text = { Text(r.title) },
+                                onClick = { chosen = r.title; cm.codingRecipe = r.title; open = false })
+                        }
+                    }
+                }
+                SettingCaption("Sessions started from this recipe show under Code. Projects " +
+                    "there are directories containing an AGENTS.md, found under whatever roots " +
+                    "the server allows browsing.")
+            }
+
             SettingsSection("Catalog") {
                 SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
                 SettingCaption("Off shows only providers set up on your goose. On lists goose's " +
@@ -3052,25 +3077,33 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
 }
 
 
-/** Code: the repositories on the server, and the sessions working in each.
+/** Code: the coding projects on the server, and the sessions working in each.
  *
- *  The counterpart to Chats. A coding session is one whose working directory is inside the code
- *  root -- see ConnectionManager.isCode -- so this screen and the chats drawer partition the
- *  same session list rather than duplicating it.
+ *  TWO INDEPENDENT DEMARCATIONS, because they answer different questions and goose answers
+ *  neither with a field:
  *
- *  Repos with no session yet are listed too, read from the server with fs/list_directory. That
- *  is the "drive a new one from the UI" half: the phone has no filesystem in common with the
- *  server, so without a server-side listing you could only open a repo whose exact path you
- *  already knew and typed correctly. */
+ *   - A PROJECT is a directory containing AGENTS.md. That is goose's own context file, read
+ *     automatically from a session's cwd up to the git root, so a directory carrying one is
+ *     already somewhere goose behaves differently. Pinning exactly those needs no convention of
+ *     ours and nothing configured per machine.
+ *   - A SESSION is coding work if it was started from the coding recipe. A recipe is what
+ *     decides a session's tools, model and instructions, so it is the honest way to say what a
+ *     session is for -- and unlike a directory it means the same on every server.
+ *
+ *  Neither is a path this app knows. The roots come from the server (GOOSE_BROWSE_ROOTS, in the
+ *  fs/list_directory reply) and the recipe is chosen from the server's own recipe list. An
+ *  earlier cut hardcoded "/workspace", which is one machine's mount: against any other goose
+ *  the section would have been silently empty.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CodeScreen(cm: ConnectionManager, nav: NavController, onOpenChat: () -> Unit) {
     LaunchedEffect(cm.online.value) {
-        if (cm.online.value) { cm.listSessions(); cm.browseCodeRoot() }
+        if (cm.online.value) { cm.listSessions(); cm.refreshSchedules(); cm.scanCodeProjects() }
     }
-    val active = cm.codeProjects()
-    val activeNames = active.map { it.first }.toSet()
-    val idle = cm.browsedDirs.value.filterNot { it in activeNames }
+    val byDir = cm.codeProjects().toMap()
+    val pinned = cm.codeProjectDirs.value
+    val strays = byDir.keys.filterNot { it in pinned }   // coding sessions outside any project
 
     Scaffold(topBar = {
         TopAppBar(
@@ -3081,22 +3114,40 @@ fun CodeScreen(cm: ConnectionManager, nav: NavController, onOpenChat: () -> Unit
                 }
             },
             actions = {
-                IconButton(onClick = { cm.listSessions(); cm.browseCodeRoot() }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "refresh")
+                IconButton(onClick = { cm.listSessions(); cm.scanCodeProjects() }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "rescan")
                 }
             },
         )
     }) { pad ->
         LazyColumn(Modifier.padding(pad).fillMaxSize()) {
-            if (active.isEmpty() && idle.isEmpty()) {
+            if (cm.codingRecipe.isBlank()) {
                 item {
-                    Text("No repositories visible on the server.",
+                    Column(Modifier.padding(16.dp)) {
+                        Text("No coding recipe chosen.", style = MaterialTheme.typography.titleSmall)
+                        Text("Pick which recipe means \"coding\" in Settings › Providers, and " +
+                            "sessions started from it appear here. Projects are directories " +
+                            "with an AGENTS.md.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
+            if (pinned.isEmpty() && strays.isEmpty()) {
+                item {
+                    Text("No AGENTS.md found under the server's browsable roots" +
+                        (cm.browseRoots.value.takeIf { it.isNotEmpty() }
+                            ?.joinToString(", ", prefix = " (", postfix = ")") ?: "") + ".",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(16.dp))
                 }
             }
-            items(active, key = { it.first }) { (repo, list) ->
-                var open by remember(repo) { mutableStateOf(false) }
+            items(pinned + strays, key = { it }) { dir ->
+                val list = byDir[dir].orEmpty()
+                val isPinned = dir in pinned
+                var open by remember(dir) { mutableStateOf(false) }
                 Column(Modifier.fillMaxWidth()) {
                     Row(
                         Modifier.fillMaxWidth().clickable { open = !open }
@@ -3104,51 +3155,35 @@ fun CodeScreen(cm: ConnectionManager, nav: NavController, onOpenChat: () -> Unit
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
-                            if (open) Icons.Filled.KeyboardArrowDown
-                            else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = null, tint = MaterialTheme.colorScheme.outline)
-                        Spacer(Modifier.width(8.dp))
+                            if (isPinned) Icons.Filled.PushPin else Icons.Filled.Folder,
+                            contentDescription = null, tint = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(repo, style = MaterialTheme.typography.titleSmall)
+                            Text(dir.trimEnd('/').substringAfterLast('/'),
+                                style = MaterialTheme.typography.titleSmall)
                             Text(
-                                if (list.size == 1) "1 session" else "${list.size} sessions",
+                                buildString {
+                                    append(if (list.isEmpty()) "no sessions"
+                                           else if (list.size == 1) "1 session" else "${list.size} sessions")
+                                    if (!isPinned) append("  ·  no AGENTS.md")
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline)
                         }
-                        IconButton(onClick = { cm.newRepoSession(repo); onOpenChat() }) {
-                            Icon(Icons.Filled.Add, contentDescription = "new session in $repo")
+                        IconButton(onClick = { cm.newRepoSession(dir); onOpenChat() }) {
+                            Icon(Icons.Filled.Add, contentDescription = "new session here")
                         }
                     }
-                    if (open) list.forEach { s ->
+                    if (open) list.forEach { sess ->
                         Text(
-                            s.title.ifBlank { s.sessionId },
+                            sess.title.ifBlank { sess.sessionId },
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.fillMaxWidth()
-                                .clickable { cm.openSession(s.sessionId); onOpenChat() }
-                                .padding(start = 48.dp, end = 16.dp, top = 8.dp, bottom = 8.dp))
+                                .clickable { cm.openSession(sess.sessionId); onOpenChat() }
+                                .padding(start = 50.dp, end = 16.dp, top = 8.dp, bottom = 8.dp))
                     }
                     HorizontalDivider()
-                }
-            }
-            if (idle.isNotEmpty()) {
-                item {
-                    Text("NOT YET OPENED", style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(start = 16.dp, top = 20.dp, bottom = 4.dp))
-                }
-                items(idle, key = { it }) { repo ->
-                    Row(
-                        Modifier.fillMaxWidth().clickable { cm.newRepoSession(repo); onOpenChat() }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Filled.Folder, contentDescription = null,
-                            tint = MaterialTheme.colorScheme.outline)
-                        Spacer(Modifier.width(12.dp))
-                        Text(repo, Modifier.weight(1f))
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
-                            tint = MaterialTheme.colorScheme.outline)
-                    }
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }

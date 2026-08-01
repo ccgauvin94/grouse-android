@@ -21,11 +21,10 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 const val DEFAULT_CWD = "/home/colin/Projects/Inbox"
 
-/** Where repositories live inside the goose container (the host's ~/dev, mounted read-write).
- *  A session whose working directory is under this is CODE work; anything else is a chat. That
- *  is the whole discriminator -- see ConnectionManager.isCode for why it is a directory and not
- *  a field on the session. */
-const val CODE_ROOT = "/workspace"
+// There is deliberately NO code-root constant here. An earlier cut hardcoded "/workspace",
+// which is this one server's mount and nobody else's -- the app would have shown an empty Code
+// section against any other goose. The server reports its own browsable roots in the
+// fs/list_directory reply (GOOSE_BROWSE_ROOTS), and that is where they come from.
 
 /** A selectable value inside a [ConfigOption] (goose "select" config). */
 data class Choice(val value: String, val label: String)
@@ -53,6 +52,14 @@ data class SessionInfo(
     val model: String,
     // Where the session's TOOLS run. No longer what a session belongs to -- see projectId.
     val cwd: String = "",
+    /** Title of the recipe this session was started from, or "" for an ad-hoc chat.
+     *
+     *  This is what makes a session's PURPOSE knowable. goose has no field for it: session_type
+     *  is provenance, project_id is grouping. A recipe is the thing that says how a session
+     *  works -- its tools, model and instructions -- so "started from the coding recipe" is the
+     *  honest way to say "this is coding work", and unlike a directory it means the same on
+     *  every server. */
+    val recipeTitle: String = "",
     /** The project this session is filed under, or null for unfiled.
      *
      *  goose has modelled projects as named sources with ids the whole time (sources.rs stores
@@ -236,8 +243,15 @@ sealed interface AcpEvent {
     data class Schedules(val list: List<ScheduleInfo>) : AcpEvent
     data class Recipes(val list: List<RecipeInfo>) : AcpEvent
     data class Skills(val list: List<SkillInfo>) : AcpEvent
-    /** Reply to listDirectory: the directories directly under [path] on the SERVER. */
-    data class Directory(val path: String, val dirs: List<String>) : AcpEvent
+    /** Reply to listDirectory: directories under [path], plus the roots the SERVER is willing
+     *  to browse at all. The roots are the generalizable answer to "where does code live" --
+     *  server configuration, not a client guess. */
+    data class Directory(
+        val path: String,
+        val dirs: List<String>,
+        val files: List<String>,
+        val roots: List<String>,
+    ) : AcpEvent
     data class Extensions(val list: List<ExtInfo>) : AcpEvent
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
      *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
@@ -816,8 +830,15 @@ class AcpClient(
                 (result?.get("entries") as? JsonArray).orEmpty().mapNotNull { e ->
                     val o = e as? JsonObject ?: return@mapNotNull null
                     if (o["isDir"]?.jsonPrimitive?.booleanOrNull != true) null
+                    else o["path"]?.jsonPrimitive?.contentOrNull
+                },
+                (result?.get("entries") as? JsonArray).orEmpty().mapNotNull { e ->
+                    val o = e as? JsonObject ?: return@mapNotNull null
+                    if (o["isDir"]?.jsonPrimitive?.booleanOrNull == true) null
                     else o["name"]?.jsonPrimitive?.contentOrNull
-                }))
+                },
+                (result?.get("roots") as? JsonArray).orEmpty()
+                    .mapNotNull { it.jsonPrimitive.contentOrNull }))
             "_goose/unstable/sources/update" -> listSkills()
             // Every mutation re-lists rather than patching local state: the server owns the
             // paused/running flags, and run-now in particular changes them without telling us.
@@ -1062,6 +1083,9 @@ class AcpClient(
                 messageCount = meta?.get("messageCount")?.jsonPrimitive?.intOrNull ?: 0,
                 model = meta?.get("modelId")?.jsonPrimitive?.contentOrNull ?: "",
                 cwd = o["cwd"]?.jsonPrimitive?.contentOrNull ?: "",
+                // snake_case in the wire format, like the rest of SessionMeta's optional keys.
+                recipeTitle = meta?.get("recipeTitle")?.jsonPrimitive?.contentOrNull
+                    ?: meta?.get("recipe_title")?.jsonPrimitive?.contentOrNull ?: "",
                 projectId = meta?.get("projectId")?.jsonPrimitive?.contentOrNull,
             )
         }

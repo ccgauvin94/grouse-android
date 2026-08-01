@@ -120,6 +120,16 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("describe_images", false)
         set(v) = cfg.edit().putBoolean("describe_images", v).apply()
 
+    /** Title of the recipe that marks a session as coding work.
+     *
+     *  A recipe NAME rather than a directory, so the same app works against any goose: recipes
+     *  live on the server and are already how a session's tools, model and instructions are
+     *  chosen. Blank means no Code section, which is the right default -- a fresh install has
+     *  no idea which recipe, if any, means "code" here. */
+    var codingRecipe: String
+        get() = cfg.getString("coding_recipe", "") ?: ""
+        set(v) = cfg.edit().putString("coding_recipe", v).apply()
+
     /** Read agent replies aloud (TextToSpeech) when a turn finishes. */
     var speakReplies: Boolean
         get() = cfg.getBoolean("speak_replies", false)
