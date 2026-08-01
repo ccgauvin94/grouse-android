@@ -496,9 +496,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                 is ChatItem.Tools -> ToolChipGroup(item.items)
                                 is ChatItem.Msg -> MessageBubble(
                                     item.m, streaming = i == 0 && cm.busy.value && item.m.role == "assistant",
-                                    // Only the newest, finished assistant reply gets the stats line.
-                                    usage = if (i == 0 && item.m.role == "assistant" && !cm.busy.value)
-                                        cm.lastMessageUsage.value else null)
+                                    // Each message carries its own stats now, so an older reply
+                                    // long-presses to ITS numbers rather than the latest turn's.
+                                    usage = item.m.usage)
                             }
                         }
                     }
@@ -1954,6 +1954,9 @@ private fun Markdownish(text: String) {
 /** Long-press any message to copy its text. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
+/** Long-press to copy. Still used by USER bubbles, which have no generation stats -- an
+ *  assistant bubble opens a menu instead, because there is something to show alongside copy.
+ *  A menu whose only item is Copy would be strictly worse than copying. */
 private fun Modifier.copyOnLongPress(text: String): Modifier {
     val clip = LocalClipboardManager.current
     val ctx = LocalContext.current
@@ -1993,22 +1996,51 @@ private fun decodeImageBlock(b64: String): androidx.compose.ui.graphics.ImageBit
     android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
 } catch (e: Exception) { null }
 
+/** tok/s, TTFT and cost for one reply, or null if none were recorded. */
+private fun usageLine(u: AcpEvent.MessageUsage): String {
+    val bits = mutableListOf<String>()
+    if (u.elapsedMs > 0) bits += "%.1f tok/s".format(u.outputTokens * 1000.0 / u.elapsedMs)
+    bits += "${u.outputTokens} tokens"
+    if (u.ttftMs > 0) bits += "TTFT ${u.ttftMs}ms"
+    u.cost?.let { if (it > 0) bits += "$" + "%.4f".format(it) }
+    return bits.joinToString("  ·  ")
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AssistantBubble(text: String, streaming: Boolean = false, usage: AcpEvent.MessageUsage? = null) {
+    // Stats used to sit permanently under the newest reply. They are diagnostics -- interesting
+    // when you are asking "why was that slow", noise the rest of the time, and they moved the
+    // conversation around as they appeared. Long-press surfaces them, alongside the copy action
+    // that long-press already did, so nothing that was reachable stopped being reachable.
+    var menu by remember { mutableStateOf(false) }
+    val clip = LocalClipboardManager.current
+    val ctx = LocalContext.current
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Box(Modifier.copyOnLongPress(text).padding(horizontal = 2.dp, vertical = 4.dp)) {
-            // Plain text while streaming — re-parsing the growing Markdown every token is O(n²).
-            // The bubble re-renders once with full Markdown when the turn finishes.
-            if (streaming) Text(text) else Markdownish(text)
-        }
-        if (usage != null) {
-            val tps = usage.outputTokens * 1000.0 / usage.elapsedMs
-            val bits = mutableListOf("%.1f tok/s".format(tps))
-            if (usage.ttftMs > 0) bits += "TTFT ${usage.ttftMs}ms"
-            usage.cost?.let { if (it > 0) bits += "$" + "%.4f".format(it) }
-            Text(bits.joinToString("  ·  "), style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.outline,
-                modifier = Modifier.padding(start = 2.dp, top = 1.dp))
+        Box {
+            Box(
+                Modifier
+                    .combinedClickable(onClick = {}, onLongClick = { menu = true })
+                    .padding(horizontal = 2.dp, vertical = 4.dp)
+            ) {
+                // Plain text while streaming — re-parsing the growing Markdown every token is
+                // O(n²). The bubble re-renders once with full Markdown when the turn finishes.
+                if (streaming) Text(text) else Markdownish(text)
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                Text(
+                    usage?.let(::usageLine) ?: "No stats recorded for this message",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                HorizontalDivider()
+                DropdownMenuItem(text = { Text("Copy text") }, onClick = {
+                    menu = false
+                    clip.setText(AnnotatedString(text))
+                    Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+                })
+            }
         }
     }
 }

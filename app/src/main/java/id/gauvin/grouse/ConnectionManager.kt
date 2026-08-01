@@ -33,6 +33,10 @@ data class ChatMessage(
     val status: String = "",
     val output: String = "",
     val id: Long = chatMessageSeq.getAndIncrement(),
+    // Generation stats, stamped onto the assistant message when the turn ends. Held per message
+    // rather than as one "latest" value so long-pressing any reply can show its own numbers;
+    // replayed history has none, because the server transcript does not carry them.
+    val usage: AcpEvent.MessageUsage? = null,
 )
 
 /**
@@ -1353,7 +1357,13 @@ class ConnectionManager private constructor(context: Context) {
                     }
                 } else sessionTools.value = g
             }
-            is AcpEvent.MessageUsage -> lastMessageUsage.value = ev
+            is AcpEvent.MessageUsage -> {
+                lastMessageUsage.value = ev
+                // Stamp the reply this belongs to. Usage arrives at the end of a turn, so the
+                // most recent assistant message is the one it describes.
+                val idx = messages.indexOfLast { it.role == "assistant" }
+                if (idx >= 0) messages[idx] = messages[idx].copy(usage = ev)
+            }
             is AcpEvent.Permission -> {
                 // Every conversation prompts, the Assistant thread included. It used to carry a
                 // client-side "assistant actions" policy that could auto-approve or blanket-deny
