@@ -908,7 +908,15 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
     if (showNewProject) NewProjectDialog(
         cm = cm,
-        onCreated = { name -> showNewProject = false; cm.newProjectDirSession(name); onOpen() },
+        // Start the first chat FILED under the new project. Not a session in
+        // /home/colin/Projects/<name>: createProject makes a virtual project and no directory,
+        // so that path does not exist and session/new refuses it with "invalid directory path".
+        // The id is the name the dialog already constrains to the server's slug alphabet.
+        onCreated = { name ->
+            showNewProject = false
+            cm.newChatInProject(name.trim().lowercase())
+            onOpen()
+        },
         onDismiss = { showNewProject = false },
     )
 
@@ -1191,9 +1199,14 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
         )
     }
 
-    val chats = cm.sessions.value.filter {
-        ConnectionManager.projectOf(it.cwd) == project &&
-            ConnectionManager.sessionKind(it) != SessionKind.ASSISTANT
+    // Membership is projectId now. The cwd test is kept as a FALLBACK for the directory-era
+    // projects (Cooking, Hacking, Inbox) whose sessions were filed by working directory and
+    // never migrated -- dropping it would empty those screens.
+    val projectId = cm.projects.value.firstOrNull { it.name.equals(project, true) }?.id
+    val chats = cm.sessions.value.filter { s ->
+        ConnectionManager.sessionKind(s) != SessionKind.ASSISTANT &&
+            (if (projectId != null && s.projectId != null) s.projectId == projectId
+             else ConnectionManager.projectOf(s.cwd) == project)
     }
     Scaffold(topBar = {
         TopAppBar(
@@ -1213,7 +1226,15 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
             }
             item {
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .clickable { cm.newProjectDirSession(project); goToChat() }) {
+                    // File the new chat under the project. It must NOT create a session in
+                    // /home/colin/Projects/<name>: a virtual project has no directory there, and
+                    // session/new answers "invalid directory path" -- which is what opening any
+                    // project created since projects went virtual actually did.
+                    .clickable {
+                        if (projectId != null) cm.newChatInProject(projectId)
+                        else cm.newProjectDirSession(project)
+                        goToChat()
+                    }) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Add, contentDescription = null)
                         Spacer(Modifier.width(10.dp))
