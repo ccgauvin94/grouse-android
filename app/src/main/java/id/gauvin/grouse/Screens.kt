@@ -553,26 +553,50 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         )
                     }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        // Model pill, left -- Claude puts its mode selector here, and it is the one
-                        // control worth showing as text rather than an icon: which model is about
-                        // to answer changes what you type.
-                        val modelLabel = cm.config.value.firstOrNull { it.id == "model" }
-                            ?.currentValue.orEmpty().substringAfterLast('/').ifBlank { "model" }
-                        Surface(
-                            shape = RoundedCornerShape(20.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                        ) {
-                            Row(
-                                Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                        // MODE pill, left -- the same slot Claude uses for its mode selector, and
+                        // the same meaning: how much the agent will do without asking. The model
+                        // lives in Settings; what you want at a glance while typing is whether
+                        // this turn is going to stop for approval.
+                        //
+                        // goose reports snake_case ids (smart_approve, chat, auto); show the label
+                        // the server sends when there is one, and fall back to de-snaking the id.
+                        val modeOpt = cm.config.value.firstOrNull { it.id == "mode" }
+                        val modeLabel = modeOpt?.let { o ->
+                            o.choices.firstOrNull { it.value == o.currentValue }?.label
+                                ?: o.currentValue.replace('_', ' ')
+                        }?.ifBlank { null } ?: "mode"
+                        var modeMenu by remember { mutableStateOf(false) }
+                        Box {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                modifier = Modifier.clickable(enabled = modeOpt != null) {
+                                    modeMenu = true
+                                },
                             ) {
-                                Icon(Icons.Filled.Bolt, contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                    tint = MaterialTheme.colorScheme.onSurface)
-                                Spacer(Modifier.width(6.dp))
-                                Text(modelLabel, style = MaterialTheme.typography.labelLarge,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.widthIn(max = 130.dp))
+                                Row(
+                                    Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(Icons.Filled.Bolt, contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.onSurface)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(modeLabel, style = MaterialTheme.typography.labelLarge,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.widthIn(max = 130.dp))
+                                }
+                            }
+                            DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
+                                modeOpt?.choices?.forEach { c ->
+                                    DropdownMenuItem(
+                                        text = { Text(c.label.ifBlank { c.value.replace('_', ' ') }) },
+                                        onClick = {
+                                            modeMenu = false
+                                            cm.setOption("mode", c.value)
+                                        },
+                                    )
+                                }
                             }
                         }
                         Spacer(Modifier.weight(1f))
