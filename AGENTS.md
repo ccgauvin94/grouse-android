@@ -34,6 +34,10 @@ The APK lands in `app/build/outputs/apk/debug/`. `:app:compileDebugKotlin` is th
 `./gradlew --stop` before moving or renaming the checkout — the transform cache records absolute
 paths and a moved tree confuses it.
 
+`env.sh` hardcodes one JDK install path. If gradle dies with `JAVA_HOME is set to an invalid
+directory`, the JDK that path names is simply not on that machine — fix `JAVA_HOME` in `env.sh`
+(and install a JDK 17 if need be) before anything else.
+
 ## Layout
 
 | File | What lives there |
@@ -69,6 +73,14 @@ re-files sessions, and it has re-homed the assistant thread into the wrong direc
 **Sessions are typed by who created them.** `session/new` with `_meta.client` present is a
 `user` session; absent, it is `acp`. Desktop lists only `user` and `scheduled`, so omitting that
 field makes every chat this app creates invisible in Desktop.
+
+**Utility features get a session of their own, not the chat's.** `scanWithScratchSession` (code
+scan) and `openBrowser` (directory picker) each open a private ACP session with cwd
+`DEFAULT_CWD`, because both are reached from the drawer, where a chat is usually not open —
+borrowing the current chat's session made the browser work only when a chat happened to be open.
+Their state lives on `ConnectionManager`, not in any chat's state. And in `fs/list_directory`,
+`parent` is null at a root: the server decides how far up you may go, and it refuses anything
+outside its browse roots.
 
 ## Conventions
 

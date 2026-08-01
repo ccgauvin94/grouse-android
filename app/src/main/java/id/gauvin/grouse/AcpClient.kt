@@ -74,7 +74,18 @@ data class SessionInfo(
 )
 
 /** A goose project: a named source with a slug, NOT a directory. */
-data class ProjectInfo(val id: String, val name: String, val description: String, val path: String = "")
+data class ProjectInfo(
+    val id: String,
+    val name: String,
+    val description: String,
+    val path: String = "",
+    /** Directory this project's chats work in, from a `root: <path>` line in the project's own
+     *  content. Blank for an ordinary project, whose chats do not care where tools run.
+     *
+     *  Stored on the SERVER rather than in app preferences so every client agrees, and because
+     *  a path that only one phone knows about is a path the next client renders as nothing. */
+    val root: String = "",
+)
 
 /** One scheduled job from `schedules/list`.
  *
@@ -377,12 +388,13 @@ class AcpClient(
 
     /** Create a project. Global scope: a project is not scoped to a directory -- that is the
      *  entire point of the model. */
-    fun createProject(name: String, description: String = "") =
+    fun createProject(name: String, description: String = "", root: String = "") =
         rpc("_goose/unstable/sources/create", buildJsonObject {
             put("type", "project")
             put("name", name)
             put("description", description)
-            put("content", "")
+            // A rooted project records its directory here; ProjectInfo.root reads it back.
+            put("content", if (root.isBlank()) "" else "root: ${root.trimEnd('/')}\n")
             putJsonObject("target") { put("scope", "global") }
         })
 
@@ -997,11 +1009,15 @@ class AcpClient(
             val path = o["path"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
             val name = o["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
             val slug = path.substringAfterLast('/').removeSuffix(".md")
+            val content = o["content"]?.jsonPrimitive?.contentOrNull ?: ""
             ProjectInfo(
                 id = slug.ifEmpty { name },
                 name = name,
                 description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
                 path = path,
+                root = content.lineSequence()
+                    .firstOrNull { it.trim().startsWith("root:") }
+                    ?.substringAfter("root:")?.trim().orEmpty(),
             )
         }.sortedBy { it.name.lowercase() }
     }

@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.*
 import androidx.core.content.IntentCompat
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.School
@@ -228,16 +227,6 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                     // pulls in on demand, recipes are the jobs, the scheduler is their cron.
                     // All three are server state that was previously only reachable by editing
                     // files on the box.
-                    // Chats above, Code here: the same session list split by where the work
-                    // happens, so a repo's conversations do not scroll past between two chats
-                    // about dinner.
-                    NavigationDrawerItem(
-                        label = { Text("Code") },
-                        icon = { Icon(Icons.Filled.Code, contentDescription = null) },
-                        selected = route == "code",
-                        onClick = { closeDrawer(); nav.navigate("code") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
                     NavigationDrawerItem(
                         label = { Text("Skills") },
                         icon = { Icon(Icons.Filled.School, contentDescription = null) },
@@ -279,11 +268,6 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             composable("providers") { ProvidersScreen(cm, nav) }
             composable("recipes") {
                 RecipesScreen(cm, nav, onOpenChat = {
-                    nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
-                })
-            }
-            composable("code") {
-                CodeScreen(cm, nav, onOpenChat = {
                     nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
                 })
             }

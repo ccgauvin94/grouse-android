@@ -1203,6 +1203,7 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     // projects (Cooking, Hacking, Inbox) whose sessions were filed by working directory and
     // never migrated -- dropping it would empty those screens.
     val projectId = cm.projects.value.firstOrNull { it.name.equals(project, true) }?.id
+    var picking by remember { mutableStateOf(false) }
     val chats = cm.sessions.value.filter { s ->
         ConnectionManager.sessionKind(s) != SessionKind.ASSISTANT &&
             (if (projectId != null && s.projectId != null) s.projectId == projectId
@@ -1225,15 +1226,28 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
                     modifier = Modifier.padding(start = 6.dp, top = 10.dp, bottom = 4.dp))
             }
             item {
+                // A ROOTED project (one carrying `root: <path>`) asks where first: its chats are
+                // pieces of work in a directory, and which directory is the whole point. An
+                // ordinary project just starts a chat -- its chats do not care where tools run.
+                val root = cm.projects.value.firstOrNull { it.id == projectId }?.root.orEmpty()
+                if (root.isNotBlank() && picking) DirectoryPicker(cm, startAt = root,
+                    onPick = { dir ->
+                        picking = false
+                        if (projectId != null) cm.newChatInProject(projectId, dir)
+                        goToChat()
+                    },
+                    onDismiss = { picking = false })
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                     // File the new chat under the project. It must NOT create a session in
                     // /home/colin/Projects/<name>: a virtual project has no directory there, and
                     // session/new answers "invalid directory path" -- which is what opening any
                     // project created since projects went virtual actually did.
                     .clickable {
-                        if (projectId != null) cm.newChatInProject(projectId)
-                        else cm.newProjectDirSession(project)
-                        goToChat()
+                        when {
+                            root.isNotBlank() -> picking = true
+                            projectId != null -> { cm.newChatInProject(projectId); goToChat() }
+                            else -> { cm.newProjectDirSession(project); goToChat() }
+                        }
                     }) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Add, contentDescription = null)
@@ -2442,25 +2456,19 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String, on
             // blank uses the default, which is what a chat wants.
             var whereOpen by remember { mutableStateOf(false) }
             var where by remember { mutableStateOf("") }
+            if (whereOpen) DirectoryPicker(cm,
+                onPick = { d -> where = d; whereOpen = false },
+                onDismiss = { whereOpen = false })
             Row(Modifier.fillMaxWidth().padding(top = 8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Button(onClick = {
                     cm.runRecipe(r.id, where.ifBlank { null }); onOpenChat()
                 }) { Text("Start session") }
                 Spacer(Modifier.width(12.dp))
-                Box {
-                    TextButton(onClick = { cm.scanCodeProjects(); whereOpen = true }) {
-                        Text(where.ifBlank { "in default folder" }
-                            .let { it.substringAfterLast('/').ifBlank { it } })
-                    }
-                    DropdownMenu(expanded = whereOpen, onDismissRequest = { whereOpen = false }) {
-                        DropdownMenuItem(text = { Text("Default folder") },
-                            onClick = { where = ""; whereOpen = false })
-                        (cm.codeProjectDirs.value + cm.browseRoots.value).distinct().forEach { d ->
-                            DropdownMenuItem(text = { Text(d) },
-                                onClick = { where = d; whereOpen = false })
-                        }
-                    }
+                // Browse for it rather than list guesses: the same picker a rooted project uses.
+                TextButton(onClick = { whereOpen = true }) {
+                    Text(where.ifBlank { "in default folder" }
+                        .let { it.substringAfterLast('/').ifBlank { it } })
                 }
             }
             if (r.description.isNotBlank()) {
@@ -2915,30 +2923,6 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 }
             }
 
-            SettingsSection("Code") {
-                // Which recipe means "coding work". A recipe rather than a directory, so the
-                // same app works against any goose -- and blank by default, because a fresh
-                // install cannot know which recipe, if any, means code on that server.
-                LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
-                var open by remember { mutableStateOf(false) }
-                val current = cm.codingRecipe.ifBlank { "(none)" }
-                var chosen by remember(cm.codingRecipe) { mutableStateOf(cm.codingRecipe) }
-                Box {
-                    SettingsNavRow("Coding recipe", chosen.ifBlank { current }) { open = true }
-                    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                        DropdownMenuItem(text = { Text("(none)") },
-                            onClick = { chosen = ""; cm.codingRecipe = ""; open = false })
-                        cm.recipes.value.forEach { r ->
-                            DropdownMenuItem(text = { Text(r.title) },
-                                onClick = { chosen = r.title; cm.codingRecipe = r.title; open = false })
-                        }
-                    }
-                }
-                SettingCaption("Sessions started from this recipe show under Code. Projects " +
-                    "there are directories containing an AGENTS.md, found under whatever roots " +
-                    "the server allows browsing.")
-            }
-
             SettingsSection("Catalog") {
                 SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
                 SettingCaption("Off shows only providers set up on your goose. On lists goose's " +
@@ -3139,8 +3123,13 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
  *  (GOOSE_BROWSE_ROOTS); it refuses anything outside, and reports the parent as null at a root
  *  so there is nothing to walk up into. */
 @Composable
-fun DirectoryPicker(cm: ConnectionManager, onPick: (String) -> Unit, onDismiss: () -> Unit) {
-    LaunchedEffect(Unit) { cm.openBrowser() }
+fun DirectoryPicker(
+    cm: ConnectionManager,
+    startAt: String? = null,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    LaunchedEffect(Unit) { cm.openBrowser(startAt) }
     DisposableEffect(Unit) { onDispose { cm.closeBrowser() } }
     val path = cm.browserPath.value
     AlertDialog(
@@ -3207,131 +3196,12 @@ fun DirectoryPicker(cm: ConnectionManager, onPick: (String) -> Unit, onDismiss: 
     )
 }
 
-/** Code: the coding projects on the server, and the sessions working in each.
- *
- *  TWO INDEPENDENT DEMARCATIONS, because they answer different questions and goose answers
- *  neither with a field:
- *
- *   - A PROJECT is a directory containing AGENTS.md. That is goose's own context file, read
- *     automatically from a session's cwd up to the git root, so a directory carrying one is
- *     already somewhere goose behaves differently. Pinning exactly those needs no convention of
- *     ours and nothing configured per machine.
- *   - A SESSION is coding work if it was started from the coding recipe. A recipe is what
- *     decides a session's tools, model and instructions, so it is the honest way to say what a
- *     session is for -- and unlike a directory it means the same on every server.
- *
- *  Neither is a path this app knows. The roots come from the server (GOOSE_BROWSE_ROOTS, in the
- *  fs/list_directory reply) and the recipe is chosen from the server's own recipe list. An
- *  earlier cut hardcoded "/workspace", which is one machine's mount: against any other goose
- *  the section would have been silently empty.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun CodeScreen(cm: ConnectionManager, nav: NavController, onOpenChat: () -> Unit) {
-    LaunchedEffect(cm.online.value) {
-        if (cm.online.value) { cm.listSessions(); cm.refreshSchedules(); cm.scanCodeProjects() }
-    }
-    val byDir = cm.codeProjects().toMap()
-    val pinned = cm.codeProjectDirs.value
-    val strays = byDir.keys.filterNot { it in pinned }   // coding sessions outside any project
+// The Code screen stood here and is GONE. It was a second place for the same idea: a list of
+// coding projects, separate from Chats, with its own scan and its own new-session flow. One
+// project carrying `root: <path>` does the job inside Chats -- each codebase is a chat in it,
+// which is what a codebase actually is here, and there is one list of conversations again
+// rather than two that partition it.
+//
+// What it taught is kept: DirectoryPicker above is its file browser, and a project's root is
+// where that browser starts.
 
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text("Code") },
-            navigationIcon = {
-                IconButton(onClick = { nav.popBackStack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
-                }
-            },
-            actions = {
-                IconButton(onClick = { cm.listSessions(); cm.scanCodeProjects() }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "rescan")
-                }
-            },
-        )
-    }) { pad ->
-        var picking by remember { mutableStateOf(false) }
-        if (picking) DirectoryPicker(cm,
-            onPick = { dir -> picking = false; cm.newRepoSession(dir); onOpenChat() },
-            onDismiss = { picking = false })
-        LazyColumn(Modifier.padding(pad).fillMaxSize()) {
-            item {
-                // The primary action, and unconditional: it does not depend on the AGENTS.md
-                // scan having found anything, which is what made this screen a dead end when
-                // the scan came back empty.
-                Button(onClick = { picking = true },
-                    modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("New session")
-                }
-            }
-            if (cm.codingRecipe.isBlank()) {
-                item {
-                    Column(Modifier.padding(16.dp)) {
-                        Text("No coding recipe chosen.", style = MaterialTheme.typography.titleSmall)
-                        Text("Pick which recipe means \"coding\" in Settings › Providers, and " +
-                            "sessions started from it appear here. Projects are directories " +
-                            "with an AGENTS.md.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.padding(top = 4.dp))
-                    }
-                }
-            }
-            if (pinned.isEmpty() && strays.isEmpty()) {
-                item {
-                    Text("No AGENTS.md found under the server's browsable roots" +
-                        (cm.browseRoots.value.takeIf { it.isNotEmpty() }
-                            ?.joinToString(", ", prefix = " (", postfix = ")") ?: "") + ".",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.padding(16.dp))
-                }
-            }
-            items(pinned + strays, key = { it }) { dir ->
-                val list = byDir[dir].orEmpty()
-                val isPinned = dir in pinned
-                var open by remember(dir) { mutableStateOf(false) }
-                Column(Modifier.fillMaxWidth()) {
-                    Row(
-                        Modifier.fillMaxWidth().clickable { open = !open }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            if (isPinned) Icons.Filled.PushPin else Icons.Filled.Folder,
-                            contentDescription = null, tint = MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(dir.trimEnd('/').substringAfterLast('/'),
-                                style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                buildString {
-                                    append(if (list.isEmpty()) "no sessions"
-                                           else if (list.size == 1) "1 session" else "${list.size} sessions")
-                                    if (!isPinned) append("  ·  no AGENTS.md")
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline)
-                        }
-                        IconButton(onClick = { cm.newRepoSession(dir); onOpenChat() }) {
-                            Icon(Icons.Filled.Add, contentDescription = "new session here")
-                        }
-                    }
-                    if (open) list.forEach { sess ->
-                        Text(
-                            sess.title.ifBlank { sess.sessionId },
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.fillMaxWidth()
-                                .clickable { cm.openSession(sess.sessionId); onOpenChat() }
-                                .padding(start = 50.dp, end = 16.dp, top = 8.dp, bottom = 8.dp))
-                    }
-                    HorizontalDivider()
-                }
-            }
-            item { Spacer(Modifier.height(24.dp)) }
-        }
-    }
-}

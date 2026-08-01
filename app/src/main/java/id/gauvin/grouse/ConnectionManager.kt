@@ -86,11 +86,60 @@ class ConnectionManager private constructor(context: Context) {
     val schedules = mutableStateOf<List<ScheduleInfo>>(emptyList())
     val recipes = mutableStateOf<List<RecipeInfo>>(emptyList())
 
+    /** The recipe a job runs, matched by file path -- schedules/list gives a path and
+     *  recipes/list gives a path, and nothing gives an id linking them. Null for a job created
+     *  with an inline recipe, which the library never saw. */
+    fun recipeFor(job: ScheduleInfo): RecipeInfo? =
+        recipes.value.firstOrNull { it.filePath.isNotEmpty() && it.filePath == job.source }
+
+    fun refreshSchedules() {
+        client?.listSchedules()
+        client?.listRecipes()
+    }
+
+    fun setSchedulePaused(id: String, paused: Boolean) { client?.pauseSchedule(id, paused) }
+
+    fun runScheduleNow(id: String) { client?.runScheduleNow(id) }
+
+    fun deleteSchedule(id: String) { client?.deleteSchedule(id) }
+
+    fun setScheduleCron(id: String, cron: String) { client?.updateScheduleCron(id, cron) }
+
+    fun setRecipeCron(recipeId: String, cron: String?) { client?.scheduleRecipe(recipeId, cron) }
+
+    fun deleteRecipe(recipeId: String) { client?.deleteRecipe(recipeId) }
+
+    /** Save an edited recipe. The caller hands back a full DTO derived from RecipeInfo.raw. */
+    fun saveRecipe(recipeId: String, dto: JsonObject) { client?.saveRecipe(recipeId, dto) }
+
+    /** Replace one top-level string field, dropping it when blank. */
+    fun recipeWith(r: RecipeInfo, field: String, value: String): JsonObject =
+        JsonObject(r.raw.toMutableMap().apply {
+            if (value.isBlank()) remove(field) else put(field, JsonPrimitive(value))
+        })
+
+    /** Replace one `settings:` key, creating or pruning the settings block as needed. An empty
+     *  settings object is removed rather than left behind: goose treats a present-but-empty
+     *  block differently from an absent one in some paths. */
+    fun recipeWithSetting(r: RecipeInfo, key: String, value: String): JsonObject {
+        val settings = ((r.raw["settings"] as? JsonObject)?.toMutableMap() ?: mutableMapOf())
+        if (value.isBlank()) settings.remove(key) else settings[key] = JsonPrimitive(value)
+        return JsonObject(r.raw.toMutableMap().apply {
+            if (settings.isEmpty()) remove("settings") else put("settings", JsonObject(settings))
+        })
+    }
+
     /** Skills: the tool-usage guides goose pulls in with load_skill. Server state, listed on
      *  demand -- they change rarely and there is no notification when they do. */
     val skills = mutableStateOf<List<SkillInfo>>(emptyList())
 
     fun refreshSkills() { client?.listSkills() }
+
+    fun saveSkill(s: SkillInfo, content: String) {
+        client?.updateSkill(s.path, s.name, s.description, content)
+    }
+
+    fun deleteSkill(path: String) { client?.deleteSkill(path) }
 
     /** Absolute directories the server is willing to browse, and what is inside the one asked
      *  for. Both come from fs/list_directory: the roots are GOOSE_BROWSE_ROOTS on the server,
@@ -99,60 +148,11 @@ class ConnectionManager private constructor(context: Context) {
     val browsedPath = mutableStateOf("")
     val browsedDirs = mutableStateOf<List<String>>(emptyList())
 
-    /** Directories that contain an AGENTS.md, i.e. codebases that have told goose how to work
-     *  in them. These are the pinned coding projects.
-     *
-     *  AGENTS.md is goose's OWN context file (crates/goose/src/hints -- alongside .goosehints,
-     *  and configurable via CONTEXT_FILE_NAMES), discovered from a session's cwd up to the git
-     *  root. So a directory carrying one is already a place goose behaves differently, and
-     *  pinning exactly those needs no convention of ours and no per-machine configuration.
-     *  Scanned rather than remembered: adding one on the server should be enough. */
-    val codeProjectDirs = mutableStateOf<List<String>>(emptyList())
-    private val scanPending = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-
-    /** Browse one server directory. */
-    fun browse(path: String) {
-        val sid = currentSession.value ?: return
-        client?.listDirectory(sid, path)
-    }
-
-    /** The open session's own working directory: always inside the server's browse roots, so it
-     *  is the one path guaranteed to be listable without knowing the roots first. */
-    private fun currentCwd(): String? = currentSession.value?.let { id ->
-        sessions.value.firstOrNull { it.sessionId == id }?.cwd?.takeIf { it.isNotBlank() }
-            ?: store.sessionCwd(id)
-    }
-
-    /** Find the coding projects: discover the roots, list each, then look inside each child for
-     *  AGENTS.md.
-     *
-     *  Bootstrapping is the fiddly part and got it wrong once: the roots are only learned FROM a
-     *  listing reply, and the first cut asked for "/" to learn them. "/" is outside the roots,
-     *  so the server refused it, the refusal carried no roots, and the scan reported "no
-     *  AGENTS.md found" having listed nothing at all. It starts from the open session's own cwd
-     *  instead, which is inside the roots by construction. */
-    fun scanCodeProjects() {
-        scanPending.clear()
-        codeProjectDirs.value = emptyList()
-        val sid = currentSession.value
-        if (sid != null) {
-            val roots = browseRoots.value
-            if (roots.isEmpty()) {
-                val seed = currentCwd() ?: DEFAULT_CWD
-                scanSeeding = true
-                client?.listDirectory(sid, seed)
-            } else {
-                roots.forEach { r -> scanPending.add(r); client?.listDirectory(sid, r) }
-            }
-            return
-        }
-        // NO CHAT OPEN. Borrowing the current session was the whole reason Code came up empty
-        // when reached straight from the drawer at startup: no session, so nothing was listed,
-        // and it reported "no AGENTS.md found" -- true, and about a scan that never ran. Stand
-        // up a throwaway session instead; it has no conversation, so session/list (which drops
-        // message-less sessions) never shows it.
-        scanWithScratchSession()
-    }
+    // The AGENTS.md scan lived here and is GONE with the Code screen. It listed every
+    // directory under the server's roots looking for a context file, to decide which were
+    // "coding projects" -- inference that a project carrying `root: <path>` states outright.
+    // AGENTS.md still matters: goose reads it from a session's cwd up to the git root, so it
+    // is what makes a chat in a repo behave like that repo. Nothing had to detect it.
 
     // ---- File browser -----------------------------------------------------------------------
     //
@@ -161,13 +161,15 @@ class ConnectionManager private constructor(context: Context) {
     // to be open -- and the Code screen is reached from the drawer, where one usually is not.
 
     private var browserClient: AcpClient? = null
+    private var browserStart: String? = null
     private var browserSession: String? = null
     val browserPath = mutableStateOf("")
     val browserDirs = mutableStateOf<List<String>>(emptyList())
     val browserParent = mutableStateOf<String?>(null)
     val browserBusy = mutableStateOf(false)
 
-    fun openBrowser() {
+    fun openBrowser(startAt: String? = null) {
+        browserStart = startAt
         if (browserClient != null) { browserBusy.value = false; return }
         browserBusy.value = true
         browserDirs.value = emptyList()
@@ -179,7 +181,7 @@ class ConnectionManager private constructor(context: Context) {
                         browserSession = ev.sessionId
                         // Start at the session's own cwd: guaranteed inside the server's roots,
                         // and its reply is what tells us what those roots are.
-                        browserClient?.listDirectory(ev.sessionId, DEFAULT_CWD)
+                        browserClient?.listDirectory(ev.sessionId, browserStart ?: DEFAULT_CWD)
                     }
                     is AcpEvent.Directory -> {
                         browserBusy.value = false
@@ -207,167 +209,9 @@ class ConnectionManager private constructor(context: Context) {
         main.postDelayed({ c?.close() }, 300)
     }
 
-    /** Run the whole scan on a session of its own, so Code does not depend on a chat being open. */
-    private fun scanWithScratchSession() {
-        val url = "wss://${store.host}:${store.port}/acp"
-        var boot: AcpClient? = null
-        val pending = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-        var seeding = true
-        var scratch: String? = null
-        val found = mutableListOf<String>()
-        lateinit var stop: Runnable
-        stop = Runnable {
-            val b = boot; boot = null
-            main.postDelayed({ b?.close() }, 300)
-        }
-        // Hard stop: a scan that never completes must not leave a socket open forever.
-        main.postDelayed(stop, 45_000)
-        boot = AcpClient(url, store.secretKey) { ev ->
-            main.post {
-                when (ev) {
-                    is AcpEvent.Ready -> {
-                        scratch = ev.sessionId
-                        boot?.listDirectory(ev.sessionId, DEFAULT_CWD)
-                    }
-                    is AcpEvent.Directory -> {
-                        val sid = scratch
-                        if (ev.roots.isNotEmpty()) browseRoots.value = ev.roots
-                        when {
-                            seeding && ev.roots.isNotEmpty() -> {
-                                seeding = false
-                                ev.roots.forEach { r ->
-                                    pending.add(r); if (sid != null) boot?.listDirectory(sid, r)
-                                }
-                            }
-                            pending.remove(ev.path) -> {
-                                ev.dirs.forEach { d ->
-                                    pending.add(d); if (sid != null) boot?.listDirectory(sid, d)
-                                }
-                                if (ev.files.any { it.equals("AGENTS.md", true) } &&
-                                    ev.path !in found) found += ev.path
-                                if (pending.isEmpty()) {
-                                    codeProjectDirs.value = found.sorted()
-                                    main.removeCallbacks(stop); stop.run()
-                                }
-                            }
-                            else -> if (ev.files.any { it.equals("AGENTS.md", true) } &&
-                                ev.path !in found) found += ev.path
-                        }
-                        codeProjectDirs.value = found.sorted()
-                    }
-                    is AcpEvent.Error -> {}
-                    else -> {}
-                }
-            }
-        }.also { it.desiredCwd = DEFAULT_CWD; it.connect() }
-    }
-
-    /** True while waiting for the reply that will tell us what the roots are. */
-    @Volatile private var scanSeeding = false
-
-    fun saveSkill(s: SkillInfo, content: String) {
-        client?.updateSkill(s.path, s.name, s.description, content)
-    }
-
-    fun deleteSkill(path: String) { client?.deleteSkill(path) }
-
-    /** The recipe a job runs, matched by file path. `schedules/list` gives a path and
-     *  `recipes/list` gives a path, and nothing gives an id linking them -- so this is the join,
-     *  and it returns null for a job created with an inline recipe (which the library never
-     *  saw). */
-    fun recipeFor(job: ScheduleInfo): RecipeInfo? =
-        recipes.value.firstOrNull { it.filePath.isNotEmpty() && it.filePath == job.source }
-
-    fun refreshSchedules() {
-        client?.listSchedules()
-        client?.listRecipes()
-    }
-
-    fun setSchedulePaused(id: String, paused: Boolean) { client?.pauseSchedule(id, paused) }
-
-    fun runScheduleNow(id: String) { client?.runScheduleNow(id) }
-
-    fun deleteSchedule(id: String) { client?.deleteSchedule(id) }
-
-    fun setScheduleCron(id: String, cron: String) { client?.updateScheduleCron(id, cron) }
-
-    fun setRecipeCron(recipeId: String, cron: String?) { client?.scheduleRecipe(recipeId, cron) }
-
-    fun deleteRecipe(recipeId: String) { client?.deleteRecipe(recipeId) }
-
-    /** Save an edited recipe. The caller hands back a full DTO derived from [RecipeInfo.raw];
-     *  the helpers below build those, so no screen has to know the recipe schema. */
-    fun saveRecipe(recipeId: String, dto: JsonObject) { client?.saveRecipe(recipeId, dto) }
-
-    /** Replace one top-level string field, dropping it when blank. */
-    fun recipeWith(r: RecipeInfo, field: String, value: String): JsonObject =
-        JsonObject(r.raw.toMutableMap().apply {
-            if (value.isBlank()) remove(field) else put(field, JsonPrimitive(value))
-        })
-
-    /** Replace one `settings:` key, creating or pruning the settings block as needed. An empty
-     *  settings object is removed rather than left behind: goose treats a present-but-empty
-     *  block differently from an absent one in some paths, and an absent one is what a recipe
-     *  with no pins looks like. */
-    fun recipeWithSetting(r: RecipeInfo, key: String, value: String): JsonObject {
-        val settings = ((r.raw["settings"] as? JsonObject)?.toMutableMap() ?: mutableMapOf())
-        if (value.isBlank()) settings.remove(key) else settings[key] = JsonPrimitive(value)
-        return JsonObject(r.raw.toMutableMap().apply {
-            if (settings.isEmpty()) remove("settings") else put("settings", JsonObject(settings))
-        })
-    }
-
-    /** Sessions grouped by project, most-recent project first, unfiled last. Unfiled is ONE
-     *  bucket: the old cwd grouping made a separate group per directory, which is how a single
-     *  "state" project ended up holding every chat. */
-    /** The recipe that marks a session as coding work. Empty disables the Code section.
-     *
-     *  A NAME, not a path. The first cut keyed this off the working directory being under
-     *  "/workspace", which is one server's mount and nobody else's -- pointed at any other
-     *  goose the Code section would simply have been empty, with nothing to explain why.
-     *  Recipes exist on every goose, are already how a session's tools/model/instructions are
-     *  chosen, and travel with the server rather than being assumed by the client. */
-    var codingRecipe: String
-        get() = store.codingRecipe
-        set(v) { store.codingRecipe = v }
-
-    /** True when this session was started from the coding recipe.
-     *
-     *  Matched on the title, because session/list reports THAT a session came from a recipe and
-     *  not which one: goose auto-titles a session with its recipe's title at creation, so the
-     *  two agree until someone renames the session. A renamed coding session drops out of Code
-     *  and stays a normal chat -- visible, reversible, and cheap, which the alternatives are
-     *  not: session/load per session rewrites working_dir as a side effect. */
-    fun isCode(s: SessionInfo): Boolean =
-        store.codingRecipe.isNotBlank() && s.hasRecipe && s.title == store.codingRecipe
-
-    /** Coding sessions grouped by the directory they work in, newest group first.
-     *
-     *  The recipe says a session IS code; its cwd says WHICH codebase. Neither is assumed --
-     *  the recipe name is configured and the directories come from the server. */
-    fun codeProjects(): List<Pair<String, List<SessionInfo>>> =
-        sessions.value.filter { isCode(it) }
-            .groupBy { it.cwd.trimEnd('/') }
-            .entries
-            .sortedByDescending { it.value.maxOfOrNull { s -> s.updatedAt } ?: "" }
-            .map { (dir, list) -> dir to list.sortedByDescending { it.updatedAt } }
-
-    /** Start a coding session in [dir] -- an absolute path the server offered.
-     *
-     *  Started FROM the coding recipe when one is configured: that is what makes the session
-     *  identifiable as code afterwards, and it brings the recipe's tools with it. Without a
-     *  configured recipe it is still a session in the right directory, just not marked. */
-    fun newRepoSession(dir: String) {
-        val rid = recipes.value.firstOrNull { it.title == store.codingRecipe }?.id
-        newSession(cwd = dir.trimEnd('/'), kind = SessionKind.CODE, recipeId = rid)
-    }
-
     fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
         val byName = projects.value.associate { it.id to it.name }
         return sessions.value
-            // Code sessions belong to the Code section; showing them here too would put the same
-            // conversation in two places with different meanings.
-            .filterNot { isCode(it) }
             .groupBy { it.projectId ?: "" }
             .entries
             .sortedWith(compareBy({ it.key.isEmpty() }, { -(it.value.maxOfOrNull { s -> s.updatedAt } ?: "").hashCode() }))
@@ -385,9 +229,11 @@ class ConnectionManager private constructor(context: Context) {
      *  "cooking" and a chat in "hacking" share a working directory and differ only by the field
      *  that actually means membership. Filing happens once the server hands back a session id --
      *  session/new has no projectId parameter. */
-    fun newChatInProject(projectId: String) {
+    fun newChatInProject(projectId: String, cwd: String? = null) {
         pendingProjectFiling = projectId
-        newSession(kind = SessionKind.CHAT)
+        // A rooted project passes the directory the chat should work in; an ordinary one does
+        // not, and its chats run at the default cwd exactly as before.
+        newSession(cwd = cwd ?: DEFAULT_CWD, kind = SessionKind.CHAT)
     }
 
     /** Set while a new-chat-in-project is in flight; consumed when Ready delivers the id. */
@@ -1551,21 +1397,6 @@ class ConnectionManager private constructor(context: Context) {
                 browsedPath.value = ev.path
                 browsedDirs.value = ev.dirs
                 if (ev.roots.isNotEmpty()) browseRoots.value = ev.roots
-                // The seeding reply exists only to learn the roots; start the real scan now.
-                if (scanSeeding && ev.roots.isNotEmpty()) {
-                    scanSeeding = false
-                    scanCodeProjects()
-                    return
-                }
-                // A scan in flight: a root's reply queues its children, a child's reply is
-                // checked for AGENTS.md. Anything not part of a scan is plain browsing.
-                if (scanPending.remove(ev.path)) {
-                    val sid = currentSession.value
-                    ev.dirs.forEach { d -> scanPending.add(d); if (sid != null) client?.listDirectory(sid, d) }
-                } else if (ev.files.any { it.equals("AGENTS.md", true) }) {
-                    if (ev.path !in codeProjectDirs.value)
-                        codeProjectDirs.value = (codeProjectDirs.value + ev.path).sorted()
-                }
             }
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
