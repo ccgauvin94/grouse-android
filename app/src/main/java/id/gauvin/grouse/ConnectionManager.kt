@@ -154,6 +154,59 @@ class ConnectionManager private constructor(context: Context) {
         scanWithScratchSession()
     }
 
+    // ---- File browser -----------------------------------------------------------------------
+    //
+    // Owns a session of its own for as long as the browser is open. Everything here previously
+    // borrowed the current chat's session, which meant browsing worked only when a chat happened
+    // to be open -- and the Code screen is reached from the drawer, where one usually is not.
+
+    private var browserClient: AcpClient? = null
+    private var browserSession: String? = null
+    val browserPath = mutableStateOf("")
+    val browserDirs = mutableStateOf<List<String>>(emptyList())
+    val browserParent = mutableStateOf<String?>(null)
+    val browserBusy = mutableStateOf(false)
+
+    fun openBrowser() {
+        if (browserClient != null) { browserBusy.value = false; return }
+        browserBusy.value = true
+        browserDirs.value = emptyList()
+        val url = "wss://${store.host}:${store.port}/acp"
+        browserClient = AcpClient(url, store.secretKey) { ev ->
+            main.post {
+                when (ev) {
+                    is AcpEvent.Ready -> {
+                        browserSession = ev.sessionId
+                        // Start at the session's own cwd: guaranteed inside the server's roots,
+                        // and its reply is what tells us what those roots are.
+                        browserClient?.listDirectory(ev.sessionId, DEFAULT_CWD)
+                    }
+                    is AcpEvent.Directory -> {
+                        browserBusy.value = false
+                        browserPath.value = ev.path
+                        browserDirs.value = ev.dirs
+                        browserParent.value = ev.parent
+                        if (ev.roots.isNotEmpty()) browseRoots.value = ev.roots
+                    }
+                    is AcpEvent.Error -> browserBusy.value = false
+                    else -> {}
+                }
+            }
+        }.also { it.desiredCwd = DEFAULT_CWD; it.connect() }
+    }
+
+    fun browseTo(path: String) {
+        val sid = browserSession ?: return
+        browserBusy.value = true
+        browserClient?.listDirectory(sid, path)
+    }
+
+    fun closeBrowser() {
+        val c = browserClient
+        browserClient = null; browserSession = null
+        main.postDelayed({ c?.close() }, 300)
+    }
+
     /** Run the whole scan on a session of its own, so Code does not depend on a chat being open. */
     private fun scanWithScratchSession() {
         val url = "wss://${store.host}:${store.port}/acp"

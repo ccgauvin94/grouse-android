@@ -3130,6 +3130,83 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
 }
 
 
+
+/** Pick a directory on the SERVER. Roots at the top, walk down, "Use this folder" to commit.
+ *
+ *  The phone shares no filesystem with the server, so a native picker is useless here and typing
+ *  a path means knowing it exactly -- which is how starting a session in the right place stayed
+ *  hard long after everything it needed existed. The server bounds where this can go
+ *  (GOOSE_BROWSE_ROOTS); it refuses anything outside, and reports the parent as null at a root
+ *  so there is nothing to walk up into. */
+@Composable
+fun DirectoryPicker(cm: ConnectionManager, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+    LaunchedEffect(Unit) { cm.openBrowser() }
+    DisposableEffect(Unit) { onDispose { cm.closeBrowser() } }
+    val path = cm.browserPath.value
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Choose a folder") },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp)) {
+                Text(path.ifBlank { "…" }, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline)
+                if (cm.browserBusy.value) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 6.dp))
+                }
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                LazyColumn(Modifier.weight(1f)) {
+                    // Roots first when there is nowhere to go up to; they are the only way to
+                    // cross from one allowed tree into another.
+                    if (cm.browserParent.value == null && cm.browseRoots.value.size > 1) {
+                        items(cm.browseRoots.value, key = { "root:" + it }) { r ->
+                            Row(Modifier.fillMaxWidth().clickable { cm.browseTo(r) }
+                                .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Folder, contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(10.dp))
+                                Text(r, style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
+                    }
+                    cm.browserParent.value?.let { up ->
+                        item {
+                            Row(Modifier.fillMaxWidth().clickable { cm.browseTo(up) }
+                                .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.outline)
+                                Spacer(Modifier.width(10.dp))
+                                Text("..", style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
+                    }
+                    items(cm.browserDirs.value, key = { it }) { d ->
+                        Row(Modifier.fillMaxWidth().clickable { cm.browseTo(d) }
+                            .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Folder, contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.outline)
+                            Spacer(Modifier.width(10.dp))
+                            Text(d.substringAfterLast('/'), Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyMedium)
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = path.isNotBlank(), onClick = { onPick(path) }) {
+                Text("Use this folder")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 /** Code: the coding projects on the server, and the sessions working in each.
  *
  *  TWO INDEPENDENT DEMARCATIONS, because they answer different questions and goose answers
@@ -3173,7 +3250,22 @@ fun CodeScreen(cm: ConnectionManager, nav: NavController, onOpenChat: () -> Unit
             },
         )
     }) { pad ->
+        var picking by remember { mutableStateOf(false) }
+        if (picking) DirectoryPicker(cm,
+            onPick = { dir -> picking = false; cm.newRepoSession(dir); onOpenChat() },
+            onDismiss = { picking = false })
         LazyColumn(Modifier.padding(pad).fillMaxSize()) {
+            item {
+                // The primary action, and unconditional: it does not depend on the AGENTS.md
+                // scan having found anything, which is what made this screen a dead end when
+                // the scan came back empty.
+                Button(onClick = { picking = true },
+                    modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("New session")
+                }
+            }
             if (cm.codingRecipe.isBlank()) {
                 item {
                     Column(Modifier.padding(16.dp)) {

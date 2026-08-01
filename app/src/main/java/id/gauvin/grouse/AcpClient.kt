@@ -253,6 +253,8 @@ sealed interface AcpEvent {
         val dirs: List<String>,
         val files: List<String>,
         val roots: List<String>,
+        /** The parent directory, or null at a root -- the server decides how far up you may go. */
+        val parent: String? = null,
     ) : AcpEvent
     data class Extensions(val list: List<ExtInfo>) : AcpEvent
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
@@ -845,7 +847,8 @@ class AcpClient(
                     else o["name"]?.jsonPrimitive?.contentOrNull
                 },
                 (result?.get("roots") as? JsonArray).orEmpty()
-                    .mapNotNull { it.jsonPrimitive.contentOrNull }))
+                    .mapNotNull { it.jsonPrimitive.contentOrNull },
+                result?.get("parent")?.jsonPrimitive?.contentOrNull))
             "_goose/unstable/sources/update" -> listSkills()
             // Every mutation re-lists rather than patching local state: the server owns the
             // paused/running flags, and run-now in particular changes them without telling us.
