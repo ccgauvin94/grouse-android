@@ -597,17 +597,28 @@ class ConnectionManager private constructor(context: Context) {
     /** Delete a project: archive its chats, drop it from recents, and remove the server
      *  directory ONLY if empty (rmdir, never rm -rf -- a non-empty project keeps its files
      *  and merely disappears from the list). Reports a human-readable outcome note. */
+    /** Delete a project and unfile its chats.
+     *
+     *  This used to `rmdir` a directory and lean on the shell's exit code for its message, which
+     *  is why an earlier pass left it calling `true` and reporting success while the project
+     *  stayed in the list -- nothing server-side was ever deleted. It now calls sources/delete
+     *  with the project's source path.
+     *
+     *  Chats are UNFILED rather than archived: a project is only a label now, so deleting it
+     *  should not hide conversations. Removing the label leaves them in Unfiled, where they can
+     *  be found and re-filed. Archiving them would make deleting a project destructive in a way
+     *  its name does not suggest. */
     fun deleteProject(project: String, onResult: (String) -> Unit) {
-        val name = cleanProjectName(project) ?: run { onResult("bad project name"); return }
-        sessions.value.filter { it.projectId == name }.forEach { archiveSession(it.sessionId) }
-        runUtilityTool("true") { err, out ->
-            onResult(when {
-                err == null -> "Project removed."
-                (err + out).contains("No such file", ignoreCase = true) ->
-                    "Project removed from the list (the directory was already gone)."
-                else -> "Chats archived. The directory has files in it, so it was left in place."
-            })
-        }
+        val proj = projects.value.firstOrNull { it.id == project || it.name == project }
+            ?: run { onResult("No such project."); return }
+        val affected = sessions.value.filter { it.projectId == proj.id }
+        affected.forEach { fileSession(it.sessionId, null) }
+        client?.deleteProject(proj.path)
+        projects.value = projects.value.filterNot { it.id == proj.id }   // optimistic; reply re-lists
+        onResult(
+            if (affected.isEmpty()) "Project deleted."
+            else "Project deleted. ${affected.size} chat${if (affected.size == 1) "" else "s"} moved to Unfiled."
+        )
     }
 
     /** The persistent "goose-assistant" thread (briefings/proactive/voice land here), if it exists. */

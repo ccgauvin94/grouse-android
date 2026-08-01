@@ -59,7 +59,7 @@ data class SessionInfo(
 )
 
 /** A goose project: a named source with a slug, NOT a directory. */
-data class ProjectInfo(val id: String, val name: String, val description: String)
+data class ProjectInfo(val id: String, val name: String, val description: String, val path: String = "")
 
 /** One goose extension from the ACP `config/extensions/list` method (goose ≥1.42). */
 data class ExtInfo(
@@ -238,6 +238,15 @@ class AcpClient(
             put("description", description)
             put("content", "")
             putJsonObject("target") { put("scope", "global") }
+        })
+
+    /** Delete a project. Identified by its source PATH, not its slug -- sources/delete takes the
+     *  path SourceEntry handed back. Sessions filed under it are unaffected server-side; the
+     *  caller decides whether to archive or unfile them. */
+    fun deleteProject(path: String) =
+        rpc("_goose/unstable/sources/delete", buildJsonObject {
+            put("type", "project")   // required alongside path; omitting it is a bare -32602
+            put("path", path)
         })
 
     /** File a session under a project, or pass null to unfile it. Changes ONE field and touches
@@ -592,6 +601,7 @@ class AcpClient(
             "_goose/unstable/sources/list" -> onEvent(AcpEvent.Projects(parseProjects(result)))
             // create/assign replies carry no useful body; re-list so the drawer reflects them.
             "_goose/unstable/sources/create" -> listProjects()
+            "_goose/unstable/sources/delete" -> listProjects()
             "_goose/unstable/session/project/update" -> listProjects()
             "_goose/unstable/config/extensions/list" -> onEvent(AcpEvent.Extensions(parseExtensions(result)))
             // After a toggle, re-list so the UI reflects the new enabled state.
@@ -725,6 +735,7 @@ class AcpClient(
                 id = slug.ifEmpty { name },
                 name = name,
                 description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                path = path,
             )
         }.sortedBy { it.name.lowercase() }
     }
