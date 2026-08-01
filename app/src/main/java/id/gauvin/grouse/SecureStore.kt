@@ -66,7 +66,10 @@ class SecureStore(context: Context) {
         // The per-voice-turn model override is GONE (2026-08-01) -- it was a third place to set
         // a model, kept only to dodge self-hosted latency, and the default chat model is a fast
         // cloud one now. Clear it so an upgraded install cannot keep an override with no UI.
-        cfg.edit().remove("voice_provider").remove("voice_model").apply()
+        cfg.edit().remove("voice_provider").remove("voice_model")
+            // The Assistant thread's own approval policy is gone with it (2026-08-01): goose's
+            // mode is the only permission control now, set in the thread like any other chat.
+            .remove("assistant_actions").apply()
         cfg.edit().apply {
             for (k in listOf("assistant", "chat", "code")) {
                 remove("profile_${k}_on")
@@ -240,9 +243,6 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("assistant_enabled", true)
         set(v) = cfg.edit().putBoolean("assistant_enabled", v).apply()
 
-    var assistantActions: String
-        get() = cfg.getString("assistant_actions", "confirm") ?: "confirm"
-        set(v) = cfg.edit().putString("assistant_actions", v).apply()
 
     // --- UnifiedPush ---
     var pushEnabled: Boolean

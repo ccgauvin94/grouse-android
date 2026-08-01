@@ -773,56 +773,11 @@ class ConnectionManager private constructor(context: Context) {
      *  server settings channel (schedule times, etc.). */
     val serverConfig = androidx.compose.runtime.mutableStateMapOf<String, String>()
 
-    /** The Assistant thread's own enabled-extension names (session-scoped; the daily
-     *  rotation copies extension_data forward, so edits here persist across days). */
-    val assistantExtNames = mutableStateOf<List<String>>(emptyList())
-    fun loadAssistantExtensions() {
-        loadExtensions()
-        assistantSessionId()?.let { client?.listSessionExtensionsFor(it) }
-    }
-    fun toggleAssistantExtension(ext: ExtInfo, on: Boolean) {
-        val sid = assistantSessionId() ?: return
-        if (on) client?.addSessionExtensionFor(sid, ext.raw)
-        else client?.removeSessionExtensionFor(sid, ext.name)
-        assistantExtNames.value =
-            if (on) (assistantExtNames.value + ext.name).distinct()
-            else assistantExtNames.value - ext.name
-    }
-
-    /** The Assistant thread's ACTIVE tools, grouped ext -> tool names (targeted tools/list). */
-    val assistantTools = mutableStateOf<Map<String, List<String>>>(emptyMap())
-    private var discoveringAssistant: String? = null
-    fun refreshAssistantTools() { assistantSessionId()?.let { client?.listToolsFor(it) } }
-
-    /** Mirror of discoverTools for the ASSISTANT session: briefly re-adds the extension
-     *  unfiltered so the full catalogue becomes observable, then the UI's Save re-applies. */
-    fun discoverAssistantTools(ext: ExtInfo) {
-        val sid = assistantSessionId() ?: return
-        if (toolCatalog.value.containsKey(ext.name)) { refreshAssistantTools(); return }
-        val c = client ?: return
-        val unfiltered = JsonObject(ext.raw.toMutableMap().apply {
-            put("available_tools", JsonArray(emptyList()))
-        })
-        discoveringAssistant = ext.name
-        c.removeSessionExtensionFor(sid, ext.name)
-        c.addSessionExtensionFor(sid, unfiltered)
-        main.postDelayed({ client?.listToolsFor(sid) }, 1_200)
-    }
-
-    /** Restrict `ext` to `allowed` in the ASSISTANT thread (rotation carries it forward). */
-    fun setAssistantTools(ext: ExtInfo, allowed: Set<String>) {
-        val sid = assistantSessionId() ?: return
-        val c = client ?: return
-        val full = toolCatalog.value[ext.name].orEmpty()
-        val list = if (allowed.size >= full.size && full.isNotEmpty()) emptyList() else allowed.toList()
-        val scoped = JsonObject(ext.raw.toMutableMap().apply {
-            put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
-        })
-        discoveringAssistant = null
-        c.removeSessionExtensionFor(sid, ext.name)
-        c.addSessionExtensionFor(sid, scoped)
-        main.postDelayed({ refreshAssistantTools() }, 1_200)
-    }
+    // loadAssistantExtensions / discoverAssistantTools / setAssistantTools lived here and are
+    // GONE (2026-08-01). They edited the Assistant session's extension set from the settings
+    // screen, which is the same thing the in-chat tools sheet does for whatever chat you are in
+    // -- two code paths for one operation, and only one of them was ever exercised. The thread
+    // is a chat; its tools are set in it.
 
     /** Observable master switch (mirrors SecureStore.assistantEnabled for the drawer). */
     val assistantEnabled = mutableStateOf(store.assistantEnabled)
@@ -1383,25 +1338,9 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Commands -> commands.value = ev.names
             is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }
-            is AcpEvent.SessionExtensions -> {
-                if (ev.sessionId == store.assistantSessionId) assistantExtNames.value = ev.names
-                if (ev.sessionId == currentSession.value || ev.sessionId != store.assistantSessionId)
-                    sessionExtensionNames.value = ev.names
-            }
+            is AcpEvent.SessionExtensions -> sessionExtensionNames.value = ev.names
             is AcpEvent.Tools -> {
                 val g = group(ev.names)
-                // Targeted reply for the Assistant thread: its own state bucket + its own
-                // discovery flow; never touches the on-screen session's sessionTools.
-                if (ev.sessionId != null && ev.sessionId == store.assistantSessionId) {
-                    val dt = discoveringAssistant
-                    if (dt != null && g.containsKey(dt)) {
-                        toolCatalog.value = toolCatalog.value + (dt to g[dt].orEmpty())
-                        // Leave the unfiltered set active until the user Saves (mirrors the
-                        // sheet's explore-then-save semantics).
-                    }
-                    assistantTools.value = g
-                    return
-                }
                 val target = discovering
                 if (target != null) {
                     // Catalogue read: record the full set, then restore the session's real setting.
@@ -1416,21 +1355,13 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.MessageUsage -> lastMessageUsage.value = ev
             is AcpEvent.Permission -> {
-                // The privileged Assistant thread honors the user's chosen action policy; every
-                // other conversation (and voice) always prompts. Voice already auto-denies via its
-                // own observer, so this only changes behaviour on the Assistant thread.
-                when (if (onAssistant) store.assistantActions else "confirm") {
-                    "auto" -> {   // trusted: approve without prompting (prefer allow-always)
-                        val allow = ev.options.firstOrNull { it.kind.contains("allow_always") }
-                            ?: ev.options.firstOrNull { it.kind.contains("allow") }
-                        client?.respondPermission(ev.toolCallId, allow?.optionId)
-                    }
-                    "readonly" -> client?.respondPermission(ev.toolCallId, null)   // deny writes/shell
-                    else -> {   // confirm: raise the approval sheet
-                        permissions.add(ev)
-                        if (!appForeground) notifier.postApprovalNeeded(ev.title)
-                    }
-                }
+                // Every conversation prompts, the Assistant thread included. It used to carry a
+                // client-side "assistant actions" policy that could auto-approve or blanket-deny
+                // on its behalf -- a second, invisible permission system layered on top of
+                // goose's own mode, which the thread's mode picker then appeared to control and
+                // did not. One mode, set in the chat like any other.
+                permissions.add(ev)
+                if (!appForeground) notifier.postApprovalNeeded(ev.title)
             }
         }
     }

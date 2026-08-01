@@ -92,16 +92,18 @@ import kotlinx.serialization.json.contentOrNull
 /** Display names for goose's four approval modes.
  *
  *  The server sends snake_case ids (auto, approve, smart_approve, chat) and, for some builds, no
- *  label at all -- de-snaking gives "smart approve", which reads like a verb. These are the same
- *  four modes goose documents in GooseMode, named for what they DO to you rather than what they
- *  do to the tool call. Unknown ids fall through de-snaked rather than being hidden, so a new
+ *  label at all -- de-snaking gives "smart approve", which reads like a verb. One word each,
+ *  naming the AMOUNT of autonomy rather than describing the prompt you get: they sit in a row
+ *  in a picker and read as a scale, which "Ask when risky" next to "Chat only" did not. The
+ *  one-line blurb underneath still says what actually happens, so nothing is lost by the
+ *  shorter label. Unknown ids fall through de-snaked rather than being hidden, so a new
  *  upstream mode still appears and still works.
  */
 private fun prettyMode(value: String?): String = when (value) {
     "auto" -> "Auto"
-    "approve" -> "Ask always"
-    "smart_approve" -> "Ask when risky"
-    "chat" -> "Chat only"
+    "approve" -> "Manual"
+    "smart_approve" -> "Smart"
+    "chat" -> "None"
     null, "" -> "Mode"
     else -> value.replace('_', ' ').replaceFirstChar { it.uppercase() }
 }
@@ -111,7 +113,7 @@ private fun modeBlurb(value: String): String = when (value) {
     "auto" -> "Runs tools without asking"
     "approve" -> "Asks before every tool call"
     "smart_approve" -> "Asks only for sensitive tool calls"
-    "chat" -> "No tools at all"
+    "chat" -> "No tools at all — plain chat"
     else -> ""
 }
 
@@ -1305,8 +1307,6 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
     val ctx = LocalContext.current
     LaunchedEffect(cm.online.value) {
         if (cm.online.value) {
-            cm.loadAssistantExtensions()
-            cm.refreshAssistantTools()
             cm.refreshSchedules()
         }
     }
@@ -1362,23 +1362,11 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
             }
 
                 SettingsSection("Thread") {
-                    var actions by remember { mutableStateOf(cm.store.assistantActions) }
-                    var actMenu by remember { mutableStateOf(false) }
-                    fun actLabel(v: String) = when (v) {
-                        "auto" -> "Auto-approve (trusted)"; "readonly" -> "Read-only"; else -> "Ask me each time"
-                    }
-                    Box {
-                        SettingsNavRow("Assistant actions", actLabel(actions)) { actMenu = true }
-                        DropdownMenu(expanded = actMenu, onDismissRequest = { actMenu = false }) {
-                            listOf("confirm", "auto", "readonly").forEach { v ->
-                                DropdownMenuItem(text = { Text(actLabel(v)) },
-                                    onClick = { actions = v; cm.store.assistantActions = v; actMenu = false })
-                            }
-                        }
-                    }
-                    SettingCaption("How the privileged Assistant thread handles write/shell " +
-                        "actions. Other chats always ask; voice stays read-only.")
-                    HorizontalDivider()
+                    // The "Assistant actions" policy (auto-approve / read-only / ask) is GONE.
+                    // It was a client-side permission system layered on top of goose's own mode
+                    // -- so the mode picker in the thread appeared to govern tool approval and
+                    // did not, and a thread left on "auto-approve" ran shell without asking
+                    // however its mode read. Set the mode in the thread, like any other chat.
                     var confirmReset by remember { mutableStateOf(false) }
                     SettingsNavRow("Reset assistant thread",
                         "Start fresh now. The old thread is kept, renamed aside. (Happens " +
@@ -1397,25 +1385,10 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
                     )
                 }
 
-                SettingsSection("Thread tools") {
-                    SettingCaption("Extensions and their individual tools in the Assistant " +
-                        "thread. The daily rotation carries this set forward, so changes " +
-                        "stick. Other chats use the global defaults.")
-                    if (cm.extensions.value.isEmpty()) {
-                        Text("Connect to load the extension list.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline)
-                    }
-                    cm.extensions.value.sortedBy { it.name.lowercase() }.forEach { ext ->
-                        val on = ext.name in cm.assistantExtNames.value
-                        SettingsSwitchRow(ext.name, on) { cm.toggleAssistantExtension(ext, it) }
-                        if (on) ToolList(cm, ext,
-                            active = cm.assistantTools.value[ext.name].orEmpty().toSet(),
-                            onExpand = { cm.discoverAssistantTools(ext) }) { sel ->
-                            cm.setAssistantTools(ext, sel)
-                        }
-                    }
-                }
+                // "Thread tools" stood here: a second tool editor that existed only for this
+                // one conversation. The in-chat tools sheet already does exactly that for
+                // whichever chat you are in, this thread included -- so the settings copy was a
+                // parallel implementation of the same operation, and the one that was wrong.
             }
             Spacer(Modifier.height(28.dp))
         }
