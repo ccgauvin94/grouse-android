@@ -61,6 +61,54 @@ data class SessionInfo(
 /** A goose project: a named source with a slug, NOT a directory. */
 data class ProjectInfo(val id: String, val name: String, val description: String, val path: String = "")
 
+/** One scheduled job from `schedules/list`.
+ *
+ *  `source` is the recipe file the job runs. When the job was made with `recipes/schedule` that
+ *  path is the LIBRARY file, so editing the recipe changes what runs; when it was made with
+ *  `schedules/create` the scheduler wrote its own private copy and the library is irrelevant to
+ *  it. Same DTO, and the only way to tell them apart is the path. */
+data class ScheduleInfo(
+    val id: String,
+    val cron: String,
+    val source: String,
+    val paused: Boolean,
+    val running: Boolean,
+    val lastRun: String? = null,
+    val currentSessionId: String? = null,
+) {
+    /** The recipe-library id this job runs, if it runs one. */
+    val recipeFile: String get() = source.substringAfterLast('/')
+}
+
+/** A saved recipe, with the whole server DTO kept alongside the fields the UI shows.
+ *
+ *  KEEPING `raw` IS NOT OPTIONAL. Saving goes back through `recipes/save`, which replaces the
+ *  entire recipe -- so an edit rebuilt from only the modelled fields would silently drop
+ *  everything this class does not model: extension allowlists, sub-recipe wiring, response
+ *  schemas, retry config. The UI edits a copy of `raw` and sends that. */
+data class RecipeInfo(
+    val id: String,
+    val title: String,
+    val description: String,
+    val cron: String?,
+    val provider: String?,
+    val model: String?,
+    val prompt: String?,
+    val instructions: String?,
+    val parameters: List<RecipeParam>,
+    val subRecipes: List<String>,
+    val extensions: List<String>,
+    val filePath: String,
+    val raw: JsonObject,
+)
+
+data class RecipeParam(
+    val key: String,
+    val requirement: String,
+    val description: String,
+    val default: String?,
+)
+
 /** One goose extension from the ACP `config/extensions/list` method (goose ≥1.42). */
 data class ExtInfo(
     val name: String,
@@ -115,6 +163,8 @@ sealed interface AcpEvent {
     data class Sessions(val list: List<SessionInfo>) : AcpEvent
     /** Reply to listProjects: the goose projects a session can be filed under. */
     data class Projects(val list: List<ProjectInfo>) : AcpEvent
+    data class Schedules(val list: List<ScheduleInfo>) : AcpEvent
+    data class Recipes(val list: List<RecipeInfo>) : AcpEvent
     data class Extensions(val list: List<ExtInfo>) : AcpEvent
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
      *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
@@ -257,6 +307,61 @@ class AcpClient(
             put("sessionId", sessionId)
             if (projectId == null) put("projectId", JsonNull) else put("projectId", projectId)
         })
+
+    // ---- Schedules and recipes -------------------------------------------------------------
+    //
+    // Two APIs that only look like one. `recipes/*` is a LIBRARY of saved recipes on the server;
+    // `schedules/*` is the cron table. `recipes/schedule` is the join: it creates a job pointing
+    // at the library file, so a later edit to the recipe changes what the job runs. Creating a
+    // job the other way (`schedules/create`, which takes a recipe inline) copies the recipe into
+    // the scheduler's own directory, and from then on the library copy is decoration.
+    //
+    // BEWARE THE CASING. These params are snake_case (`cron_schedule`), unlike almost every
+    // other goose ACP method, which is camelCase. An unknown field is dropped silently rather
+    // than rejected, and for recipes/schedule a dropped `cron_schedule` reads as "no cron",
+    // which UNSCHEDULES the recipe. It returns ok either way.
+
+    /** List scheduled jobs. Reply arrives as [AcpEvent.Schedules]. */
+    fun listSchedules() = rpc("_goose/unstable/schedules/list", buildJsonObject {})
+
+    /** List saved recipes. Reply arrives as [AcpEvent.Recipes]. */
+    fun listRecipes() = rpc("_goose/unstable/recipes/list", buildJsonObject {})
+
+    fun pauseSchedule(id: String, paused: Boolean) =
+        rpc("_goose/unstable/schedules/" + (if (paused) "pause" else "unpause"),
+            buildJsonObject { put("scheduleId", id) })
+
+    /** Run a schedule immediately. This BLOCKS server-side for the whole run -- a briefing is a
+     *  couple of minutes -- so the reply is the finish, not the start. The UI must not wait on
+     *  it; watch the schedule's running flag instead. */
+    fun runScheduleNow(id: String) =
+        rpc("_goose/unstable/schedules/run-now", buildJsonObject { put("scheduleId", id) })
+
+    fun deleteSchedule(id: String) =
+        rpc("_goose/unstable/schedules/delete", buildJsonObject { put("scheduleId", id) })
+
+    /** Change a job's cron. Recipe content is NOT touched -- `schedules/update` takes a cron and
+     *  nothing else. Edit the recipe through [saveRecipe]. */
+    fun updateScheduleCron(id: String, cron: String) =
+        rpc("_goose/unstable/schedules/update", buildJsonObject {
+            put("scheduleId", id); put("cron", cron)
+        })
+
+    /** Schedule a library recipe, or pass null to unschedule it. */
+    fun scheduleRecipe(recipeId: String, cron: String?) =
+        rpc("_goose/unstable/recipes/schedule", buildJsonObject {
+            put("id", recipeId)
+            if (cron == null) put("cron_schedule", JsonNull) else put("cron_schedule", cron)
+        })
+
+    /** Overwrite a saved recipe. `dto` must be a COMPLETE recipe -- see [RecipeInfo.raw]. */
+    fun saveRecipe(recipeId: String, dto: JsonObject) =
+        rpc("_goose/unstable/recipes/save", buildJsonObject {
+            put("id", recipeId); put("recipe", dto)
+        })
+
+    fun deleteRecipe(recipeId: String) =
+        rpc("_goose/unstable/recipes/delete", buildJsonObject { put("id", recipeId) })
 
     /** List configured extensions (agent-global). Reply arrives as AcpEvent.Extensions.
      *  Replaces goosed's old GET /config/extensions — that REST endpoint is gone from
@@ -599,6 +704,18 @@ class AcpClient(
             }
             "session/list" -> onEvent(AcpEvent.Sessions(parseSessions(result)))
             "_goose/unstable/sources/list" -> onEvent(AcpEvent.Projects(parseProjects(result)))
+            "_goose/unstable/schedules/list" -> onEvent(AcpEvent.Schedules(parseSchedules(result)))
+            "_goose/unstable/recipes/list" -> onEvent(AcpEvent.Recipes(parseRecipes(result)))
+            // Every mutation re-lists rather than patching local state: the server owns the
+            // paused/running flags, and run-now in particular changes them without telling us.
+            "_goose/unstable/schedules/pause",
+            "_goose/unstable/schedules/unpause",
+            "_goose/unstable/schedules/delete",
+            "_goose/unstable/schedules/update",
+            "_goose/unstable/schedules/run-now" -> listSchedules()
+            "_goose/unstable/recipes/schedule" -> { listSchedules(); listRecipes() }
+            "_goose/unstable/recipes/save",
+            "_goose/unstable/recipes/delete" -> listRecipes()
             // create/assign replies carry no useful body; re-list so the drawer reflects them.
             "_goose/unstable/sources/create" -> listProjects()
             "_goose/unstable/sources/delete" -> listProjects()
@@ -738,6 +855,59 @@ class AcpClient(
                 path = path,
             )
         }.sortedBy { it.name.lowercase() }
+    }
+
+    private fun parseSchedules(result: JsonObject?): List<ScheduleInfo> {
+        val arr = result?.get("jobs") as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            ScheduleInfo(
+                id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                cron = o["cron"]?.jsonPrimitive?.contentOrNull ?: "",
+                source = o["source"]?.jsonPrimitive?.contentOrNull ?: "",
+                paused = o["paused"]?.jsonPrimitive?.booleanOrNull ?: false,
+                running = o["currentlyRunning"]?.jsonPrimitive?.booleanOrNull ?: false,
+                lastRun = o["lastRun"]?.jsonPrimitive?.contentOrNull,
+                currentSessionId = o["currentSessionId"]?.jsonPrimitive?.contentOrNull,
+            )
+        }.sortedBy { it.id.lowercase() }
+    }
+
+    private fun parseRecipes(result: JsonObject?): List<RecipeInfo> {
+        val arr = result?.get("recipes") as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val e = el as? JsonObject ?: return@mapNotNull null
+            val r = e["recipe"] as? JsonObject ?: return@mapNotNull null
+            val settings = r["settings"] as? JsonObject
+            RecipeInfo(
+                id = e["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                title = r["title"]?.jsonPrimitive?.contentOrNull ?: "(untitled)",
+                description = r["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                cron = e["scheduleCron"]?.jsonPrimitive?.contentOrNull,
+                // settings keys are snake_case here, like the recipe YAML they came from
+                provider = settings?.get("goose_provider")?.jsonPrimitive?.contentOrNull,
+                model = settings?.get("goose_model")?.jsonPrimitive?.contentOrNull,
+                prompt = r["prompt"]?.jsonPrimitive?.contentOrNull,
+                instructions = r["instructions"]?.jsonPrimitive?.contentOrNull,
+                parameters = (r["parameters"] as? JsonArray).orEmpty().mapNotNull { p ->
+                    val po = p as? JsonObject ?: return@mapNotNull null
+                    RecipeParam(
+                        key = po["key"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        requirement = po["requirement"]?.jsonPrimitive?.contentOrNull ?: "required",
+                        description = po["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                        default = po["default"]?.jsonPrimitive?.contentOrNull,
+                    )
+                },
+                subRecipes = (r["sub_recipes"] as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                },
+                extensions = (r["extensions"] as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                },
+                filePath = e["filePath"]?.jsonPrimitive?.contentOrNull ?: "",
+                raw = r,
+            )
+        }.sortedBy { it.title.lowercase() }
     }
 
     private fun parseSessions(result: JsonObject?): List<SessionInfo> {

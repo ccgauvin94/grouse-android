@@ -76,6 +76,58 @@ class ConnectionManager private constructor(context: Context) {
      *  same project is one entry from every client instead of one per cwd spelling. */
     val projects = mutableStateOf<List<ProjectInfo>>(emptyList())
 
+    /** The server's cron table, and the recipe library the jobs run from. Both are server state
+     *  with no local mirror -- every mutation re-lists rather than patching, because paused and
+     *  running move without the client asking. */
+    val schedules = mutableStateOf<List<ScheduleInfo>>(emptyList())
+    val recipes = mutableStateOf<List<RecipeInfo>>(emptyList())
+
+    /** The recipe a job runs, matched by file path. `schedules/list` gives a path and
+     *  `recipes/list` gives a path, and nothing gives an id linking them -- so this is the join,
+     *  and it returns null for a job created with an inline recipe (which the library never
+     *  saw). */
+    fun recipeFor(job: ScheduleInfo): RecipeInfo? =
+        recipes.value.firstOrNull { it.filePath.isNotEmpty() && it.filePath == job.source }
+
+    fun refreshSchedules() {
+        client?.listSchedules()
+        client?.listRecipes()
+    }
+
+    fun setSchedulePaused(id: String, paused: Boolean) { client?.pauseSchedule(id, paused) }
+
+    fun runScheduleNow(id: String) { client?.runScheduleNow(id) }
+
+    fun deleteSchedule(id: String) { client?.deleteSchedule(id) }
+
+    fun setScheduleCron(id: String, cron: String) { client?.updateScheduleCron(id, cron) }
+
+    fun setRecipeCron(recipeId: String, cron: String?) { client?.scheduleRecipe(recipeId, cron) }
+
+    fun deleteRecipe(recipeId: String) { client?.deleteRecipe(recipeId) }
+
+    /** Save an edited recipe. The caller hands back a full DTO derived from [RecipeInfo.raw];
+     *  the helpers below build those, so no screen has to know the recipe schema. */
+    fun saveRecipe(recipeId: String, dto: JsonObject) { client?.saveRecipe(recipeId, dto) }
+
+    /** Replace one top-level string field, dropping it when blank. */
+    fun recipeWith(r: RecipeInfo, field: String, value: String): JsonObject =
+        JsonObject(r.raw.toMutableMap().apply {
+            if (value.isBlank()) remove(field) else put(field, JsonPrimitive(value))
+        })
+
+    /** Replace one `settings:` key, creating or pruning the settings block as needed. An empty
+     *  settings object is removed rather than left behind: goose treats a present-but-empty
+     *  block differently from an absent one in some paths, and an absent one is what a recipe
+     *  with no pins looks like. */
+    fun recipeWithSetting(r: RecipeInfo, key: String, value: String): JsonObject {
+        val settings = ((r.raw["settings"] as? JsonObject)?.toMutableMap() ?: mutableMapOf())
+        if (value.isBlank()) settings.remove(key) else settings[key] = JsonPrimitive(value)
+        return JsonObject(r.raw.toMutableMap().apply {
+            if (settings.isEmpty()) remove("settings") else put("settings", JsonObject(settings))
+        })
+    }
+
     /** Sessions grouped by project, most-recent project first, unfiled last. Unfiled is ONE
      *  bucket: the old cwd grouping made a separate group per directory, which is how a single
      *  "state" project ended up holding every chat. */
@@ -1228,6 +1280,8 @@ class ConnectionManager private constructor(context: Context) {
                 }
             }
             is AcpEvent.Projects -> projects.value = ev.list
+            is AcpEvent.Schedules -> schedules.value = ev.list
+            is AcpEvent.Recipes -> recipes.value = ev.list
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
                 store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })

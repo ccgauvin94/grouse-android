@@ -244,6 +244,10 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             }
             composable("settings") { SettingsScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("extensions") { ExtensionsScreen(cm, nav) }
+            composable("schedules") { SchedulesScreen(cm, nav) }
+            composable("recipe/{rid}") { back ->
+                RecipeScreen(cm, nav, back.arguments?.getString("rid") ?: "")
+            }
         }
     }
 }

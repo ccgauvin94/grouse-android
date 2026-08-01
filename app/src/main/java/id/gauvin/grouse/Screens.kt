@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
@@ -1765,6 +1766,10 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     "Briefings, schedule, models, prompts, thread tools — everything in one place.") {
                     nav.navigate("assistant_settings")
                 }
+                SettingsNavRow("Schedules & recipes",
+                    "What goose runs on a timer, and the recipes behind it.") {
+                    nav.navigate("schedules")
+                }
             }
 
             SettingsSection("Models") {
@@ -2449,5 +2454,326 @@ private fun TypingIndicator() {
         Spacer(Modifier.width(8.dp))
         Text("Grouse is thinking…", style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.outline)
+    }
+}
+
+// ---- Schedules and recipes ------------------------------------------------------------------
+//
+// These two screens are one feature seen from both ends. A SCHEDULE is a cron entry; a RECIPE is
+// what it runs. goose keeps them separately and links them only by file path, so the list screen
+// shows jobs and the detail screen edits the recipe behind one -- editing a recipe changes what
+// the job does on its next run, with nothing to re-register.
+//
+// Goose Desktop deliberately does less than this: its schedule detail view prints the recipe's
+// PATH and stops, because Desktop can open the file with a native picker and Grouse cannot. A
+// phone has no filesystem in common with the server, which is why the recipe library API
+// (recipes/list returns whole recipes) is the only workable way to show any of this here.
+
+/** "0 0 7-22 * * *" -> "hourly, 07:00-22:00". Falls back to the raw expression, which is the
+ *  honest thing to show for anything this does not recognise -- a wrong plain-English reading of
+ *  a cron is worse than the cron. */
+fun cronInEnglish(cron: String): String {
+    val f = cron.trim().split(Regex("\\s+"))
+    // 5-field crons are legal too; goose prefixes a "0" seconds field for them.
+    val p = when (f.size) { 6 -> f; 5 -> listOf("0") + f; else -> return cron }
+    val (sec, min, hour) = Triple(p[0], p[1], p[2])
+    if (sec != "0" || !min.all { it.isDigit() }) return cron
+    val m = min.toIntOrNull() ?: return cron
+    fun hhmm(h: Int) = "%02d:%02d".format(h, m)
+    return when {
+        hour.all { it.isDigit() } -> "daily at ${hhmm(hour.toInt())}"
+        hour == "*" -> "hourly at :%02d".format(m)
+        hour.matches(Regex("\\d+-\\d+")) -> {
+            val (a, b) = hour.split("-").map { it.toInt() }
+            "hourly, ${hhmm(a)}-${hhmm(b)}"
+        }
+        else -> cron
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SchedulesScreen(cm: ConnectionManager, nav: NavController) {
+    LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
+    var note by remember { mutableStateOf<String?>(null) }
+    val jobs = cm.schedules.value
+    val recipes = cm.recipes.value
+    val scheduledPaths = jobs.map { it.source }.toSet()
+
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Schedules") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+            actions = {
+                IconButton(onClick = { cm.refreshSchedules() }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "refresh")
+                }
+            },
+        )
+    }) { pad ->
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+
+            note?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(vertical = 8.dp))
+            }
+
+            SettingsSection("Scheduled") {
+                if (jobs.isEmpty()) {
+                    SettingCaption("Nothing scheduled. Give a recipe below a time to start one.")
+                }
+                jobs.forEach { job ->
+                    val recipe = cm.recipeFor(job)
+                    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f).clickable(enabled = recipe != null) {
+                            recipe?.let { nav.navigate("recipe/${it.id}") }
+                        }) {
+                            Text(recipe?.title ?: job.id)
+                            Text(
+                                buildString {
+                                    append(cronInEnglish(job.cron))
+                                    if (job.running) append("  ·  running now")
+                                    else if (job.paused) append("  ·  paused")
+                                    job.lastRun?.let { append("  ·  last ${it.take(16).replace('T', ' ')}") }
+                                    // A job whose recipe is not in the library was created with an
+                                    // inline copy; there is nothing here to open or edit.
+                                    if (recipe == null) append("  ·  ${job.recipeFile}")
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                        if (job.running) {
+                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        } else {
+                            Switch(checked = !job.paused,
+                                onCheckedChange = { cm.setSchedulePaused(job.id, !it) })
+                        }
+                    }
+                    Row {
+                        TextButton(enabled = !job.running, onClick = {
+                            cm.runScheduleNow(job.id)
+                            // run-now blocks server-side for the whole run, so the reply is the
+                            // finish. Say what will actually happen rather than "started".
+                            note = "Running ${recipe?.title ?: job.id} — a briefing takes a few " +
+                                "minutes and notifies when it has something."
+                        }) { Text("Run now") }
+                        TextButton(onClick = { cm.deleteSchedule(job.id) }) { Text("Unschedule") }
+                    }
+                    HorizontalDivider()
+                }
+            }
+
+            SettingsSection("Recipes") {
+                if (recipes.isEmpty()) {
+                    SettingCaption("No saved recipes on the server.")
+                }
+                recipes.forEach { r ->
+                    val isScheduled = r.filePath in scheduledPaths
+                    SettingsNavRow(
+                        r.title,
+                        listOfNotNull(
+                            r.model,
+                            if (isScheduled) null else "not scheduled",
+                        ).joinToString(" · ").ifBlank { r.description.take(60) },
+                    ) { nav.navigate("recipe/${r.id}") }
+                }
+                SettingCaption("A recipe is what a schedule runs. Editing one here changes its " +
+                    "next run — there is nothing to re-register.")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
+    LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
+    val r = cm.recipes.value.firstOrNull { it.id == recipeId }
+    val job = cm.schedules.value.firstOrNull { it.source == r?.filePath }
+    var confirmDelete by remember { mutableStateOf(false) }
+
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text(r?.title ?: "Recipe") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+        )
+    }) { pad ->
+        if (r == null) {
+            Box(Modifier.padding(pad).fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Recipe not found.", color = MaterialTheme.colorScheme.outline)
+            }
+            return@Scaffold
+        }
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+
+            if (r.description.isNotBlank()) {
+                Text(r.description, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(vertical = 8.dp))
+            }
+
+            SettingsSection("Schedule") {
+                var cron by remember(r.id, job?.cron) { mutableStateOf(job?.cron ?: "") }
+                OutlinedTextField(cron, { cron = it }, singleLine = true,
+                    label = { Text("Cron") },
+                    supportingText = {
+                        Text(if (cron.isBlank()) "Empty = not scheduled"
+                             else cronInEnglish(cron))
+                    },
+                    modifier = Modifier.fillMaxWidth())
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(enabled = cron.trim() != (job?.cron ?: ""), onClick = {
+                        cm.setRecipeCron(r.id, cron.trim().ifBlank { null })
+                    }) { Text(if (cron.isBlank()) "Unschedule" else "Save schedule") }
+                }
+                SettingCaption("Six fields, seconds first — \"0 0 6 * * *\" is 06:00 daily. " +
+                    "Server local time.")
+                job?.let {
+                    SettingsSwitchRow("Enabled", !it.paused) { on ->
+                        cm.setSchedulePaused(it.id, !on)
+                    }
+                }
+            }
+
+            SettingsSection("Model") {
+                var model by remember(r.id, r.model) { mutableStateOf(r.model.orEmpty()) }
+                var provider by remember(r.id, r.provider) { mutableStateOf(r.provider.orEmpty()) }
+                OutlinedTextField(model, { model = it }, singleLine = true,
+                    label = { Text("Model") },
+                    placeholder = { Text("blank = the server default") },
+                    modifier = Modifier.fillMaxWidth())
+                var open by remember { mutableStateOf(false) }
+                Box {
+                    SettingsNavRow("Provider", provider.ifBlank { "(server default)" }) { open = true }
+                    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                        listOf("", "openai", "openrouter", "openrouter_custom").forEach { p ->
+                            DropdownMenuItem(
+                                text = { Text(when (p) {
+                                    "" -> "(server default)"
+                                    "openai" -> "openai (local)"
+                                    else -> p
+                                }) },
+                                onClick = { provider = p; open = false })
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(
+                        enabled = model != r.model.orEmpty() || provider != r.provider.orEmpty(),
+                        onClick = {
+                            // Two writes, model first: each save replaces the whole recipe, so
+                            // they have to be applied in sequence off the same base or the second
+                            // reverts the first.
+                            var dto = cm.recipeWithSetting(r, "goose_model", model.trim())
+                            dto = cm.recipeWithSetting(
+                                r.copy(raw = dto), "goose_provider", provider.trim())
+                            cm.saveRecipe(r.id, dto)
+                        }) { Text("Save model") }
+                }
+                SettingCaption("A recipe's own pin wins over the server default. A cloud model " +
+                    "under provider \"openai\" is sent to LocalAI and 404s — move both together.")
+            }
+
+            SettingsSection("Prompt") {
+                var prompt by remember(r.id, r.prompt) { mutableStateOf(r.prompt.orEmpty()) }
+                OutlinedTextField(prompt, { prompt = it }, minLines = 2, maxLines = 8,
+                    label = { Text("Prompt") },
+                    supportingText = { Text("The message the run starts from.") },
+                    modifier = Modifier.fillMaxWidth())
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(enabled = prompt != r.prompt.orEmpty(), onClick = {
+                        cm.saveRecipe(r.id, cm.recipeWith(r, "prompt", prompt))
+                    }) { Text("Save prompt") }
+                }
+            }
+
+            SettingsSection("Instructions") {
+                var instr by remember(r.id, r.instructions) {
+                    mutableStateOf(r.instructions.orEmpty())
+                }
+                OutlinedTextField(instr, { instr = it }, minLines = 4, maxLines = 20,
+                    label = { Text("Instructions") },
+                    supportingText = { Text("The system prompt for this run.") },
+                    modifier = Modifier.fillMaxWidth())
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(enabled = instr != r.instructions.orEmpty(), onClick = {
+                        cm.saveRecipe(r.id, cm.recipeWith(r, "instructions", instr))
+                    }) { Text("Save instructions") }
+                }
+            }
+
+            // Read-only from here down. These are structural -- a sub-recipe's delegate wiring and
+            // an extension's tool allowlist are what make a briefing read-only and scoped, and a
+            // phone-sized editor for them would be a good way to break a job silently. They are
+            // shown because "what does this actually run" is the question the screen exists to
+            // answer.
+            if (r.extensions.isNotEmpty()) {
+                SettingsSection("Extensions") {
+                    r.extensions.forEach { Text("· $it", Modifier.padding(vertical = 2.dp)) }
+                    SettingCaption("The tools this recipe can reach. Edit in the recipe file.")
+                }
+            }
+
+            if (r.subRecipes.isNotEmpty()) {
+                SettingsSection("Sub-recipes") {
+                    r.subRecipes.forEach { Text("· $it", Modifier.padding(vertical = 2.dp)) }
+                    SettingCaption("Delegated checks, each with its own small context. Their " +
+                        "tools come from THIS recipe's extensions, not their own files.")
+                }
+            }
+
+            if (r.parameters.isNotEmpty()) {
+                SettingsSection("Parameters") {
+                    r.parameters.forEach { p ->
+                        Text("· ${p.key}" + if (p.requirement == "optional") " (optional)" else "",
+                            Modifier.padding(top = 4.dp))
+                        if (p.description.isNotBlank()) {
+                            Text(p.description, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                    SettingCaption("A schedule freezes parameter values when it is created, so " +
+                        "anything that changes per run has to be a tool call, not a parameter.")
+                }
+            }
+
+            SettingsSection("Danger") {
+                TextButton(onClick = { confirmDelete = true }) { Text("Delete recipe") }
+                SettingCaption(r.filePath)
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete ${r?.title}?") },
+            text = { Text("The recipe file is removed from the server. Any schedule running it " +
+                "stops working.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    r?.let { rec -> cm.deleteRecipe(rec.id) }
+                    nav.popBackStack()
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
     }
 }
