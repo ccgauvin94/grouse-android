@@ -63,6 +63,10 @@ class SecureStore(context: Context) {
         // ConnectionManager. Goose defines exactly two scopes (global config.yaml, and
         // session-scoped add/remove); a third layer keyed on session type just gave "what tools does
         // this chat have" a third owner. Drop its keys so they don't linger in prefs forever.
+        // The per-voice-turn model override is GONE (2026-08-01) -- it was a third place to set
+        // a model, kept only to dodge self-hosted latency, and the default chat model is a fast
+        // cloud one now. Clear it so an upgraded install cannot keep an override with no UI.
+        cfg.edit().remove("voice_provider").remove("voice_model").apply()
         cfg.edit().apply {
             for (k in listOf("assistant", "chat", "code")) {
                 remove("profile_${k}_on")

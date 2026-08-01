@@ -1304,96 +1304,9 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
 fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
     LaunchedEffect(cm.online.value) {
         if (cm.online.value) {
-            cm.readServerConfig("MORNING_ENABLED", "MORNING_TIME", "MORNING_MODEL", "MORNING_PROMPT",
-                "BRIEFING_ENABLED", "BRIEFING_INTERVAL_HOURS", "BRIEFING_MODEL", "BRIEFING_PROMPT",
-                "MORNING_PROVIDER", "BRIEFING_PROVIDER")
             cm.loadAssistantExtensions()
             cm.refreshAssistantTools()
-        }
-    }
-    var testNote by remember { mutableStateOf<String?>(null) }
-
-    @Composable
-    fun modelPicker(label: String, key: String) {
-        val current = cm.serverConfig[key].orEmpty().ifBlank { "Qwen3.6-35B-A3B" }
-        var open by remember { mutableStateOf(false) }
-        var typing by remember { mutableStateOf(false) }
-        var draft by remember(current) { mutableStateOf(current) }
-        Box {
-            SettingsNavRow(label, current) { open = true }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                (cm.knownModels.value + current).distinct().sorted().forEach { m ->
-                    DropdownMenuItem(text = { Text(m) },
-                        onClick = { cm.writeServerConfig(key, m); open = false })
-                }
-                HorizontalDivider()
-                // knownModels only holds the ACTIVE provider's list, so a cloud model
-                // (openrouter's "deepseek/deepseek-v4-flash") can never appear there. Typed
-                // entry is the only way to reach one -- goose accepts arbitrary model slugs.
-                DropdownMenuItem(text = { Text("Enter model ID…") },
-                    onClick = { open = false; typing = true })
-            }
-        }
-        if (typing) {
-            AlertDialog(
-                onDismissRequest = { typing = false },
-                title = { Text(label) },
-                text = {
-                    OutlinedTextField(draft, { draft = it }, singleLine = true,
-                        label = { Text("Model ID") },
-                        supportingText = { Text("e.g. deepseek/deepseek-v4-flash — set the matching provider below") })
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        cm.writeServerConfig(key, draft.trim()); typing = false
-                    }) { Text("Save") }
-                },
-                dismissButton = { TextButton(onClick = { typing = false }) { Text("Cancel") } },
-            )
-        }
-    }
-
-    @Composable
-    fun providerPicker(key: String) {
-        // deliver.sh passes --provider explicitly; a cloud model under provider "openai"
-        // goes to LocalAI and 404s, so this has to move with the model.
-        val current = cm.serverConfig[key].orEmpty().ifBlank { "openai" }
-        var open by remember { mutableStateOf(false) }
-        Box {
-            SettingsNavRow("Provider", current) { open = true }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                listOf("openai", "openrouter", "openrouter_custom").forEach { p ->
-                    DropdownMenuItem(text = { Text(if (p == "openai") "openai (local)" else p) },
-                        onClick = { cm.writeServerConfig(key, p); open = false })
-                }
-            }
-        }
-    }
-
-    @Composable
-    fun promptField(key: String) {
-        val server = cm.serverConfig[key].orEmpty()
-        var draft by remember(server) { mutableStateOf(server) }
-        OutlinedTextField(draft, { draft = it }, minLines = 2, maxLines = 5,
-            label = { Text("Extra instructions") },
-            placeholder = { Text("Appended to the recipe prompt — steer tone or content.") },
-            modifier = Modifier.fillMaxWidth())
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            TextButton(enabled = draft != server,
-                onClick = { cm.writeServerConfig(key, draft.trim()) }) { Text("Save prompt") }
-        }
-    }
-
-    @Composable
-    fun testRow(kind: String) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = {
-                testNote = "Triggering $kind test…"
-                cm.testAssistantJob(kind) { err ->
-                    testNote = err?.let { "Test trigger failed: $it" }
-                        ?: "Test running — expect a push (and a thread post) within a few minutes."
-                }
-            }) { Text("Run test now") }
+            cm.refreshSchedules()
         }
     }
 
@@ -1410,67 +1323,26 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
         Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
             .verticalScroll(rememberScrollState())) {
 
-            SettingsSection("Master") {
-                SettingsSwitchRow("Assistant features", cm.assistantEnabled.value) {
-                    cm.setAssistantEnabled(it)
-                }
-                SettingCaption("Off pauses the morning digest and briefings server-side and " +
-                    "hides the Assistant from the menu. Chats and projects are unaffected.")
+            // The Morning digest / Updates sections that stood here are GONE (2026-08-01), and
+            // so is the "Assistant features" master switch. All three wrote config keys --
+            // MORNING_*, BRIEFING_*, ASSISTANT_ENABLED -- that only deliver.sh ever read, and
+            // deliver.sh no longer runs the jobs. They rendered current-looking values and
+            // changed nothing. Their "Run test now" buttons were worse than useless: they still
+            // tripped the systemd path unit that runs deliver.sh, so a test would have delivered
+            // a SECOND briefing by the retired route.
+            //
+            // Everything they claimed to control is real on the Schedules screen: enabled is
+            // pause, time is cron, model/provider/prompt are the recipe, and "run test now" is
+            // Run now on the actual job.
+            SettingsSection("Scheduled jobs") {
+                SettingsNavRow("Schedules & recipes",
+                    cm.schedules.value.let { j ->
+                        if (j.isEmpty()) "none scheduled"
+                        else j.count { !it.paused }.toString() + " of " + j.size + " active"
+                    }) { nav.navigate("schedules") }
+                SettingCaption("The morning digest and the hourly briefing, with their cron, " +
+                    "model and prompt. Pausing one here is what \"off\" used to mean.")
             }
-
-            testNote?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(it, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary)
-            }
-
-            if (cm.assistantEnabled.value) {
-                SettingsSection("Morning digest") {
-                    SettingsSwitchRow("Enabled", cm.serverConfig["MORNING_ENABLED"] != "false") {
-                        cm.writeServerConfig("MORNING_ENABLED", if (it) "true" else "false")
-                    }
-                    HorizontalDivider()
-                    val serverMorning = cm.serverConfig["MORNING_TIME"].orEmpty()
-                    var morning by remember(serverMorning) { mutableStateOf(serverMorning.ifBlank { "06:00" }) }
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(top = 8.dp)) {
-                        OutlinedTextField(morning, { morning = it }, singleLine = true,
-                            label = { Text("Delivery time") },
-                            supportingText = { Text("HH:MM, 05:00–10:45, 15-min steps") },
-                            modifier = Modifier.weight(1f))
-                        Spacer(Modifier.width(10.dp))
-                        TextButton(enabled = Regex("^(0[5-9]|10):(00|15|30|45)$").matches(morning.trim()),
-                            onClick = { cm.writeServerConfig("MORNING_TIME", morning.trim()) }) { Text("Save") }
-                    }
-                    modelPicker("Model", "MORNING_MODEL")
-                    providerPicker("MORNING_PROVIDER")
-                    promptField("MORNING_PROMPT")
-                    testRow("morning")
-                }
-
-                SettingsSection("Updates (briefings)") {
-                    SettingsSwitchRow("Enabled", cm.serverConfig["BRIEFING_ENABLED"] != "false") {
-                        cm.writeServerConfig("BRIEFING_ENABLED", if (it) "true" else "false")
-                    }
-                    HorizontalDivider()
-                    Text("Check interval", style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.padding(top = 10.dp))
-                    Spacer(Modifier.height(6.dp))
-                    val serverInterval = cm.serverConfig["BRIEFING_INTERVAL_HOURS"].orEmpty()
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("1", "2", "3", "4").forEach { h ->
-                            FilterChip(selected = (serverInterval.ifBlank { "1" }) == h,
-                                onClick = { cm.writeServerConfig("BRIEFING_INTERVAL_HOURS", h) },
-                                label = { Text(if (h == "1") "hourly" else "${h}h") })
-                        }
-                    }
-                    SettingCaption("Runs 07:00–22:00; the interval counts from 07:00. Pushes " +
-                        "only when something is genuinely imminent.")
-                    modelPicker("Model", "BRIEFING_MODEL")
-                    providerPicker("BRIEFING_PROVIDER")
-                    promptField("BRIEFING_PROMPT")
-                    testRow("briefing")
-                }
 
                 SettingsSection("Thread") {
                     var actions by remember { mutableStateOf(cm.store.assistantActions) }
@@ -1531,7 +1403,6 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
             Spacer(Modifier.height(28.dp))
         }
     }
-}
 
 // ---- Settings ---------------------------------------------------------------
 
@@ -1692,126 +1563,20 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 }
             }
 
-            SettingsSection("Connection") {
-                OutlinedTextField(host, { host = it }, label = { Text("Host") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(port, { port = it }, label = { Text("Port") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                OutlinedTextField(newKey, { newKey = it }, label = { Text("Replace secret key (optional)") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                Button(onClick = {
-                    val key = newKey.trim().ifBlank { cm.store.secretKey }
-                    cm.connect(host.trim(), port.trim(), key); nav.popBackStack()
-                }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("Save & reconnect") }
-            }
-
-            SettingsSection("Voice") {
-                SettingsSwitchRow("Speak replies aloud", cm.speakReplies.value) { cm.setSpeakReplies(it) }
-                SettingCaption("Read each finished reply with text-to-speech.")
-
-                // The box's own speech models. Separate from the two "voice provider/model" fields
-                // below, which pick the CHAT model a voice turn runs on -- these pick what does the
-                // listening and the talking. Grouse calls LocalAI directly for both: goose has no
-                // TTS at all, and its dictation methods transcribe for goose's own UI rather than
-                // returning text to an ACP client.
-                var srvTts by remember { mutableStateOf(cm.store.serverTts) }
-                var srvStt by remember { mutableStateOf(cm.store.serverStt) }
-                var ttsM by remember { mutableStateOf(cm.store.ttsModel) }
-                var sttM by remember { mutableStateOf(cm.store.sttModel) }
-                var laUrl by remember { mutableStateOf(cm.store.localAiUrl) }
-                HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                Text("Speech models", style = MaterialTheme.typography.titleSmall)
-                SettingsSwitchRow("Speak with LocalAI", srvTts) { srvTts = it; cm.store.serverTts = it }
-                if (srvTts) OutlinedTextField(ttsM, { ttsM = it; cm.store.ttsModel = it },
-                    label = { Text("TTS model") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                SettingsSwitchRow("Transcribe with LocalAI", srvStt) { srvStt = it; cm.store.serverStt = it }
-                if (srvStt) OutlinedTextField(sttM, { sttM = it; cm.store.sttModel = it },
-                    label = { Text("STT model") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                if (srvTts || srvStt) {
-                    OutlinedTextField(laUrl, { laUrl = it; cm.store.localAiUrl = it },
-                        label = { Text("LocalAI URL") }, singleLine = true,
-                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                    SettingCaption("Off by default — Android's own speech works offline and streams " +
-                        "words as you say them. LocalAI sounds better and transcribes better, but " +
-                        "needs the network and only shows the text once you stop talking. If a " +
-                        "request fails, replies fall back to the device voice.")
+            SettingsSection("Server") {
+                SettingsNavRow("Instance", "${cm.store.host}:${cm.store.port}" +
+                    if (cm.online.value) "  ·  connected" else "  ·  offline") {
+                    nav.navigate("instance")
                 }
-                HorizontalDivider(Modifier.padding(vertical = 8.dp))
-
-                var vProv by remember { mutableStateOf(cm.store.voiceProvider) }
-                var vModel by remember { mutableStateOf(cm.store.voiceModel) }
-                OutlinedTextField(vProv, { vProv = it; cm.store.voiceProvider = it.trim() },
-                    label = { Text("Voice provider (optional)") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                OutlinedTextField(vModel, { vModel = it; cm.store.voiceModel = it.trim() },
-                    label = { Text("Voice model (optional)") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                SettingCaption("Hands-free voice can use a faster model to cut self-hosted latency " +
-                    "(e.g. openrouter / z-ai/glm-5.2). Blank = your chat model.")
-                HorizontalDivider(Modifier.padding(top = 8.dp))
-                SettingsNavRow("Set Grouse as device assistant",
-                    "Assist gesture / power-button hold opens voice Grouse (read-only).") {
-                    runCatching {
-                        ctx.startActivity(android.content.Intent(
-                            android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
-                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
+                SettingsNavRow("Providers", "Chat model, vision, speech") {
+                    nav.navigate("providers")
                 }
-            }
-
-            SettingsSection("Assistant") {
-                SettingsNavRow("Assistant settings",
-                    "Briefings, schedule, models, prompts, thread tools — everything in one place.") {
+                SettingsNavRow("Tools", "Extensions and the tools they expose") {
+                    nav.navigate("extensions")
+                }
+                SettingsNavRow("Assistant", "The persistent thread and its scheduled jobs") {
                     nav.navigate("assistant_settings")
                 }
-                SettingsNavRow("Schedules & recipes",
-                    "What goose runs on a timer, and the recipes behind it.") {
-                    nav.navigate("schedules")
-                }
-            }
-
-            SettingsSection("Images") {
-                var describe by remember { mutableStateOf(cm.store.describeImages) }
-                SettingsSwitchRow("Describe images before sending", describe) {
-                    describe = it; cm.store.describeImages = it
-                }
-                SettingCaption("Normally OFF: the server's proxy already turns images into " +
-                    "text for every client. Turn this on only if this goose does not run that " +
-                    "proxy — then the image goes into the prompt as-is, which works only if " +
-                    "the chat model can see, and one that can't will answer around it rather " +
-                    "than say so.")
-            }
-
-            SettingsSection("Models") {
-                SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
-                SettingCaption("Off shows only providers set up on your goose (openai, openrouter). " +
-                    "On lists goose's full catalog.")
-                HorizontalDivider()
-                // App-editable global goose settings (config.yaml over ACP). Loaded on entry.
-                LaunchedEffect(cm.online.value) { if (cm.online.value) cm.loadServerConfig() }
-                var ctxLimit by remember { mutableStateOf("") }
-                // Seed the field from the server value only while it's still empty — once loaded (or
-                // the user starts typing) a later async config/read reply must not clobber the input.
-                LaunchedEffect(cm.serverContextLimit.value) {
-                    if (cm.serverContextLimit.value.isNotBlank() && ctxLimit.isBlank())
-                        ctxLimit = cm.serverContextLimit.value
-                }
-                OutlinedTextField(
-                    value = ctxLimit, onValueChange = { ctxLimit = it.filter(Char::isDigit) },
-                    label = { Text("Context limit (tokens)") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    trailingIcon = {
-                        val cur = cm.serverContextLimit.value
-                        if (ctxLimit.isNotBlank() && ctxLimit != cur)
-                            TextButton(onClick = { cm.setServerConfig("GOOSE_CONTEXT_LIMIT", ctxLimit) }) { Text("Save") }
-                    },
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
-                SettingCaption("goose's working window before it compacts. Keep it BELOW the model's " +
-                    "context size (leave room to reply) — and the fast model must be at least this " +
-                    "big to compact. Takes effect on new chats. Fast model: " +
-                    cm.serverFastModel.value.ifBlank { "—" } + ".")
             }
 
             SettingsSection("Notifications & background") {
@@ -1872,7 +1637,7 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
     LaunchedEffect(Unit) { cm.loadExtensions() }
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Extensions") },
+            title = { Text("Tools") },
             navigationIcon = {
                 IconButton(onClick = { nav.popBackStack() }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
@@ -2787,5 +2552,213 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
                 TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
             },
         )
+    }
+}
+
+// ---- Settings subpages ------------------------------------------------------
+//
+// Settings used to be one long scroll where Connection, Voice, Models and Images sat next
+// to Appearance and Security. These are the same sections, grouped by what they configure:
+// the SERVER you talk to, the MODELS it runs, the TOOLS it exposes, and the ASSISTANT.
+// Device-local preferences (notifications, theme, biometric lock) stay on the main page,
+// because they are not settings of the goose at all.
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
+    var host by remember { mutableStateOf(cm.store.host) }
+    var port by remember { mutableStateOf(cm.store.port) }
+    var newKey by remember { mutableStateOf("") }
+    var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
+    var persistent by remember { mutableStateOf(cm.persistent) }
+    val ctx = LocalContext.current
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Instance") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+        )
+    }) { pad ->
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+            SettingsSection("Connection") {
+                OutlinedTextField(host, { host = it }, label = { Text("Host") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(port, { port = it }, label = { Text("Port") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                OutlinedTextField(newKey, { newKey = it }, label = { Text("Replace secret key (optional)") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                Button(onClick = {
+                    val key = newKey.trim().ifBlank { cm.store.secretKey }
+                    cm.connect(host.trim(), port.trim(), key); nav.popBackStack()
+                }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("Save & reconnect") }
+            }
+
+            SettingsSection("Behaviour") {
+                SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
+                SettingCaption("On: stay connected in the background (persistent notification, " +
+                    "more battery). Off: connect while active; you still get a finished-turn " +
+                    "notification.")
+            }
+
+
+            Spacer(Modifier.height(28.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
+    var host by remember { mutableStateOf(cm.store.host) }
+    var port by remember { mutableStateOf(cm.store.port) }
+    var newKey by remember { mutableStateOf("") }
+    var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
+    var persistent by remember { mutableStateOf(cm.persistent) }
+    val ctx = LocalContext.current
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Providers") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+        )
+    }) { pad ->
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+            SettingsSection("Chat model") {
+                // The DEFAULT for new chats -- GOOSE_PROVIDER/GOOSE_MODEL in config.yaml. The
+                // picker above the message box sets the CURRENT chat only
+                // (session/set_config_option), which is why both exist and why this one says
+                // "new chats": changing it never re-points a conversation already under way.
+                LaunchedEffect(cm.online.value) {
+                    if (cm.online.value) cm.readServerConfig("GOOSE_PROVIDER", "GOOSE_MODEL")
+                }
+                var provOpen by remember { mutableStateOf(false) }
+                val curProv = cm.serverConfig["GOOSE_PROVIDER"].orEmpty().ifBlank { "—" }
+                Box {
+                    SettingsNavRow("Default provider", curProv) { provOpen = true }
+                    DropdownMenu(expanded = provOpen, onDismissRequest = { provOpen = false }) {
+                        listOf("openai", "openrouter", "openrouter_custom").forEach { pv ->
+                            DropdownMenuItem(
+                                text = { Text(if (pv == "openai") "openai (local)" else pv) },
+                                onClick = { cm.setServerConfig("GOOSE_PROVIDER", pv); provOpen = false })
+                        }
+                    }
+                }
+                var modelDraft by remember(cm.serverConfig["GOOSE_MODEL"]) {
+                    mutableStateOf(cm.serverConfig["GOOSE_MODEL"].orEmpty())
+                }
+                OutlinedTextField(modelDraft, { modelDraft = it }, singleLine = true,
+                    label = { Text("Default model") },
+                    trailingIcon = {
+                        if (modelDraft.isNotBlank() && modelDraft != cm.serverConfig["GOOSE_MODEL"])
+                            TextButton(onClick = {
+                                cm.setServerConfig("GOOSE_MODEL", modelDraft.trim())
+                            }) { Text("Save") }
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                SettingCaption("Used by new chats. A cloud model under provider \"openai\" is " +
+                    "sent to the local server and 404s — move both together.")
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
+                SettingCaption("Off shows only providers set up on your goose. On lists goose's " +
+                    "full catalog.")
+                HorizontalDivider()
+                // App-editable global goose settings (config.yaml over ACP). Loaded on entry.
+                LaunchedEffect(cm.online.value) { if (cm.online.value) cm.loadServerConfig() }
+                var ctxLimit by remember { mutableStateOf("") }
+                // Seed the field from the server value only while it's still empty — once loaded (or
+                // the user starts typing) a later async config/read reply must not clobber the input.
+                LaunchedEffect(cm.serverContextLimit.value) {
+                    if (cm.serverContextLimit.value.isNotBlank() && ctxLimit.isBlank())
+                        ctxLimit = cm.serverContextLimit.value
+                }
+                OutlinedTextField(
+                    value = ctxLimit, onValueChange = { ctxLimit = it.filter(Char::isDigit) },
+                    label = { Text("Context limit (tokens)") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    trailingIcon = {
+                        val cur = cm.serverContextLimit.value
+                        if (ctxLimit.isNotBlank() && ctxLimit != cur)
+                            TextButton(onClick = { cm.setServerConfig("GOOSE_CONTEXT_LIMIT", ctxLimit) }) { Text("Save") }
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                SettingCaption("goose's working window before it compacts. Keep it BELOW the model's " +
+                    "context size (leave room to reply) — and the fast model must be at least this " +
+                    "big to compact. Takes effect on new chats. Fast model: " +
+                    cm.serverFastModel.value.ifBlank { "—" } + ".")
+            }
+
+            SettingsSection("Vision") {
+                var describe by remember { mutableStateOf(cm.store.describeImages) }
+                SettingsSwitchRow("Describe images before sending", describe) {
+                    describe = it; cm.store.describeImages = it
+                }
+                SettingCaption("Normally OFF: the server's proxy already turns images into " +
+                    "text for every client. Turn this on only if this goose does not run that " +
+                    "proxy — then the image goes into the prompt as-is, which works only if " +
+                    "the chat model can see, and one that can't will answer around it rather " +
+                    "than say so.")
+            }
+
+            SettingsSection("Speech") {
+                SettingsSwitchRow("Speak replies aloud", cm.speakReplies.value) { cm.setSpeakReplies(it) }
+                SettingCaption("Read each finished reply with text-to-speech.")
+
+                // The box's own speech models -- what does the listening and the talking, as
+                // opposed to which model thinks. Grouse calls LocalAI directly for both: goose has no
+                // TTS at all, and its dictation methods transcribe for goose's own UI rather than
+                // returning text to an ACP client.
+                var srvTts by remember { mutableStateOf(cm.store.serverTts) }
+                var srvStt by remember { mutableStateOf(cm.store.serverStt) }
+                var ttsM by remember { mutableStateOf(cm.store.ttsModel) }
+                var sttM by remember { mutableStateOf(cm.store.sttModel) }
+                var laUrl by remember { mutableStateOf(cm.store.localAiUrl) }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                Text("Speech models", style = MaterialTheme.typography.titleSmall)
+                SettingsSwitchRow("Speak with LocalAI", srvTts) { srvTts = it; cm.store.serverTts = it }
+                if (srvTts) OutlinedTextField(ttsM, { ttsM = it; cm.store.ttsModel = it },
+                    label = { Text("TTS model") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                SettingsSwitchRow("Transcribe with LocalAI", srvStt) { srvStt = it; cm.store.serverStt = it }
+                if (srvStt) OutlinedTextField(sttM, { sttM = it; cm.store.sttModel = it },
+                    label = { Text("STT model") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                if (srvTts || srvStt) {
+                    OutlinedTextField(laUrl, { laUrl = it; cm.store.localAiUrl = it },
+                        label = { Text("LocalAI URL") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                    SettingCaption("Off by default — Android's own speech works offline and streams " +
+                        "words as you say them. LocalAI sounds better and transcribes better, but " +
+                        "needs the network and only shows the text once you stop talking. If a " +
+                        "request fails, replies fall back to the device voice.")
+                }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+                // The per-voice-turn model override that stood here is GONE. It existed to dodge
+                // self-hosted latency by running voice turns on a faster cloud model; the default
+                // chat model IS a fast cloud model now, so it was a third place to set a model
+                // that agreed with the other two. Removed rather than hidden -- SecureStore clears
+                // any value a previous install left behind, so nobody keeps an invisible override.
+                HorizontalDivider(Modifier.padding(top = 8.dp))
+                SettingsNavRow("Set Grouse as device assistant",
+                    "Assist gesture / power-button hold opens voice Grouse (read-only).") {
+                    runCatching {
+                        ctx.startActivity(android.content.Intent(
+                            android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                }
+            }
+
+
+            Spacer(Modifier.height(28.dp))
+        }
     }
 }
