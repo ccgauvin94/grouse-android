@@ -21,6 +21,12 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 const val DEFAULT_CWD = "/home/colin/Projects/Inbox"
 
+/** Where repositories live inside the goose container (the host's ~/dev, mounted read-write).
+ *  A session whose working directory is under this is CODE work; anything else is a chat. That
+ *  is the whole discriminator -- see ConnectionManager.isCode for why it is a directory and not
+ *  a field on the session. */
+const val CODE_ROOT = "/workspace"
+
 /** A selectable value inside a [ConfigOption] (goose "select" config). */
 data class Choice(val value: String, val label: String)
 
@@ -230,6 +236,8 @@ sealed interface AcpEvent {
     data class Schedules(val list: List<ScheduleInfo>) : AcpEvent
     data class Recipes(val list: List<RecipeInfo>) : AcpEvent
     data class Skills(val list: List<SkillInfo>) : AcpEvent
+    /** Reply to listDirectory: the directories directly under [path] on the SERVER. */
+    data class Directory(val path: String, val dirs: List<String>) : AcpEvent
     data class Extensions(val list: List<ExtInfo>) : AcpEvent
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
      *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
@@ -391,6 +399,16 @@ class AcpClient(
 
     /** List saved recipes. Reply arrives as [AcpEvent.Recipes]. */
     fun listRecipes() = rpc("_goose/unstable/recipes/list", buildJsonObject {})
+
+    /** List a server-side directory. Reply arrives as [AcpEvent.Directory].
+     *
+     *  Needs a sessionId even though it reads nothing session-specific, and is bounded by
+     *  GOOSE_BROWSE_ROOTS on the server -- a path outside those roots is refused rather than
+     *  listed, which is what makes it safe to point a phone at. */
+    fun listDirectory(target: String, path: String) =
+        rpc("_goose/unstable/fs/list_directory", buildJsonObject {
+            put("sessionId", target); put("path", path)
+        })
 
     /** List skills. Reply arrives as [AcpEvent.Skills]. Recipes are NOT listable this way --
      *  `sources/list` rejects type "recipe" outright; they have their own API above. */
@@ -793,6 +811,13 @@ class AcpClient(
             "_goose/unstable/schedules/list" -> onEvent(AcpEvent.Schedules(parseSchedules(result)))
             "_goose/unstable/recipes/list" -> onEvent(AcpEvent.Recipes(parseRecipes(result)))
             SKILLS_TAG -> onEvent(AcpEvent.Skills(parseSkills(result)))
+            "_goose/unstable/fs/list_directory" -> onEvent(AcpEvent.Directory(
+                result?.get("path")?.jsonPrimitive?.contentOrNull ?: "",
+                (result?.get("entries") as? JsonArray).orEmpty().mapNotNull { e ->
+                    val o = e as? JsonObject ?: return@mapNotNull null
+                    if (o["isDir"]?.jsonPrimitive?.booleanOrNull != true) null
+                    else o["name"]?.jsonPrimitive?.contentOrNull
+                }))
             "_goose/unstable/sources/update" -> listSkills()
             // Every mutation re-lists rather than patching local state: the server owns the
             // paused/running flags, and run-now in particular changes them without telling us.

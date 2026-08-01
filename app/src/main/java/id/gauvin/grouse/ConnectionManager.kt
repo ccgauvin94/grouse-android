@@ -92,6 +92,22 @@ class ConnectionManager private constructor(context: Context) {
 
     fun refreshSkills() { client?.listSkills() }
 
+    /** Directories under CODE_ROOT on the server, for adding a repo that has no session yet. */
+    val browsedDirs = mutableStateOf<List<String>>(emptyList())
+
+    fun browseCodeRoot() {
+        val sid = currentSession.value
+        if (sid != null) client?.listDirectory(sid, CODE_ROOT)
+        // No session open yet (cold start): the throwaway utility session exists for exactly
+        // this -- a sessionId with no conversation attached.
+        else runToolDirect("shell", kotlinx.serialization.json.buildJsonObject {
+            put("command", kotlinx.serialization.json.JsonPrimitive(
+                "ls -1 $CODE_ROOT"))
+        }, timeoutMs = 20_000) { err, out ->
+            if (err == null) browsedDirs.value = out.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        }
+    }
+
     fun saveSkill(s: SkillInfo, content: String) {
         client?.updateSkill(s.path, s.name, s.description, content)
     }
@@ -147,9 +163,39 @@ class ConnectionManager private constructor(context: Context) {
     /** Sessions grouped by project, most-recent project first, unfiled last. Unfiled is ONE
      *  bucket: the old cwd grouping made a separate group per directory, which is how a single
      *  "state" project ended up holding every chat. */
+    /** A session is CODE work if its working directory is inside the code mount.
+     *
+     *  goose has no field for what a session is FOR -- session_type is provenance (who created
+     *  it), project_id is grouping, and the one free-looking column is a legacy alias for the
+     *  title. What it does have is a working directory, and on this box that already carries the
+     *  answer: ~/dev is mounted at /workspace and holds repositories, while chats live at
+     *  /projects or /state. So the split is read off state goose already keeps, with nothing
+     *  added to the server and nothing to keep in sync.
+     *
+     *  This is only trustworthy because a resumed session's cwd is resolved from the session list
+     *  or asked of the server, never guessed -- see open(). A client that guessed would silently
+     *  reclassify sessions by opening them. */
+    fun isCode(s: SessionInfo): Boolean = s.cwd.startsWith("$CODE_ROOT/")
+
+    /** Repo path -> its sessions, newest first; repos ordered by most recent activity. One entry
+     *  per directory directly under the code root, which is what a "coding project" is here. */
+    fun codeProjects(): List<Pair<String, List<SessionInfo>>> =
+        sessions.value.filter { isCode(it) }
+            .groupBy { s -> s.cwd.removePrefix("$CODE_ROOT/").substringBefore('/') }
+            .entries
+            .sortedByDescending { it.value.maxOfOrNull { s -> s.updatedAt } ?: "" }
+            .map { (repo, list) -> repo to list.sortedByDescending { it.updatedAt } }
+
+    /** Start a coding session in [repo], a directory name directly under the code root. */
+    fun newRepoSession(repo: String) =
+        newSession(cwd = "$CODE_ROOT/${repo.trim().trim('/')}", kind = SessionKind.CODE)
+
     fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
         val byName = projects.value.associate { it.id to it.name }
         return sessions.value
+            // Code sessions belong to the Code section; showing them here too would put the same
+            // conversation in two places with different meanings.
+            .filterNot { isCode(it) }
             .groupBy { it.projectId ?: "" }
             .entries
             .sortedWith(compareBy({ it.key.isEmpty() }, { -(it.value.maxOfOrNull { s -> s.updatedAt } ?: "").hashCode() }))
@@ -374,6 +420,9 @@ class ConnectionManager private constructor(context: Context) {
     // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
     private var pendingOpenCwd: String = DEFAULT_CWD
+
+    /** Where repositories live inside the container (host ~/dev). Sessions under it are code. */
+    val codeRoot: String get() = CODE_ROOT
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
 
     // Voice: the voice sheet has a short lifecycle, so CM owns speaking the reply (it survives the
@@ -541,10 +590,12 @@ class ConnectionManager private constructor(context: Context) {
         open(resume = null, cwd = cwd, kind = kind)
     }
 
-    /** A project session: scoped to a directory under the server's /projects bind mount
-     *  (the user's ~/dev) instead of the default /state. This IS the "designation" -- goose has no
-     *  tags/labels, so cwd is the native, protocol-level signal sessionKind() reads back later. */
-    fun newCodeSession(project: String) {
+    /** Start a chat in a directory under the chat-projects mount.
+     *
+     *  NOT code: this is /home/colin/Projects, the workspace Desktop groups chats by. It was
+     *  called newCodeSession back when a "project" WAS a directory; projects are virtual now
+     *  (project_id), and real code lives under CODE_ROOT -- see newRepoSession. */
+    fun newProjectDirSession(project: String) {
         // Forgive "/workspace/foo" and "workspace/foo" -- typing the full path used to build
         // /workspace/workspace/foo, whose session/new rejection looked like a silent no-op.
         val clean = project.trim().trim('/').removePrefix("projects/")
@@ -1307,6 +1358,7 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Schedules -> schedules.value = ev.list
             is AcpEvent.Recipes -> recipes.value = ev.list
             is AcpEvent.Skills -> skills.value = ev.list
+            is AcpEvent.Directory -> browsedDirs.value = ev.dirs
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
                 store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })

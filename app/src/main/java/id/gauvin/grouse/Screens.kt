@@ -907,7 +907,7 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
     if (showNewProject) NewProjectDialog(
         cm = cm,
-        onCreated = { name -> showNewProject = false; cm.newCodeSession(name); onOpen() },
+        onCreated = { name -> showNewProject = false; cm.newProjectDirSession(name); onOpen() },
         onDismiss = { showNewProject = false },
     )
 
@@ -1212,7 +1212,7 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
             }
             item {
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .clickable { cm.newCodeSession(project); goToChat() }) {
+                    .clickable { cm.newProjectDirSession(project); goToChat() }) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Add, contentDescription = null)
                         Spacer(Modifier.width(10.dp))
@@ -3047,6 +3047,111 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
             }
             SettingCaption(sk.path)
             Spacer(Modifier.height(28.dp))
+        }
+    }
+}
+
+
+/** Code: the repositories on the server, and the sessions working in each.
+ *
+ *  The counterpart to Chats. A coding session is one whose working directory is inside the code
+ *  root -- see ConnectionManager.isCode -- so this screen and the chats drawer partition the
+ *  same session list rather than duplicating it.
+ *
+ *  Repos with no session yet are listed too, read from the server with fs/list_directory. That
+ *  is the "drive a new one from the UI" half: the phone has no filesystem in common with the
+ *  server, so without a server-side listing you could only open a repo whose exact path you
+ *  already knew and typed correctly. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CodeScreen(cm: ConnectionManager, nav: NavController, onOpenChat: () -> Unit) {
+    LaunchedEffect(cm.online.value) {
+        if (cm.online.value) { cm.listSessions(); cm.browseCodeRoot() }
+    }
+    val active = cm.codeProjects()
+    val activeNames = active.map { it.first }.toSet()
+    val idle = cm.browsedDirs.value.filterNot { it in activeNames }
+
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Code") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+            actions = {
+                IconButton(onClick = { cm.listSessions(); cm.browseCodeRoot() }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "refresh")
+                }
+            },
+        )
+    }) { pad ->
+        LazyColumn(Modifier.padding(pad).fillMaxSize()) {
+            if (active.isEmpty() && idle.isEmpty()) {
+                item {
+                    Text("No repositories visible on the server.",
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(16.dp))
+                }
+            }
+            items(active, key = { it.first }) { (repo, list) ->
+                var open by remember(repo) { mutableStateOf(false) }
+                Column(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.fillMaxWidth().clickable { open = !open }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            if (open) Icons.Filled.KeyboardArrowDown
+                            else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = null, tint = MaterialTheme.colorScheme.outline)
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(repo, style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                if (list.size == 1) "1 session" else "${list.size} sessions",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                        IconButton(onClick = { cm.newRepoSession(repo); onOpenChat() }) {
+                            Icon(Icons.Filled.Add, contentDescription = "new session in $repo")
+                        }
+                    }
+                    if (open) list.forEach { s ->
+                        Text(
+                            s.title.ifBlank { s.sessionId },
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.fillMaxWidth()
+                                .clickable { cm.openSession(s.sessionId); onOpenChat() }
+                                .padding(start = 48.dp, end = 16.dp, top = 8.dp, bottom = 8.dp))
+                    }
+                    HorizontalDivider()
+                }
+            }
+            if (idle.isNotEmpty()) {
+                item {
+                    Text("NOT YET OPENED", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 16.dp, top = 20.dp, bottom = 4.dp))
+                }
+                items(idle, key = { it }) { repo ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { cm.newRepoSession(repo); onOpenChat() }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.Folder, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.outline)
+                        Spacer(Modifier.width(12.dp))
+                        Text(repo, Modifier.weight(1f))
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.outline)
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(24.dp)) }
         }
     }
 }
