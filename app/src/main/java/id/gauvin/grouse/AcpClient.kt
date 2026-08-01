@@ -590,6 +590,9 @@ class AcpClient(
             }
             "session/list" -> onEvent(AcpEvent.Sessions(parseSessions(result)))
             "_goose/unstable/sources/list" -> onEvent(AcpEvent.Projects(parseProjects(result)))
+            // create/assign replies carry no useful body; re-list so the drawer reflects them.
+            "_goose/unstable/sources/create" -> listProjects()
+            "_goose/unstable/session/project/update" -> listProjects()
             "_goose/unstable/config/extensions/list" -> onEvent(AcpEvent.Extensions(parseExtensions(result)))
             // After a toggle, re-list so the UI reflects the new enabled state.
             "_goose/unstable/config/extensions/set-enabled" -> listExtensions()

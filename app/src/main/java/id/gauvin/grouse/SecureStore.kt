@@ -152,22 +152,11 @@ class SecureStore(context: Context) {
         cfg.edit().putString("session_cwds", next.joinToString("\n")).apply()
     }
 
-    /** Recently used /workspace project names for the "New Code session" dialog, most-recent-first,
-     *  capped at 10. A delimited string (not a StringSet) because order matters here — unlike
-     *  knownModels, which doesn't care about recency. */
-    fun recentWorkspaceProjects(): List<String> =
-        (cfg.getString("recent_workspace_projects", "") ?: "").split("\n").filter { it.isNotBlank() }
-
-    fun addRecentWorkspaceProject(name: String) {
-        val cur = recentWorkspaceProjects().filterNot { it == name }
-        val next = (listOf(name) + cur).take(10)
-        cfg.edit().putString("recent_workspace_projects", next.joinToString("\n")).apply()
-    }
-
-    fun removeRecentWorkspaceProject(name: String) {
-        val next = recentWorkspaceProjects().filterNot { it == name }
-        cfg.edit().putString("recent_workspace_projects", next.joinToString("\n")).apply()
-    }
+    // recentWorkspaceProjects was REMOVED 2026-08-01 along with the drawer that read it. Projects
+    // now come from the server (sources/list); a locally-remembered list of typed names could
+    // only ever drift from it, and did -- "Media" survived its sessions, its directory and its
+    // server entry because this cache still held the string. The stale preference key is left on
+    // device deliberately: nothing reads it, and clearing it would be a migration for no gain.
 
     // --- Server-side speech (LocalAI) ---------------------------------------------------
     // Android's own SpeechRecognizer/TextToSpeech stay the default: no network, streaming partials,

@@ -780,11 +780,15 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
         onDismiss = { showNewProject = false },
     )
 
+    // Projects come from the SERVER now (sources/list type=project), and a session belongs to one
+    // by project_id. This used to derive both from cwd -- names were the last path segment, which
+    // is why they rendered capitalised (the DIRECTORY was capitalised), and the list was padded
+    // with locally-remembered names from SharedPreferences, which is why deleted projects lingered
+    // as ghosts. Neither source could be renamed, shared between clients, or trusted.
     val all = cm.sessions.value
-    val byProject = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CODE }
-        .groupBy { ConnectionManager.projectOf(it.cwd) ?: "?" }
-    val freeChats = all.filter { ConnectionManager.sessionKind(it) == SessionKind.CHAT }
-    val projects = (byProject.keys + cm.recentProjects.value).distinct().sortedBy { it.lowercase() }
+    val byProjectId = all.groupBy { it.projectId }
+    val freeChats = byProjectId[null].orEmpty()
+    val projects = cm.projects.value
 
     @Composable
     fun sessionRow(s: SessionInfo, indent: Boolean) {
@@ -825,10 +829,11 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
         }
-        projects.forEach { p ->
-            val inProject = byProject[p].orEmpty()
-            val open = p in expanded
-            item(key = "project:$p") {
+        projects.forEach { proj ->
+            val p = proj.name
+            val inProject = byProjectId[proj.id].orEmpty()
+            val open = proj.id in expanded
+            item(key = "project:" + proj.id) {
                 // Name -> the project page; the chevron alone toggles the inline dropdown.
                 Row(Modifier.fillMaxWidth().padding(start = 10.dp),
                     verticalAlignment = Alignment.CenterVertically) {
@@ -843,7 +848,7 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline)
                     }
-                    IconButton(onClick = { expanded = if (open) expanded - p else expanded + p }) {
+                    IconButton(onClick = { expanded = if (open) expanded - proj.id else expanded + proj.id }) {
                         Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
                             contentDescription = if (open) "collapse" else "expand",
                             tint = MaterialTheme.colorScheme.outline)
@@ -851,7 +856,9 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                 }
             }
             if (open) {
-                item(key = "project:$p:new") { addRow("New chat", indent = true) { cm.newCodeSession(p); onOpen() } }
+                item(key = "project:" + proj.id + ":new") {
+                    addRow("New chat", indent = true) { cm.newChatInProject(proj.id); onOpen() }
+                }
                 items(inProject, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = true) }
             }
         }
@@ -907,21 +914,20 @@ private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: 
             )
         }
         "move" -> {
-            val current = ConnectionManager.projectOf(s.cwd)
-            val projects = (cm.sessions.value.mapNotNull { ConnectionManager.projectOf(it.cwd) } +
-                cm.recentProjects.value).distinct().sortedBy { it.lowercase() }
             AlertDialog(
                 onDismissRequest = onDone,
                 title = { Text("Move to project") },
                 text = {
                     Column {
-                        TextButton(enabled = current != null, onClick = {
-                            cm.moveSession(s.sessionId, DEFAULT_CWD); onDone()
+                        // Sets project_id. It used to rewrite working_dir, which also moved where
+                        // the session's tools ran -- filing a chat and re-homing it were one act.
+                        TextButton(enabled = s.projectId != null, onClick = {
+                            cm.fileSession(s.sessionId, null); onDone()
                         }) { Text("Chats (no project)") }
-                        projects.forEach { p ->
-                            TextButton(enabled = p != current, onClick = {
-                                cm.moveSession(s.sessionId, ConnectionManager.PROJECT_ROOT + p); onDone()
-                            }) { Text(p) }
+                        cm.projects.value.forEach { proj ->
+                            TextButton(enabled = proj.id != s.projectId, onClick = {
+                                cm.fileSession(s.sessionId, proj.id); onDone()
+                            }) { Text(proj.name) }
                         }
                     }
                 },
@@ -965,7 +971,7 @@ private fun NewProjectDialog(cm: ConnectionManager, onCreated: (String) -> Unit,
         title = { Text("New project") },
         text = {
             Column {
-                Text("Creates /workspace/<name> on the server, then opens a chat scoped to it.",
+                Text("Lowercase letters, digits and hyphens only. Creates a project on the server \u2014 no folder is made, and chats can be moved between projects freely.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(name, { name = it }, singleLine = true, enabled = !busy,

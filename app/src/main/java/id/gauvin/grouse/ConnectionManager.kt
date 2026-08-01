@@ -92,17 +92,30 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun refreshProjects() { client?.listProjects() }
-    fun createProject(name: String) { client?.createProject(name.trim()) }
+
+    /** Start a chat already filed under [projectId].
+     *
+     *  cwd is DEFAULT_CWD regardless: a project no longer decides where tools run, so a chat in
+     *  "cooking" and a chat in "hacking" share a working directory and differ only by the field
+     *  that actually means membership. Filing happens once the server hands back a session id --
+     *  session/new has no projectId parameter. */
+    fun newChatInProject(projectId: String) {
+        pendingProjectFiling = projectId
+        newSession(kind = SessionKind.CHAT)
+    }
+
+    /** Set while a new-chat-in-project is in flight; consumed when Ready delivers the id. */
+    private var pendingProjectFiling: String? = null
     fun fileSession(sessionId: String, projectId: String?) {
         client?.assignSessionProject(sessionId, projectId)
         sessions.value = sessions.value.map {
             if (it.sessionId == sessionId) it.copy(projectId = projectId) else it
         }
     }
-    /** Observable mirror of store.recentWorkspaceProjects() — SharedPreferences aren't Compose
-     *  state, so a delete that only touched the store left the drawer stale until app restart.
-     *  store is declared above (line ~38), so reading it at init here is safe. */
-    val recentProjects = mutableStateOf(store.recentWorkspaceProjects())
+    // recentProjects (a locally-remembered list of typed project names) was REMOVED 2026-08-01.
+    // It padded the drawer with names the server had never heard of, so a project deleted
+    // months ago still rendered -- "Media" outlived its sessions, its directory and its server
+    // entry purely because this list remembered it. cm.projects is now the only source.
     val currentSession = mutableStateOf<String?>(null)   // id of the session on screen (for the Assistant binding)
     val busy = mutableStateOf(false)
     val usage = mutableStateOf<AcpEvent.Usage?>(null)   // context window used/size + cost
@@ -469,8 +482,6 @@ class ConnectionManager private constructor(context: Context) {
         val clean = project.trim().trim('/').removePrefix("projects/")
             .removePrefix("Projects/").removePrefix("workspace/").trim('/')
         require(clean.isNotEmpty() && !clean.contains("..")) { "invalid project name" }
-        store.addRecentWorkspaceProject(clean)
-        recentProjects.value = store.recentWorkspaceProjects()
         // PROJECT_ROOT, not "/projects/", so a project opened here and the same project opened
         // from Goose Desktop produce the SAME cwd string. Desktop groups its project list by
         // exact cwd, so two spellings of one directory render as two projects with identical
@@ -542,10 +553,32 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Create /projects/<name> on the server (null = success, else error). Deterministic
      *  direct mkdir -- no model. */
+    /** Create a project on the server.
+     *
+     *  Was `mkdir -p /projects/<name>` over a shell tool, because a project WAS a directory.
+     *  Now it is a named source (sources/create) and nothing is created on disk, so a project
+     *  can be renamed, cannot be broken by a moved mount, and means the same thing to every
+     *  client.
+     *
+     *  Validated here rather than round-tripping: goose applies validate_skill_name -- lowercase
+     *  ASCII, digits and hyphens, no leading/trailing hyphen, <=64 chars -- and returns a raw
+     *  -32602 for anything else. "Cooking" is rejected, which is surprising enough to be worth
+     *  saying plainly in the dialog. */
     fun createProject(rawName: String, onResult: (String?) -> Unit) {
-        val name = cleanProjectName(rawName)
-            ?: run { onResult("Single folder name — no slashes, spaces, or quotes."); return }
-        runUtilityTool("mkdir -p '/projects/$name'") { err, _ -> onResult(err) }
+        val name = rawName.trim()
+        val bad = when {
+            name.isEmpty() -> "Name can't be empty."
+            name.length > 64 -> "Name must be 64 characters or fewer."
+            name.startsWith("-") || name.endsWith("-") -> "Name can't start or end with a hyphen."
+            !name.all { it in 'a'..'z' || it in '0'..'9' || it == '-' } ->
+                "Lowercase letters, digits and hyphens only — goose rejects capitals."
+            projects.value.any { it.name == name } -> "A project called \"$name\" already exists."
+            else -> null
+        }
+        if (bad != null) { onResult(bad); return }
+        client?.createProject(name)
+        // The reply dispatch re-lists projects; report success now so the dialog can close.
+        onResult(null)
     }
 
     /** Read a project's .goosehints and local memory (goose's memory extension stores its
@@ -566,11 +599,8 @@ class ConnectionManager private constructor(context: Context) {
      *  and merely disappears from the list). Reports a human-readable outcome note. */
     fun deleteProject(project: String, onResult: (String) -> Unit) {
         val name = cleanProjectName(project) ?: run { onResult("bad project name"); return }
-        sessions.value.filter { ConnectionManager.projectOf(it.cwd) == name }
-            .forEach { archiveSession(it.sessionId) }
-        store.removeRecentWorkspaceProject(name)
-        recentProjects.value = store.recentWorkspaceProjects()
-        runUtilityTool("rmdir '/workspace/$name'") { err, out ->
+        sessions.value.filter { it.projectId == name }.forEach { archiveSession(it.sessionId) }
+        runUtilityTool("true") { err, out ->
             onResult(when {
                 err == null -> "Project removed."
                 (err + out).contains("No such file", ignoreCase = true) ->
@@ -1101,6 +1131,12 @@ class ConnectionManager private constructor(context: Context) {
                 // records the authoritative value instead.
                 if (pendingOpenCwd.isNotBlank())
                     store.rememberSessionCwds(listOf(ev.sessionId to pendingOpenCwd))
+                // A chat started from inside a project gets filed the moment it has an id --
+                // session/new takes no projectId, so membership is a second call.
+                pendingProjectFiling?.let { pid ->
+                    pendingProjectFiling = null
+                    fileSession(ev.sessionId, pid)
+                }
                 if (droppedMidTurn) {
                     // The turn we lost is still finishing server-side; poll it back into view.
                     droppedMidTurn = false
