@@ -2528,6 +2528,88 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
     }
 }
 
+
+/** One model consumer, rendered the same way for every one of them: an optional on/off, a
+ *  provider, and a model.
+ *
+ *  Every feature here picks a model, and before this they each did it differently -- chat had
+ *  two config keys, vision had a container environment variable, speech had app-local strings,
+ *  and the fast model had nothing at all. Same shape for all of them, so "which model does X
+ *  use" has one answer in one place.
+ *
+ *  `onEnabled(false)` is what OFF means, and it is per-row rather than a blanket rule: for the
+ *  fast model it clears the key so goose uses the chat model, for vision it stops the proxy
+ *  describing images. Nothing is left half-set.
+ *
+ *  `incompatible` disables the row outright and says why -- a toggle that can be switched on
+ *  into a configuration that cannot work is worse than one that is greyed out. */
+@Composable
+private fun ModelRow(
+    title: String,
+    caption: String,
+    enabled: Boolean,
+    onEnabled: ((Boolean) -> Unit)?,          // null = not optional, always on
+    provider: String,
+    onProvider: (String) -> Unit,
+    model: String,
+    onModel: (String) -> Unit,
+    providers: List<String> = listOf("openai", "openrouter", "openrouter_custom"),
+    modelChoices: List<String> = emptyList(),
+    incompatible: String? = null,
+) {
+    val on = enabled && incompatible == null
+    SettingsSection(title) {
+        if (onEnabled != null) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(if (incompatible != null) "Unavailable" else "Enabled", Modifier.weight(1f),
+                    color = if (incompatible != null) MaterialTheme.colorScheme.outline
+                            else MaterialTheme.colorScheme.onSurface)
+                Switch(checked = on, enabled = incompatible == null,
+                    onCheckedChange = { onEnabled(it) })
+            }
+        }
+        incompatible?.let { SettingCaption(it) }
+        if (on) {
+            var pOpen by remember { mutableStateOf(false) }
+            Box {
+                SettingsNavRow("Provider", provider.ifBlank { "—" }) { pOpen = true }
+                DropdownMenu(expanded = pOpen, onDismissRequest = { pOpen = false }) {
+                    providers.forEach { pv ->
+                        DropdownMenuItem(
+                            text = { Text(if (pv == "openai") "openai (local)" else pv) },
+                            onClick = { onProvider(pv); pOpen = false })
+                    }
+                }
+            }
+            var mOpen by remember { mutableStateOf(false) }
+            var draft by remember(model) { mutableStateOf(model) }
+            Box {
+                OutlinedTextField(draft, { draft = it }, singleLine = true,
+                    label = { Text("Model") },
+                    trailingIcon = {
+                        Row {
+                            if (modelChoices.isNotEmpty())
+                                IconButton(onClick = { mOpen = true }) {
+                                    Icon(Icons.Filled.ArrowDropDown, contentDescription = "choose")
+                                }
+                            if (draft.isNotBlank() && draft != model)
+                                TextButton(onClick = { onModel(draft.trim()) }) { Text("Save") }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                DropdownMenu(expanded = mOpen, onDismissRequest = { mOpen = false }) {
+                    modelChoices.sorted().forEach { mm ->
+                        DropdownMenuItem(text = { Text(mm) },
+                            onClick = { draft = mm; onModel(mm); mOpen = false })
+                    }
+                }
+            }
+        }
+        SettingCaption(caption)
+    }
+}
+
 // ---- Settings subpages ------------------------------------------------------
 //
 // Settings used to be one long scroll where Connection, Voice, Models and Images sat next
@@ -2600,8 +2682,16 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
-    var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
     val ctx = LocalContext.current
+    var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
+    // Every row below reads and writes goose's own config over ACP, except speech, which is
+    // this device calling LocalAI directly (goose has no TTS, and its dictation transcribes for
+    // goose's own UI rather than returning text to a client).
+    LaunchedEffect(cm.online.value) {
+        if (cm.online.value) cm.readServerConfig(
+            "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOSE_FAST_MODEL", "VISION_MODEL", "VISION_PROVIDER")
+    }
+    fun cfg(k: String) = cm.serverConfig[k].orEmpty()
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Providers") },
@@ -2614,122 +2704,89 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
     }) { pad ->
         Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
             .verticalScroll(rememberScrollState())) {
-            SettingsSection("Chat model") {
-                // The DEFAULT for new chats -- GOOSE_PROVIDER/GOOSE_MODEL in config.yaml. The
-                // picker above the message box sets the CURRENT chat only
-                // (session/set_config_option), which is why both exist and why this one says
-                // "new chats": changing it never re-points a conversation already under way.
-                LaunchedEffect(cm.online.value) {
-                    if (cm.online.value) cm.readServerConfig("GOOSE_PROVIDER", "GOOSE_MODEL")
-                }
-                var provOpen by remember { mutableStateOf(false) }
-                val curProv = cm.serverConfig["GOOSE_PROVIDER"].orEmpty().ifBlank { "—" }
-                Box {
-                    SettingsNavRow("Default provider", curProv) { provOpen = true }
-                    DropdownMenu(expanded = provOpen, onDismissRequest = { provOpen = false }) {
-                        listOf("openai", "openrouter", "openrouter_custom").forEach { pv ->
-                            DropdownMenuItem(
-                                text = { Text(if (pv == "openai") "openai (local)" else pv) },
-                                onClick = { cm.setServerConfig("GOOSE_PROVIDER", pv); provOpen = false })
-                        }
-                    }
-                }
-                var modelDraft by remember(cm.serverConfig["GOOSE_MODEL"]) {
-                    mutableStateOf(cm.serverConfig["GOOSE_MODEL"].orEmpty())
-                }
-                OutlinedTextField(modelDraft, { modelDraft = it }, singleLine = true,
-                    label = { Text("Default model") },
-                    trailingIcon = {
-                        if (modelDraft.isNotBlank() && modelDraft != cm.serverConfig["GOOSE_MODEL"])
-                            TextButton(onClick = {
-                                cm.setServerConfig("GOOSE_MODEL", modelDraft.trim())
-                            }) { Text("Save") }
-                    },
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
-                SettingCaption("Used by new chats. A cloud model under provider \"openai\" is " +
-                    "sent to the local server and 404s — move both together.")
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
-                SettingCaption("Off shows only providers set up on your goose. On lists goose's " +
-                    "full catalog.")
-                HorizontalDivider()
-                // App-editable global goose settings (config.yaml over ACP). Loaded on entry.
-                LaunchedEffect(cm.online.value) { if (cm.online.value) cm.loadServerConfig() }
-                var ctxLimit by remember { mutableStateOf("") }
-                // Seed the field from the server value only while it's still empty — once loaded (or
-                // the user starts typing) a later async config/read reply must not clobber the input.
-                LaunchedEffect(cm.serverContextLimit.value) {
-                    if (cm.serverContextLimit.value.isNotBlank() && ctxLimit.isBlank())
-                        ctxLimit = cm.serverContextLimit.value
-                }
-                OutlinedTextField(
-                    value = ctxLimit, onValueChange = { ctxLimit = it.filter(Char::isDigit) },
-                    label = { Text("Context limit (tokens)") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    trailingIcon = {
-                        val cur = cm.serverContextLimit.value
-                        if (ctxLimit.isNotBlank() && ctxLimit != cur)
-                            TextButton(onClick = { cm.setServerConfig("GOOSE_CONTEXT_LIMIT", ctxLimit) }) { Text("Save") }
-                    },
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
-                SettingCaption("goose's working window before it compacts. Keep it BELOW the model's " +
-                    "context size (leave room to reply) — and the fast model must be at least this " +
-                    "big to compact. Takes effect on new chats. Fast model: " +
-                    cm.serverFastModel.value.ifBlank { "—" } + ".")
-            }
 
-            SettingsSection("Vision") {
-                var describe by remember { mutableStateOf(cm.store.describeImages) }
-                SettingsSwitchRow("Describe images before sending", describe) {
-                    describe = it; cm.store.describeImages = it
-                }
-                SettingCaption("Normally OFF: the server's proxy already turns images into " +
-                    "text for every client. Turn this on only if this goose does not run that " +
-                    "proxy — then the image goes into the prompt as-is, which works only if " +
-                    "the chat model can see, and one that can't will answer around it rather " +
-                    "than say so.")
-            }
+            ModelRow(
+                title = "Chat",
+                caption = "The model new chats start on. The picker above the message box " +
+                    "changes the current chat only. A cloud model under provider \"openai\" is " +
+                    "sent to the local server and 404s — move both together.",
+                enabled = true, onEnabled = null,
+                provider = cfg("GOOSE_PROVIDER"),
+                onProvider = { cm.setServerConfig("GOOSE_PROVIDER", it) },
+                model = cfg("GOOSE_MODEL"),
+                onModel = { cm.setServerConfig("GOOSE_MODEL", it) },
+                modelChoices = cm.knownModels.value.toList(),
+            )
 
-            SettingsSection("Speech") {
+            ModelRow(
+                title = "Fast",
+                caption = "Session naming, compaction and summarising. Off uses the chat model. " +
+                    "goose resolves this against whichever provider serves the model NAME, so a " +
+                    "name only one provider knows works from any chat — and one nobody knows " +
+                    "fails silently back to the chat model.",
+                enabled = cfg("GOOSE_FAST_MODEL").isNotBlank(),
+                onEnabled = { on -> if (!on) cm.setServerConfig("GOOSE_FAST_MODEL", "") },
+                provider = cfg("GOOSE_PROVIDER"),
+                onProvider = { cm.setServerConfig("GOOSE_PROVIDER", it) },
+                model = cfg("GOOSE_FAST_MODEL"),
+                onModel = { cm.setServerConfig("GOOSE_FAST_MODEL", it) },
+                modelChoices = cm.knownModels.value.toList(),
+            )
+
+            ModelRow(
+                title = "Vision",
+                caption = "Turns images into text on the server before the chat model sees them, " +
+                    "so a model that can't see still gets the picture — and the description is " +
+                    "cached per image, so re-sent history stops costing tokens. Off sends the " +
+                    "image as-is. A local provider keeps images on the box but evicts the " +
+                    "resident chat model to load the vision one.",
+                enabled = cfg("VISION_MODEL").isNotBlank(),
+                onEnabled = { on -> if (!on) cm.setServerConfig("VISION_MODEL", "") },
+                provider = cfg("VISION_PROVIDER"),
+                onProvider = { cm.setServerConfig("VISION_PROVIDER", it) },
+                model = cfg("VISION_MODEL"),
+                onModel = { cm.setServerConfig("VISION_MODEL", it) },
+            )
+
+            // Speech is the odd one and says so rather than pretending: the provider list is
+            // device-vs-LocalAI, not goose's providers, because Grouse does these calls itself.
+            var srvStt by remember { mutableStateOf(cm.store.serverStt) }
+            var srvTts by remember { mutableStateOf(cm.store.serverTts) }
+            ModelRow(
+                title = "Speech to text",
+                caption = "Off uses Android's own recogniser: offline, and words appear as you " +
+                    "say them. LocalAI transcribes better but needs the network and only shows " +
+                    "text once you stop talking.",
+                enabled = srvStt,
+                onEnabled = { on -> srvStt = on; cm.store.serverStt = on },
+                provider = "localai", onProvider = {},
+                providers = listOf("localai"),
+                model = cm.store.sttModel,
+                onModel = { cm.store.sttModel = it },
+            )
+            ModelRow(
+                title = "Text to speech",
+                caption = "Off uses the device voice. Either way, replies are only spoken when " +
+                    "\"Speak replies aloud\" is on.",
+                enabled = srvTts,
+                onEnabled = { on -> srvTts = on; cm.store.serverTts = on },
+                provider = "localai", onProvider = {},
+                providers = listOf("localai"),
+                model = cm.store.ttsModel,
+                onModel = { cm.store.ttsModel = it },
+            )
+
+            SettingsSection("Speech options") {
                 SettingsSwitchRow("Speak replies aloud", cm.speakReplies.value) { cm.setSpeakReplies(it) }
-                SettingCaption("Read each finished reply with text-to-speech.")
-
-                // The box's own speech models -- what does the listening and the talking, as
-                // opposed to which model thinks. Grouse calls LocalAI directly for both: goose has no
-                // TTS at all, and its dictation methods transcribe for goose's own UI rather than
-                // returning text to an ACP client.
-                var srvTts by remember { mutableStateOf(cm.store.serverTts) }
-                var srvStt by remember { mutableStateOf(cm.store.serverStt) }
-                var ttsM by remember { mutableStateOf(cm.store.ttsModel) }
-                var sttM by remember { mutableStateOf(cm.store.sttModel) }
-                var laUrl by remember { mutableStateOf(cm.store.localAiUrl) }
-                HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                Text("Speech models", style = MaterialTheme.typography.titleSmall)
-                SettingsSwitchRow("Speak with LocalAI", srvTts) { srvTts = it; cm.store.serverTts = it }
-                if (srvTts) OutlinedTextField(ttsM, { ttsM = it; cm.store.ttsModel = it },
-                    label = { Text("TTS model") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                SettingsSwitchRow("Transcribe with LocalAI", srvStt) { srvStt = it; cm.store.serverStt = it }
-                if (srvStt) OutlinedTextField(sttM, { sttM = it; cm.store.sttModel = it },
-                    label = { Text("STT model") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                if (srvTts || srvStt) {
+                if (srvStt || srvTts) {
+                    var laUrl by remember { mutableStateOf(cm.store.localAiUrl) }
                     OutlinedTextField(laUrl, { laUrl = it; cm.store.localAiUrl = it },
                         label = { Text("LocalAI URL") }, singleLine = true,
                         modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                    SettingCaption("Off by default — Android's own speech works offline and streams " +
-                        "words as you say them. LocalAI sounds better and transcribes better, but " +
-                        "needs the network and only shows the text once you stop talking. If a " +
-                        "request fails, replies fall back to the device voice.")
+                    SettingCaption("Grouse calls this directly, so it must be reachable from the " +
+                        "phone — not only from the goose container. A failed request falls back " +
+                        "to the device voice.")
                 }
-                HorizontalDivider(Modifier.padding(vertical = 8.dp))
-
-                // The per-voice-turn model override that stood here is GONE. It existed to dodge
-                // self-hosted latency by running voice turns on a faster cloud model; the default
-                // chat model IS a fast cloud model now, so it was a third place to set a model
-                // that agreed with the other two. Removed rather than hidden -- SecureStore clears
-                // any value a previous install left behind, so nobody keeps an invisible override.
-                HorizontalDivider(Modifier.padding(top = 8.dp))
                 SettingsNavRow("Set Grouse as device assistant",
                     "Assist gesture / power-button hold opens voice Grouse (read-only).") {
                     runCatching {
@@ -2740,6 +2797,29 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 }
             }
 
+            SettingsSection("Catalog") {
+                SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
+                SettingCaption("Off shows only providers set up on your goose. On lists goose's " +
+                    "full catalog.")
+                LaunchedEffect(cm.online.value) { if (cm.online.value) cm.loadServerConfig() }
+                var ctxLimit by remember { mutableStateOf("") }
+                LaunchedEffect(cm.serverContextLimit.value) {
+                    if (cm.serverContextLimit.value.isNotBlank() && ctxLimit.isBlank())
+                        ctxLimit = cm.serverContextLimit.value
+                }
+                OutlinedTextField(
+                    value = ctxLimit, onValueChange = { ctxLimit = it.filter(Char::isDigit) },
+                    label = { Text("Context limit (tokens)") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    trailingIcon = {
+                        if (ctxLimit.isNotBlank() && ctxLimit != cm.serverContextLimit.value)
+                            TextButton(onClick = { cm.setServerConfig("GOOSE_CONTEXT_LIMIT", ctxLimit) }) { Text("Save") }
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                SettingCaption("goose's working window before it compacts. Keep it BELOW the " +
+                    "model's context size, and the fast model must be at least this big to " +
+                    "compact.")
+            }
 
             Spacer(Modifier.height(28.dp))
         }
