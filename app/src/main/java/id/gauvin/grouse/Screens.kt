@@ -1302,6 +1302,7 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
+    val ctx = LocalContext.current
     LaunchedEffect(cm.online.value) {
         if (cm.online.value) {
             cm.loadAssistantExtensions()
@@ -1334,6 +1335,21 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
             // Everything they claimed to control is real on the Schedules screen: enabled is
             // pause, time is cron, model/provider/prompt are the recipe, and "run test now" is
             // Run now on the actual job.
+            // Android's assist gesture, not goose's Assistant thread -- they share a word and
+            // nothing else. It lives here because this is the page people look at when they want
+            // "the assistant" to do something, which is the only reason a settings item is ever
+            // hard to find.
+            SettingsSection("Device") {
+                SettingsNavRow("Set Grouse as device assistant",
+                    "Assist gesture / power-button hold opens voice Grouse (read-only).") {
+                    runCatching {
+                        ctx.startActivity(android.content.Intent(
+                            android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                }
+            }
+
             SettingsSection("Scheduled jobs") {
                 SettingsNavRow("Schedules & recipes",
                     cm.schedules.value.let { j ->
@@ -2556,6 +2572,7 @@ private fun ModelRow(
     providers: List<String> = listOf("openai", "openrouter", "openrouter_custom"),
     modelChoices: List<String> = emptyList(),
     incompatible: String? = null,
+    showModel: Boolean = true,
 ) {
     val on = enabled && incompatible == null
     SettingsSection(title) {
@@ -2584,7 +2601,7 @@ private fun ModelRow(
             }
             var mOpen by remember { mutableStateOf(false) }
             var draft by remember(model) { mutableStateOf(model) }
-            Box {
+            if (showModel) Box {
                 OutlinedTextField(draft, { draft = it }, singleLine = true,
                     label = { Text("Model") },
                     trailingIcon = {
@@ -2748,52 +2765,55 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 onModel = { cm.setServerConfig("VISION_MODEL", it) },
             )
 
-            // Speech is the odd one and says so rather than pretending: the provider list is
-            // device-vs-LocalAI, not goose's providers, because Grouse does these calls itself.
-            var srvStt by remember { mutableStateOf(cm.store.serverStt) }
-            var srvTts by remember { mutableStateOf(cm.store.serverTts) }
-            ModelRow(
-                title = "Speech to text",
-                caption = "Off uses Android's own recogniser: offline, and words appear as you " +
-                    "say them. LocalAI transcribes better but needs the network and only shows " +
-                    "text once you stop talking.",
-                enabled = srvStt,
-                onEnabled = { on -> srvStt = on; cm.store.serverStt = on },
-                provider = "localai", onProvider = {},
-                providers = listOf("localai"),
-                model = cm.store.sttModel,
-                onModel = { cm.store.sttModel = it },
-            )
+            // Speech is the odd one and says so rather than pretending: its providers are
+            // device-vs-LocalAI, not goose's, because Grouse makes these calls itself (goose has
+            // no TTS at all, and its dictation transcribes for goose's own UI rather than
+            // returning text to a client).
+            //
+            // "Speak replies aloud" USED TO BE A SEPARATE SWITCH sitting next to a "speak with
+            // LocalAI" switch, which is two controls for one question. The row's own toggle is
+            // now the feature -- on means replies are spoken -- and the provider picks what does
+            // the speaking. Nothing is spoken with it off, whichever provider is selected.
+            var sttProv by remember { mutableStateOf(if (cm.store.serverStt) "localai" else "device") }
+            var ttsProv by remember { mutableStateOf(if (cm.store.serverTts) "localai" else "device") }
             ModelRow(
                 title = "Text to speech",
-                caption = "Off uses the device voice. Either way, replies are only spoken when " +
-                    "\"Speak replies aloud\" is on.",
-                enabled = srvTts,
-                onEnabled = { on -> srvTts = on; cm.store.serverTts = on },
-                provider = "localai", onProvider = {},
-                providers = listOf("localai"),
+                caption = "Reads each finished reply aloud. The device voice works offline; " +
+                    "LocalAI sounds better but needs the network, and a failed request falls " +
+                    "back to the device voice rather than going silent.",
+                enabled = cm.speakReplies.value,
+                onEnabled = { cm.setSpeakReplies(it) },
+                provider = ttsProv,
+                onProvider = { ttsProv = it; cm.store.serverTts = (it == "localai") },
+                providers = listOf("device", "localai"),
                 model = cm.store.ttsModel,
                 onModel = { cm.store.ttsModel = it },
+                showModel = ttsProv == "localai",
+            )
+            // No toggle: dictation is always available from the mic button, so the only question
+            // is which recogniser hears it.
+            ModelRow(
+                title = "Speech to text",
+                caption = "The device recogniser is offline and shows words as you say them; " +
+                    "LocalAI transcribes better but needs the network and only shows the text " +
+                    "once you stop talking.",
+                enabled = true, onEnabled = null,
+                provider = sttProv,
+                onProvider = { sttProv = it; cm.store.serverStt = (it == "localai") },
+                providers = listOf("device", "localai"),
+                model = cm.store.sttModel,
+                onModel = { cm.store.sttModel = it },
+                showModel = sttProv == "localai",
             )
 
-            SettingsSection("Speech options") {
-                SettingsSwitchRow("Speak replies aloud", cm.speakReplies.value) { cm.setSpeakReplies(it) }
-                if (srvStt || srvTts) {
+            if (sttProv == "localai" || ttsProv == "localai") {
+                SettingsSection("LocalAI") {
                     var laUrl by remember { mutableStateOf(cm.store.localAiUrl) }
                     OutlinedTextField(laUrl, { laUrl = it; cm.store.localAiUrl = it },
                         label = { Text("LocalAI URL") }, singleLine = true,
-                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-                    SettingCaption("Grouse calls this directly, so it must be reachable from the " +
-                        "phone — not only from the goose container. A failed request falls back " +
-                        "to the device voice.")
-                }
-                SettingsNavRow("Set Grouse as device assistant",
-                    "Assist gesture / power-button hold opens voice Grouse (read-only).") {
-                    runCatching {
-                        ctx.startActivity(android.content.Intent(
-                            android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
-                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
+                        modifier = Modifier.fillMaxWidth())
+                    SettingCaption("Grouse calls this directly, so it has to be reachable from " +
+                        "the phone — not only from the goose container.")
                 }
             }
 
@@ -2801,24 +2821,6 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
                 SettingCaption("Off shows only providers set up on your goose. On lists goose's " +
                     "full catalog.")
-                LaunchedEffect(cm.online.value) { if (cm.online.value) cm.loadServerConfig() }
-                var ctxLimit by remember { mutableStateOf("") }
-                LaunchedEffect(cm.serverContextLimit.value) {
-                    if (cm.serverContextLimit.value.isNotBlank() && ctxLimit.isBlank())
-                        ctxLimit = cm.serverContextLimit.value
-                }
-                OutlinedTextField(
-                    value = ctxLimit, onValueChange = { ctxLimit = it.filter(Char::isDigit) },
-                    label = { Text("Context limit (tokens)") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    trailingIcon = {
-                        if (ctxLimit.isNotBlank() && ctxLimit != cm.serverContextLimit.value)
-                            TextButton(onClick = { cm.setServerConfig("GOOSE_CONTEXT_LIMIT", ctxLimit) }) { Text("Save") }
-                    },
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
-                SettingCaption("goose's working window before it compacts. Keep it BELOW the " +
-                    "model's context size, and the fast model must be at least this big to " +
-                    "compact.")
             }
 
             Spacer(Modifier.height(28.dp))
