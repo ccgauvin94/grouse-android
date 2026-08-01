@@ -45,10 +45,21 @@ data class SessionInfo(
     val updatedAt: String,
     val messageCount: Int,
     val model: String,
-    // The session's server-side working directory (goose containers: /state by default). A Code
-    // session is one scoped under /workspace instead — see ConnectionManager.sessionKind().
+    // Where the session's TOOLS run. No longer what a session belongs to -- see projectId.
     val cwd: String = "",
+    /** The project this session is filed under, or null for unfiled.
+     *
+     *  goose has modelled projects as named sources with ids the whole time (sources.rs stores
+     *  each as its own file; session/project/update links them); we just never read the field
+     *  and grouped by cwd instead, which made a project and a directory the same thing. That
+     *  coupling is why filing a chat also chose where its shell ran, why the same project
+     *  opened from two machines drew two groups, and why a session/load carrying a stale cwd
+     *  could silently re-file a conversation. An id has none of those properties. */
+    val projectId: String? = null,
 )
+
+/** A goose project: a named source with a slug, NOT a directory. */
+data class ProjectInfo(val id: String, val name: String, val description: String)
 
 /** One goose extension from the ACP `config/extensions/list` method (goose ≥1.42). */
 data class ExtInfo(
@@ -102,6 +113,8 @@ sealed interface AcpEvent {
     data class Config(val options: List<ConfigOption>) : AcpEvent
     data class Ready(val sessionId: String) : AcpEvent
     data class Sessions(val list: List<SessionInfo>) : AcpEvent
+    /** Reply to listProjects: the goose projects a session can be filed under. */
+    data class Projects(val list: List<ProjectInfo>) : AcpEvent
     data class Extensions(val list: List<ExtInfo>) : AcpEvent
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
      *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
@@ -210,6 +223,31 @@ class AcpClient(
     fun listSessions() = rpc("session/list", buildJsonObject {
         putJsonObject("_meta") { putJsonArray("types") { add("user"); add("acp") } }
     })
+
+    /** List goose projects. Reply arrives as [AcpEvent.Projects]. */
+    fun listProjects() = rpc("_goose/unstable/sources/list", buildJsonObject {
+        put("type", "project")
+    })
+
+    /** Create a project. Global scope: a project is not scoped to a directory -- that is the
+     *  entire point of the model. */
+    fun createProject(name: String, description: String = "") =
+        rpc("_goose/unstable/sources/create", buildJsonObject {
+            put("type", "project")
+            put("name", name)
+            put("description", description)
+            put("content", "")
+            putJsonObject("target") { put("scope", "global") }
+        })
+
+    /** File a session under a project, or pass null to unfile it. Changes ONE field and touches
+     *  nothing on disk; the directory-based equivalent rewrote working_dir, which also moved
+     *  where the session's tools ran. */
+    fun assignSessionProject(sessionId: String, projectId: String?) =
+        rpc("_goose/unstable/session/project/update", buildJsonObject {
+            put("sessionId", sessionId)
+            if (projectId == null) put("projectId", JsonNull) else put("projectId", projectId)
+        })
 
     /** List configured extensions (agent-global). Reply arrives as AcpEvent.Extensions.
      *  Replaces goosed's old GET /config/extensions — that REST endpoint is gone from
@@ -551,6 +589,7 @@ class AcpClient(
                 onEvent(AcpEvent.Config(parseConfig(result)))   // reflects this session's model
             }
             "session/list" -> onEvent(AcpEvent.Sessions(parseSessions(result)))
+            "_goose/unstable/sources/list" -> onEvent(AcpEvent.Projects(parseProjects(result)))
             "_goose/unstable/config/extensions/list" -> onEvent(AcpEvent.Extensions(parseExtensions(result)))
             // After a toggle, re-list so the UI reflects the new enabled state.
             "_goose/unstable/config/extensions/set-enabled" -> listExtensions()
@@ -670,6 +709,23 @@ class AcpClient(
         }
     }
 
+    /** sources/list returns SourceEntry objects; a project's slug is its file stem, which is
+     *  what session.projectId holds. `name` is the human label and may differ. */
+    private fun parseProjects(result: JsonObject?): List<ProjectInfo> {
+        val arr = result?.get("sources") as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val path = o["path"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val name = o["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val slug = path.substringAfterLast('/').removeSuffix(".md")
+            ProjectInfo(
+                id = slug.ifEmpty { name },
+                name = name,
+                description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
+            )
+        }.sortedBy { it.name.lowercase() }
+    }
+
     private fun parseSessions(result: JsonObject?): List<SessionInfo> {
         val arr = result?.get("sessions") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
@@ -691,6 +747,7 @@ class AcpClient(
                 messageCount = meta?.get("messageCount")?.jsonPrimitive?.intOrNull ?: 0,
                 model = meta?.get("modelId")?.jsonPrimitive?.contentOrNull ?: "",
                 cwd = o["cwd"]?.jsonPrimitive?.contentOrNull ?: "",
+                projectId = meta?.get("projectId")?.jsonPrimitive?.contentOrNull,
             )
         }
     }

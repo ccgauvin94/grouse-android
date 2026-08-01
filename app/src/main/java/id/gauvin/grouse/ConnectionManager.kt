@@ -70,6 +70,35 @@ class ConnectionManager private constructor(context: Context) {
     val online = mutableStateOf(false)   // true between Ready and disconnect — for a UI status pill
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
+
+    /** Goose projects, refreshed alongside the session list. A project is a named source with an
+     *  id, not a directory -- so filing a chat no longer decides where its tools run, and the
+     *  same project is one entry from every client instead of one per cwd spelling. */
+    val projects = mutableStateOf<List<ProjectInfo>>(emptyList())
+
+    /** Sessions grouped by project, most-recent project first, unfiled last. Unfiled is ONE
+     *  bucket: the old cwd grouping made a separate group per directory, which is how a single
+     *  "state" project ended up holding every chat. */
+    fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
+        val byName = projects.value.associate { it.id to it.name }
+        return sessions.value
+            .groupBy { it.projectId ?: "" }
+            .entries
+            .sortedWith(compareBy({ it.key.isEmpty() }, { -(it.value.maxOfOrNull { s -> s.updatedAt } ?: "").hashCode() }))
+            .map { (id, list) ->
+                val label = if (id.isEmpty()) "Unfiled" else (byName[id] ?: id)
+                label to list.sortedByDescending { it.updatedAt }
+            }
+    }
+
+    fun refreshProjects() { client?.listProjects() }
+    fun createProject(name: String) { client?.createProject(name.trim()) }
+    fun fileSession(sessionId: String, projectId: String?) {
+        client?.assignSessionProject(sessionId, projectId)
+        sessions.value = sessions.value.map {
+            if (it.sessionId == sessionId) it.copy(projectId = projectId) else it
+        }
+    }
     /** Observable mirror of store.recentWorkspaceProjects() — SharedPreferences aren't Compose
      *  state, so a delete that only touched the store left the drawer stale until app restart.
      *  store is declared above (line ~38), so reading it at init here is safe. */
@@ -356,7 +385,9 @@ class ConnectionManager private constructor(context: Context) {
         if (resyncTicks > 0) main.postDelayed(::turnResyncTick, 8_000)
     }
 
-    fun listSessions() = client?.listSessions()
+    /** Refresh sessions AND the projects that label them. Kept as one call so the two can never
+     *  drift -- a session list newer than the project list renders groups labelled by raw id. */
+    fun listSessions() { client?.listSessions(); client?.listProjects() }
 
     /** Archive a session: history stays on disk, it just leaves the list. The soft option --
      *  deleteSession is the permanent one (goose ≥1.44; the old "no delete" note is obsolete). */
@@ -1139,6 +1170,7 @@ class ConnectionManager private constructor(context: Context) {
                     client?.sendPrompt(p.text, p.images, expect = currentSession.value)
                 }
             }
+            is AcpEvent.Projects -> projects.value = ev.list
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
                 store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })
