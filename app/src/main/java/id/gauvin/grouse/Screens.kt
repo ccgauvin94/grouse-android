@@ -88,6 +88,32 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
+/** Display names for goose's four approval modes.
+ *
+ *  The server sends snake_case ids (auto, approve, smart_approve, chat) and, for some builds, no
+ *  label at all -- de-snaking gives "smart approve", which reads like a verb. These are the same
+ *  four modes goose documents in GooseMode, named for what they DO to you rather than what they
+ *  do to the tool call. Unknown ids fall through de-snaked rather than being hidden, so a new
+ *  upstream mode still appears and still works.
+ */
+private fun prettyMode(value: String?): String = when (value) {
+    "auto" -> "Auto"
+    "approve" -> "Ask always"
+    "smart_approve" -> "Ask when risky"
+    "chat" -> "Chat only"
+    null, "" -> "Mode"
+    else -> value.replace('_', ' ').replaceFirstChar { it.uppercase() }
+}
+
+/** One-line explanation under each mode in the picker, from GooseMode's own descriptions. */
+private fun modeBlurb(value: String): String = when (value) {
+    "auto" -> "Runs tools without asking"
+    "approve" -> "Asks before every tool call"
+    "smart_approve" -> "Asks only for sensitive tool calls"
+    "chat" -> "No tools at all"
+    else -> ""
+}
+
 private val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")
 
 /** Run on the main looper. ServerSpeech's callbacks fire on its own worker threads; Compose
@@ -115,7 +141,7 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
                 modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(10.dp))
             Text("Welcome to Grouse", style = MaterialTheme.typography.headlineSmall)
-            Text("Connect to your self-hosted goosed over the tailnet.",
+            Text("Connect to your self-hosted goose server over the tailnet.",
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline,
                 textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
             Spacer(Modifier.height(28.dp))
@@ -438,7 +464,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         Icon(Icons.Filled.Psychology, contentDescription = null,
                             modifier = Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.height(12.dp))
-                        Text(if (cm.online.value) "Ask goose anything" else "Connecting…",
+                        Text(if (cm.online.value) "Ask Grouse anything" else "Connecting…",
                             style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(4.dp))
                         Text("Calendar, notes, web search, and memory are wired up — tap the mic or type below.",
@@ -537,7 +563,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                     Box(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
                         if (input.isEmpty()) {
                             Text(
-                                if (cm.busy.value) "Queue message…" else "Message goose…",
+                                if (cm.busy.value) "Queue message…" else "Message Grouse…",
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -558,13 +584,8 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         // lives in Settings; what you want at a glance while typing is whether
                         // this turn is going to stop for approval.
                         //
-                        // goose reports snake_case ids (smart_approve, chat, auto); show the label
-                        // the server sends when there is one, and fall back to de-snaking the id.
                         val modeOpt = cm.config.value.firstOrNull { it.id == "mode" }
-                        val modeLabel = modeOpt?.let { o ->
-                            o.choices.firstOrNull { it.value == o.currentValue }?.label
-                                ?: o.currentValue.replace('_', ' ')
-                        }?.ifBlank { null } ?: "mode"
+                        val modeLabel = prettyMode(modeOpt?.currentValue)
                         var modeMenu by remember { mutableStateOf(false) }
                         Box {
                             Surface(
@@ -590,7 +611,14 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
                                 modeOpt?.choices?.forEach { c ->
                                     DropdownMenuItem(
-                                        text = { Text(c.label.ifBlank { c.value.replace('_', ' ') }) },
+                                        text = {
+                                            Column {
+                                                Text(prettyMode(c.value))
+                                                Text(modeBlurb(c.value),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        },
                                         onClick = {
                                             modeMenu = false
                                             cm.setOption("mode", c.value)
@@ -885,7 +913,12 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     // is why they rendered capitalised (the DIRECTORY was capitalised), and the list was padded
     // with locally-remembered names from SharedPreferences, which is why deleted projects lingered
     // as ghosts. Neither source could be renamed, shared between clients, or trusted.
-    val all = cm.sessions.value
+    // The Assistant has its own pinned row at the top of the drawer, so it must not ALSO appear
+    // in the grouped lists. It used to fall out naturally: grouping keyed on cwd and the
+    // assistant lived at /state, which was not a project. Now it carries a project_id like any
+    // other session (the 2026-08-01 migration filed it under "inbox"), so it needs excluding
+    // explicitly or it renders twice -- once pinned, once as an ordinary chat.
+    val all = cm.sessions.value.filter { ConnectionManager.sessionKind(it) != SessionKind.ASSISTANT }
     val byProjectId = all.groupBy { it.projectId }
     val freeChats = byProjectId[null].orEmpty()
     val projects = cm.projects.value
@@ -1873,7 +1906,7 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
                     HorizontalDivider()
                 }
                 if (cm.extensions.value.isEmpty() && !cm.extensionsBusy.value) item {
-                    Text("Couldn't load extensions — make sure you're connected to goose.",
+                    Text("Couldn't load extensions — make sure you're connected.",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(16.dp))
                 }
@@ -2414,7 +2447,7 @@ private fun TypingIndicator() {
         verticalAlignment = Alignment.CenterVertically) {
         CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
         Spacer(Modifier.width(8.dp))
-        Text("goose is thinking…", style = MaterialTheme.typography.labelMedium,
+        Text("Grouse is thinking…", style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.outline)
     }
 }
