@@ -7,7 +7,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -511,49 +517,119 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                     modifier = Modifier.padding(start = 4.dp, top = 2.dp))
             }
 
-            // Two-line composer: the field gets the FULL width (it was squeezed to a sliver
-            // between four buttons), actions sit on their own row beneath. Chat-style pill
-            // field: filled, rounded, no underline, grows to a few lines as you type.
-            Column(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp)) {
-                TextField(
-                    input, { input = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Message goose…") },
-                    shape = RoundedCornerShape(24.dp),
-                    maxLines = 6,
-                    colors = TextFieldDefaults.colors(
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                        disabledIndicatorColor = Color.Transparent,
-                    ),
-                )
-                Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = {
-                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                    }) { Icon(Icons.Filled.Image, contentDescription = "attach image") }
-                    IconButton(onClick = {
-                        if (listening) stopListening()
-                        else if (androidx.core.content.ContextCompat.checkSelfPermission(
-                                ctx, android.Manifest.permission.RECORD_AUDIO) ==
-                                android.content.pm.PackageManager.PERMISSION_GRANTED) startListening()
-                        else micPerm.launch(android.Manifest.permission.RECORD_AUDIO)
-                    }) {
-                        Icon(if (listening) Icons.Filled.MicOff else Icons.Filled.Mic,
-                            contentDescription = if (listening) "stop listening" else "voice input",
-                            tint = if (listening) MaterialTheme.colorScheme.error else LocalContentColor.current)
-                    }
-                    Spacer(Modifier.weight(1f))
-                    // Stop and Send coexist while a turn runs. Send used to be REPLACED by Stop,
-                    // which made the send queue in ConnectionManager unreachable -- it was
-                    // implemented and working, but nothing could put anything into it.
-                    if (cm.busy.value) {
-                        FilledIconButton(onClick = { cm.cancel() }) {
-                            Icon(Icons.Filled.Stop, contentDescription = "stop")
+            // Composer modelled on Claude's: ONE rounded, outlined container holding the text
+            // field and the action row together, rather than a pill field with buttons floating
+            // underneath it. The container is the affordance -- everything inside belongs to the
+            // message you are composing.
+            //
+            // Send/stop is a single filled circle on the right that CHANGES MEANING with state
+            // (arrow to send, square to stop), which is why it reads at a glance. The previous
+            // layout showed stop and send as two separate square buttons simultaneously.
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+            ) {
+                Column(Modifier.padding(start = 18.dp, end = 10.dp, top = 14.dp, bottom = 8.dp)) {
+                    // BasicTextField, not TextField: Material's own container/padding/indicator
+                    // would draw a second surface inside this one. Here the Surface IS the field.
+                    Box(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                        if (input.isEmpty()) {
+                            Text(
+                                if (cm.busy.value) "Queue message…" else "Message goose…",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
-                        Spacer(Modifier.width(6.dp))
+                        BasicTextField(
+                            value = input,
+                            onValueChange = { input = it },
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                color = MaterialTheme.colorScheme.onSurface),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            maxLines = 8,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp),
+                        )
                     }
-                    FilledIconButton(onClick = { doSend() }) {
-                        Icon(Icons.Filled.Send, contentDescription = if (cm.busy.value) "queue" else "send")
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        // Model pill, left -- Claude puts its mode selector here, and it is the one
+                        // control worth showing as text rather than an icon: which model is about
+                        // to answer changes what you type.
+                        val modelLabel = cm.config.value.firstOrNull { it.id == "model" }
+                            ?.currentValue.orEmpty().substringAfterLast('/').ifBlank { "model" }
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(Icons.Filled.Bolt, contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.onSurface)
+                                Spacer(Modifier.width(6.dp))
+                                Text(modelLabel, style = MaterialTheme.typography.labelLarge,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 130.dp))
+                            }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        IconButton(
+                            onClick = {
+                                picker.launch(PickVisualMediaRequest(
+                                    ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            },
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(Icons.Filled.AttachFile, contentDescription = "attach image",
+                                modifier = Modifier.size(21.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        // One circle, three states: stop while a turn runs, send when there is
+                        // text, mic when there is not. Sending mid-turn queues, so the arrow is
+                        // never wrong -- it just may not go out immediately.
+                        val canSend = input.isNotBlank()
+                        FilledIconButton(
+                            onClick = {
+                                when {
+                                    cm.busy.value && !canSend -> cm.cancel()
+                                    canSend -> doSend()
+                                    listening -> stopListening()
+                                    androidx.core.content.ContextCompat.checkSelfPermission(
+                                        ctx, android.Manifest.permission.RECORD_AUDIO) ==
+                                        android.content.pm.PackageManager.PERMISSION_GRANTED ->
+                                            startListening()
+                                    else -> micPerm.launch(android.Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                            modifier = Modifier.size(42.dp),
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = when {
+                                    cm.busy.value && !canSend -> MaterialTheme.colorScheme.surface
+                                    canSend -> MaterialTheme.colorScheme.primary
+                                    listening -> MaterialTheme.colorScheme.error
+                                    else -> MaterialTheme.colorScheme.surface
+                                },
+                            ),
+                        ) {
+                            Icon(
+                                when {
+                                    cm.busy.value && !canSend -> Icons.Filled.Stop
+                                    canSend -> Icons.Filled.ArrowUpward
+                                    listening -> Icons.Filled.MicOff
+                                    else -> Icons.Filled.Mic
+                                },
+                                contentDescription = when {
+                                    cm.busy.value && !canSend -> "stop"
+                                    canSend -> if (cm.busy.value) "queue" else "send"
+                                    listening -> "stop listening"
+                                    else -> "voice input"
+                                },
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
                     }
                 }
             }
