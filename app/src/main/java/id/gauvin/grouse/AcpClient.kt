@@ -134,13 +134,61 @@ data class ExtInfo(
     // goose's own tagged-union extension config shape isn't hand-reconstructed anywhere else, so
     // this is parsed from the same server-sent object it guards).
     val bundled: Boolean = false,
-    // The verbatim "extension" object from config/extensions/list, forwarded as-is to
-    // session/extensions/add -- both deserialize to the same server-side type, so there's no need
-    // to hand-reconstruct goose's Builtin/Platform/Mcp extension-config union client-side.
+    // The verbatim "extension" object as goose LISTED it. That is not the shape the add
+    // methods accept -- a listed remote extension is `type: streamable_http`, which add rejects
+    // outright -- so it goes through toExtensionDto on the way back in.
     val raw: JsonObject = JsonObject(emptyMap()),
 )
 
 /** Events surfaced from the ACP connection to the UI layer. */
+
+/** Convert an extension as goose REPORTS it into the shape goose ACCEPTS.
+ *
+ *  These are not the same shape, and nothing says so. `config/extensions/list` and
+ *  `session/extensions/list` hand back config.yaml's spelling -- `type: streamable_http` with a
+ *  `uri` and a header MAP -- while the add methods take a tagged enum of builtin | platform |
+ *  mcp, where a remote server is `{type: mcp, server: {type: http, url, headers: [{name, value}]}}`.
+ *
+ *  Feeding a listed extension straight back to add fails with -32602 "unknown variant
+ *  `streamable_http`". That mattered because editing a tool allowlist is remove-then-add: the
+ *  remove succeeded, the add was rejected, and the extension vanished from the session with no
+ *  error surfaced anywhere -- which looks exactly like "my tool changes do nothing".
+ *
+ *  builtin and platform pass through: they are already variants the add method knows. */
+private fun toExtensionDto(raw: JsonObject): JsonObject {
+    val type = raw["type"]?.jsonPrimitive?.contentOrNull ?: return raw
+    if (type == "builtin" || type == "platform" || type == "mcp") return raw
+    val name = raw["name"]?.jsonPrimitive?.contentOrNull ?: return raw
+
+    val server = when (type) {
+        "stdio" -> buildJsonObject {
+            put("type", "stdio"); put("name", name)
+            put("command", raw["cmd"]?.jsonPrimitive?.contentOrNull ?: "")
+            put("args", (raw["args"] as? JsonArray) ?: JsonArray(emptyList()))
+            put("env", JsonArray(emptyList()))
+        }
+        // sse and streamable_http are both HTTP transports to goose's client.
+        else -> buildJsonObject {
+            put("type", if (type == "sse") "sse" else "http"); put("name", name)
+            put("url", raw["uri"]?.jsonPrimitive?.contentOrNull ?: "")
+            put("headers", JsonArray(
+                (raw["headers"] as? JsonObject).orEmpty().map { (k, v) ->
+                    buildJsonObject {
+                        put("name", k); put("value", v.jsonPrimitive.contentOrNull ?: "")
+                    }
+                }))
+        }
+    }
+    return buildJsonObject {
+        put("type", "mcp")
+        put("server", server)
+        raw["timeout"]?.let { put("timeout", it) }
+        raw["description"]?.let { put("description", it) }
+        raw["env_keys"]?.let { put("envKeys", it) }
+        raw["available_tools"]?.let { put("available_tools", it) }
+    }
+}
+
 private const val SKILLS_TAG = "_goose/unstable/sources/list#skill"
 
 sealed interface AcpEvent {
@@ -418,12 +466,13 @@ class AcpClient(
         rpc("_goose/unstable/session/extensions/list", buildJsonObject { put("sessionId", sid) })
     }
 
-    /** Enable one extension for just the current session. `extension` is the verbatim "extension"
-     *  object from an ExtInfo.raw (config/extensions/list) -- forwarded as-is, not reconstructed. */
+    /** Enable one extension for just the current session. `extension` is an ExtInfo.raw as
+     *  goose listed it; toExtensionDto translates it into the shape add accepts, because those
+     *  two shapes are not the same and the mismatch fails silently. */
     fun addSessionExtension(extension: JsonObject) {
         val sid = sessionId ?: return
         rpc("_goose/unstable/session/extensions/add", buildJsonObject {
-            put("sessionId", sid); put("extension", extension)
+            put("sessionId", sid); put("extension", toExtensionDto(extension))
         })
     }
 
@@ -447,7 +496,7 @@ class AcpClient(
     }
     fun addSessionExtensionFor(target: String, extension: JsonObject) =
         rpc("_goose/unstable/session/extensions/add", buildJsonObject {
-            put("sessionId", target); put("extension", extension)
+            put("sessionId", target); put("extension", toExtensionDto(extension))
         })
     fun removeSessionExtensionFor(target: String, name: String) =
         rpc("_goose/unstable/session/extensions/remove", buildJsonObject {
@@ -468,7 +517,7 @@ class AcpClient(
      *  its parsed model. Same is true of setExtensionEnabled. */
     fun addExtensionConfig(extension: JsonObject, enabled: Boolean) =
         rpc("_goose/unstable/config/extensions/add", buildJsonObject {
-            put("extension", extension); put("enabled", enabled)
+            put("extension", toExtensionDto(extension)); put("enabled", enabled)
         })
 
     /** Read a global goose config value (e.g. GOOSE_FAST_MODEL). Reply arrives as
