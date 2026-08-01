@@ -52,14 +52,16 @@ data class SessionInfo(
     val model: String,
     // Where the session's TOOLS run. No longer what a session belongs to -- see projectId.
     val cwd: String = "",
-    /** Title of the recipe this session was started from, or "" for an ad-hoc chat.
+    /** True when this session was started from a recipe (session/list's `hasRecipe`).
      *
-     *  This is what makes a session's PURPOSE knowable. goose has no field for it: session_type
-     *  is provenance, project_id is grouping. A recipe is the thing that says how a session
-     *  works -- its tools, model and instructions -- so "started from the coding recipe" is the
-     *  honest way to say "this is coding work", and unlike a directory it means the same on
-     *  every server. */
-    val recipeTitle: String = "",
+     *  It does not say WHICH recipe -- goose reports only the boolean -- so a client that cares
+     *  matches the session title against the recipe list: a session started from a recipe is
+     *  auto-titled with that recipe's title. That holds until someone renames the session, and
+     *  the alternatives are worse: session/load per session is expensive AND rewrites
+     *  working_dir, and a client-side record of "sessions I started" is per-device and blind to
+     *  Desktop and the CLI. Reporting the recipe name in session/list is a two-line server
+     *  change; it was deliberately not made, because a fork carries every change forever. */
+    val hasRecipe: Boolean = false,
     /** The project this session is filed under, or null for unfiled.
      *
      *  goose has modelled projects as named sources with ids the whole time (sources.rs stores
@@ -1083,9 +1085,7 @@ class AcpClient(
                 messageCount = meta?.get("messageCount")?.jsonPrimitive?.intOrNull ?: 0,
                 model = meta?.get("modelId")?.jsonPrimitive?.contentOrNull ?: "",
                 cwd = o["cwd"]?.jsonPrimitive?.contentOrNull ?: "",
-                // snake_case in the wire format, like the rest of SessionMeta's optional keys.
-                recipeTitle = meta?.get("recipeTitle")?.jsonPrimitive?.contentOrNull
-                    ?: meta?.get("recipe_title")?.jsonPrimitive?.contentOrNull ?: "",
+                hasRecipe = meta?.get("hasRecipe")?.jsonPrimitive?.booleanOrNull ?: false,
                 projectId = meta?.get("projectId")?.jsonPrimitive?.contentOrNull,
             )
         }

@@ -196,9 +196,15 @@ class ConnectionManager private constructor(context: Context) {
         get() = store.codingRecipe
         set(v) { store.codingRecipe = v }
 
-    /** True when this session was started from the coding recipe. */
+    /** True when this session was started from the coding recipe.
+     *
+     *  Matched on the title, because session/list reports THAT a session came from a recipe and
+     *  not which one: goose auto-titles a session with its recipe's title at creation, so the
+     *  two agree until someone renames the session. A renamed coding session drops out of Code
+     *  and stays a normal chat -- visible, reversible, and cheap, which the alternatives are
+     *  not: session/load per session rewrites working_dir as a side effect. */
     fun isCode(s: SessionInfo): Boolean =
-        store.codingRecipe.isNotBlank() && s.recipeTitle == store.codingRecipe
+        store.codingRecipe.isNotBlank() && s.hasRecipe && s.title == store.codingRecipe
 
     /** Coding sessions grouped by the directory they work in, newest group first.
      *
