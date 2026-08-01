@@ -101,6 +101,18 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("show_all_providers", false)
         set(v) = cfg.edit().putBoolean("show_all_providers", v).apply()
 
+    /** Convert an attached image to a text description before sending it, instead of putting the
+     *  image itself in the prompt.
+     *
+     *  OFF by default, because the imagegate proxy on the server now does exactly this for every
+     *  request that passes through it -- for this app, for Goose Desktop, and for the scheduled
+     *  recipes alike, which one client doing it for itself cannot. Turn this on only when
+     *  talking to a goose whose traffic does NOT go through that proxy; with the proxy in place
+     *  it just does the same work a second time, more slowly, before the message is even sent. */
+    var describeImages: Boolean
+        get() = cfg.getBoolean("describe_images", false)
+        set(v) = cfg.edit().putBoolean("describe_images", v).apply()
+
     /** Read agent replies aloud (TextToSpeech) when a turn finishes. */
     var speakReplies: Boolean
         get() = cfg.getBoolean("speak_replies", false)

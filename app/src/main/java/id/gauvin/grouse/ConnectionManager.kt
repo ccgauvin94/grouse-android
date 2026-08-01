@@ -550,7 +550,19 @@ class ConnectionManager private constructor(context: Context) {
      *  appears anywhere -- no archiving dance needed. (The earlier version prompted the fast
      *  model to run commands; it was slow, paraphrased output, and its session flashed into
      *  the list until archived.) */
-    private fun runUtilityTool(command: String, timeoutMs: Long = 30_000, onDone: (String?, String) -> Unit) {
+    private fun runUtilityTool(command: String, timeoutMs: Long = 30_000, onDone: (String?, String) -> Unit) =
+        runToolDirect("shell", kotlinx.serialization.json.buildJsonObject {
+            put("command", kotlinx.serialization.json.JsonPrimitive(command))
+        }, timeoutMs, onDone)
+
+    /** Invoke ONE tool on a throwaway session and hand back its text, with no model turn.
+     *  Generalised out of runUtilityTool, which was the shell-only special case. */
+    private fun runToolDirect(
+        tool: String,
+        args: kotlinx.serialization.json.JsonObject,
+        timeoutMs: Long = 30_000,
+        onDone: (String?, String) -> Unit,
+    ) {
         val url = "wss://${store.host}:${store.port}/acp"
         var boot: AcpClient? = null
         var finished = false
@@ -575,10 +587,7 @@ class ConnectionManager private constructor(context: Context) {
                         // matches permission.yaml's bare names). Small delay: extensions attach
                         // async after session/new.
                         val sid = ev.sessionId
-                        main.postDelayed({ if (!finished) boot?.callTool(sid, "shell",
-                            kotlinx.serialization.json.buildJsonObject {
-                                put("command", kotlinx.serialization.json.JsonPrimitive(command))
-                            }) }, 800)
+                        main.postDelayed({ if (!finished) boot?.callTool(sid, tool, args) }, 800)
                     }
                     is AcpEvent.DirectToolResult ->
                         if (ev.isError) finish(ev.text.ifBlank { "tool call failed" }, ev.text)
@@ -850,6 +859,50 @@ class ConnectionManager private constructor(context: Context) {
         messages.add(ChatMessage("user", text, images)); streamingRole = null; busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
         startService()   // keep the socket alive if the user backgrounds mid-turn
+        if (images.isNotEmpty() && store.describeImages) { describeThenSend(text, images); return }
+        dispatch(text, images)
+    }
+
+    /** Turn the attached images into text, then send a text-only prompt.
+     *
+     *  WHY, given goose has a `read_image` tool: read_image is not a proxy. It loads the file and
+     *  returns image content, so the image still lands in the token stream -- the same bytes, one
+     *  layer over, still unreadable to a model that cannot see. Nothing in goose transcodes an
+     *  image to text, so the conversion has to happen before the prompt is built.
+     *
+     *  The user's typed text is passed as the question, so the answer is about what they actually
+     *  asked rather than a generic caption -- the difference between "a screenshot of a terminal"
+     *  and the error message they wanted read.
+     *
+     *  The bubble is already on screen with its thumbnail; only what goes to the model changes.
+     *  On failure the send still happens, with the failure written into the prompt: a silent
+     *  fallback to sending the raw image would put us back where we started, and dropping the
+     *  message would lose what the user typed. */
+    private fun describeThenSend(text: String, images: List<ImageBlock>) {
+        status.value = if (images.size == 1) "reading the image…" else "reading ${images.size} images…"
+        val parts = arrayOfNulls<String>(images.size)
+        var remaining = images.size
+        images.forEachIndexed { i, img ->
+            runToolDirect("vision__describe_image", kotlinx.serialization.json.buildJsonObject {
+                put("image", kotlinx.serialization.json.JsonPrimitive("data:${img.mimeType};base64,${img.dataB64}"))
+                put("question", kotlinx.serialization.json.JsonPrimitive(
+                    text.ifBlank { "Describe this image in detail." }))
+            }, timeoutMs = 120_000) { err, out ->
+                parts[i] = err?.let { "(could not read this image: $it)" } ?: out
+                if (--remaining == 0) {
+                    val described = images.indices.joinToString("\n\n") { n ->
+                        val label = if (images.size == 1) "Image" else "Image ${n + 1}"
+                        "[$label, described by a vision model because I can't see images: " +
+                            "${parts[n].orEmpty().trim()}]"
+                    }
+                    status.value = ""
+                    dispatch(if (text.isBlank()) described else "$text\n\n$described", emptyList())
+                }
+            }
+        }
+    }
+
+    private fun dispatch(text: String, images: List<ImageBlock>) {
         if (live && !turnInFlight) {
             turnInFlight = true
             lastSessionId?.let { store.pendingPushSessionId = it }

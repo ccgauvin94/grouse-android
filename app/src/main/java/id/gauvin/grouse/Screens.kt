@@ -1772,6 +1772,18 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 }
             }
 
+            SettingsSection("Images") {
+                var describe by remember { mutableStateOf(cm.store.describeImages) }
+                SettingsSwitchRow("Describe images before sending", describe) {
+                    describe = it; cm.store.describeImages = it
+                }
+                SettingCaption("Normally OFF: the server's proxy already turns images into " +
+                    "text for every client. Turn this on only if this goose does not run that " +
+                    "proxy — then the image goes into the prompt as-is, which works only if " +
+                    "the chat model can see, and one that can't will answer around it rather " +
+                    "than say so.")
+            }
+
             SettingsSection("Models") {
                 SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
                 SettingCaption("Off shows only providers set up on your goose (openai, openrouter). " +
