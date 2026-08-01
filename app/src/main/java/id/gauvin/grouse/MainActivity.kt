@@ -16,7 +16,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
@@ -243,13 +242,6 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                     NavigationDrawerItem(
-                        label = { Text("Scheduler") },
-                        icon = { Icon(Icons.Filled.Schedule, contentDescription = null) },
-                        selected = route == "schedules",
-                        onClick = { closeDrawer(); nav.navigate("schedules") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
-                    NavigationDrawerItem(
                         label = { Text("Settings") },
                         icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
                         selected = route == "settings",
@@ -274,7 +266,6 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             composable("extensions") { ExtensionsScreen(cm, nav) }
             composable("instance") { InstanceScreen(cm, nav) }
             composable("providers") { ProvidersScreen(cm, nav) }
-            composable("schedules") { SchedulesScreen(cm, nav) }
             composable("recipes") { RecipesScreen(cm, nav) }
             composable("skills") { SkillsScreen(cm, nav) }
             composable("skill/{name}") { back ->

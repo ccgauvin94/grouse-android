@@ -1351,11 +1351,11 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
             }
 
             SettingsSection("Scheduled jobs") {
-                SettingsNavRow("Scheduler",
+                SettingsNavRow("Recipes",
                     cm.schedules.value.let { j ->
                         if (j.isEmpty()) "none scheduled"
                         else j.count { !it.paused }.toString() + " of " + j.size + " active"
-                    }) { nav.navigate("schedules") }
+                    }) { nav.navigate("recipes") }
                 SettingCaption("The morning digest, the hourly briefing and the nightly " +
                     "compaction. Pausing one is what \"off\" used to mean; what each one runs " +
                     "is its recipe, under Recipes in the menu.")
@@ -2385,90 +2385,6 @@ fun cronInEnglish(cron: String): String {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SchedulesScreen(cm: ConnectionManager, nav: NavController) {
-    LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
-    var note by remember { mutableStateOf<String?>(null) }
-    val jobs = cm.schedules.value
-    val recipes = cm.recipes.value
-    val scheduledPaths = jobs.map { it.source }.toSet()
-
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text("Scheduler") },
-            navigationIcon = {
-                IconButton(onClick = { nav.popBackStack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
-                }
-            },
-            actions = {
-                IconButton(onClick = { cm.refreshSchedules() }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "refresh")
-                }
-            },
-        )
-    }) { pad ->
-        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
-            .verticalScroll(rememberScrollState())) {
-
-            note?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(vertical = 8.dp))
-            }
-
-            SettingsSection("Scheduled") {
-                if (jobs.isEmpty()) {
-                    SettingCaption("Nothing scheduled. Give a recipe below a time to start one.")
-                }
-                jobs.forEach { job ->
-                    val recipe = cm.recipeFor(job)
-                    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f).clickable(enabled = recipe != null) {
-                            recipe?.let { nav.navigate("recipe/${it.id}") }
-                        }) {
-                            Text(recipe?.title ?: job.id)
-                            Text(
-                                buildString {
-                                    append(cronInEnglish(job.cron))
-                                    if (job.running) append("  ·  running now")
-                                    else if (job.paused) append("  ·  paused")
-                                    job.lastRun?.let { append("  ·  last ${it.take(16).replace('T', ' ')}") }
-                                    // A job whose recipe is not in the library was created with an
-                                    // inline copy; there is nothing here to open or edit.
-                                    if (recipe == null) append("  ·  ${job.recipeFile}")
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline,
-                            )
-                        }
-                        if (job.running) {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                        } else {
-                            Switch(checked = !job.paused,
-                                onCheckedChange = { cm.setSchedulePaused(job.id, !it) })
-                        }
-                    }
-                    Row {
-                        TextButton(enabled = !job.running, onClick = {
-                            cm.runScheduleNow(job.id)
-                            // run-now blocks server-side for the whole run, so the reply is the
-                            // finish. Say what will actually happen rather than "started".
-                            note = "Running ${recipe?.title ?: job.id} — a briefing takes a few " +
-                                "minutes and notifies when it has something."
-                        }) { Text("Run now") }
-                        TextButton(onClick = { cm.deleteSchedule(job.id) }) { Text("Unschedule") }
-                    }
-                    HorizontalDivider()
-                }
-            }
-
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
 fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
     LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
     val r = cm.recipes.value.firstOrNull { it.id == recipeId }
@@ -2522,9 +2438,23 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String) {
                         onClick = { cm.setRecipeCron(r.id, cron.trim()) }) { Text("Save schedule") }
                 }
                 SettingCaption("Server local time.")
-                job?.let {
-                    SettingsSwitchRow("Enabled", !it.paused) { on ->
-                        cm.setSchedulePaused(it.id, !on)
+                job?.let { j ->
+                    SettingsSwitchRow("Enabled", !j.paused) { on ->
+                        cm.setSchedulePaused(j.id, !on)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(enabled = !j.running, onClick = { cm.runScheduleNow(j.id) }) {
+                            Text("Run now")
+                        }
+                        if (j.running) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("running", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                    j.lastRun?.let {
+                        SettingCaption("Last run ${it.take(16).replace('T', ' ')} · job ${j.id}")
                     }
                 }
             }
@@ -2953,7 +2883,7 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
 @Composable
 fun RecipesScreen(cm: ConnectionManager, nav: NavController) {
     LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
-    val scheduled = cm.schedules.value.map { it.source }.toSet()
+    var note by remember { mutableStateOf<String?>(null) }
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Recipes") },
@@ -2971,20 +2901,59 @@ fun RecipesScreen(cm: ConnectionManager, nav: NavController) {
     }) { pad ->
         Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
             .verticalScroll(rememberScrollState())) {
-            if (cm.recipes.value.isEmpty()) {
-                SettingCaption("No saved recipes on the server.")
+
+            note?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(vertical = 8.dp))
             }
+            if (cm.recipes.value.isEmpty()) SettingCaption("No saved recipes on the server.")
+
             cm.recipes.value.forEach { r ->
-                SettingsNavRow(
-                    r.title,
-                    listOfNotNull(
-                        r.model,
-                        if (r.filePath in scheduled) "scheduled" else null,
-                    ).joinToString(" · ").ifBlank { r.description.take(70) },
-                ) { nav.navigate("recipe/" + r.id) }
+                val job = cm.schedules.value.firstOrNull { it.source == r.filePath }
+                Row(Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).clickable { nav.navigate("recipe/" + r.id) }) {
+                        Text(r.title)
+                        Text(
+                            buildString {
+                                append(if (r.cron.isNullOrBlank()) "not scheduled"
+                                       else cronInEnglish(r.cron))
+                                if (job?.running == true) append("  ·  running now")
+                                else if (job?.paused == true) append("  ·  paused")
+                                job?.lastRun?.let { append("  ·  last ${it.take(16).replace('T', ' ')}") }
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                    when {
+                        job?.running == true ->
+                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        job != null ->
+                            Switch(checked = !job.paused,
+                                onCheckedChange = { cm.setSchedulePaused(job.id, !it) })
+                    }
+                }
+                if (job != null) {
+                    Row {
+                        TextButton(enabled = !job.running, onClick = {
+                            cm.runScheduleNow(job.id)
+                            // run-now blocks server-side for the whole run, so its reply is the
+                            // finish rather than the start. Say what will happen, not "started".
+                            note = "Running ${r.title} — a briefing takes a few minutes and " +
+                                "notifies if it has something."
+                        }) { Text("Run now") }
+                    }
+                }
+                HorizontalDivider()
             }
-            SettingCaption("A recipe is what a job runs. Editing one changes its next run — " +
-                "there is nothing to re-register.")
+
+            // There is no separate scheduler list any more. A schedule was never a thing on its
+            // own -- it is a property of a recipe, and showing the two as separate screens meant
+            // the same job appeared twice with different affordances on each.
+            SettingCaption("A recipe is what runs; its schedule is one of its settings. Tap one " +
+                "to change when it runs, which model it uses, or what it says.")
             Spacer(Modifier.height(28.dp))
         }
     }
