@@ -132,17 +132,81 @@ class ConnectionManager private constructor(context: Context) {
      *  AGENTS.md found" having listed nothing at all. It starts from the open session's own cwd
      *  instead, which is inside the roots by construction. */
     fun scanCodeProjects() {
-        val sid = currentSession.value ?: return
         scanPending.clear()
         codeProjectDirs.value = emptyList()
-        val roots = browseRoots.value
-        if (roots.isEmpty()) {
-            val seed = currentCwd() ?: return
-            scanSeeding = true
-            client?.listDirectory(sid, seed)
+        val sid = currentSession.value
+        if (sid != null) {
+            val roots = browseRoots.value
+            if (roots.isEmpty()) {
+                val seed = currentCwd() ?: DEFAULT_CWD
+                scanSeeding = true
+                client?.listDirectory(sid, seed)
+            } else {
+                roots.forEach { r -> scanPending.add(r); client?.listDirectory(sid, r) }
+            }
             return
         }
-        roots.forEach { r -> scanPending.add(r); client?.listDirectory(sid, r) }
+        // NO CHAT OPEN. Borrowing the current session was the whole reason Code came up empty
+        // when reached straight from the drawer at startup: no session, so nothing was listed,
+        // and it reported "no AGENTS.md found" -- true, and about a scan that never ran. Stand
+        // up a throwaway session instead; it has no conversation, so session/list (which drops
+        // message-less sessions) never shows it.
+        scanWithScratchSession()
+    }
+
+    /** Run the whole scan on a session of its own, so Code does not depend on a chat being open. */
+    private fun scanWithScratchSession() {
+        val url = "wss://${store.host}:${store.port}/acp"
+        var boot: AcpClient? = null
+        val pending = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        var seeding = true
+        var scratch: String? = null
+        val found = mutableListOf<String>()
+        lateinit var stop: Runnable
+        stop = Runnable {
+            val b = boot; boot = null
+            main.postDelayed({ b?.close() }, 300)
+        }
+        // Hard stop: a scan that never completes must not leave a socket open forever.
+        main.postDelayed(stop, 45_000)
+        boot = AcpClient(url, store.secretKey) { ev ->
+            main.post {
+                when (ev) {
+                    is AcpEvent.Ready -> {
+                        scratch = ev.sessionId
+                        boot?.listDirectory(ev.sessionId, DEFAULT_CWD)
+                    }
+                    is AcpEvent.Directory -> {
+                        val sid = scratch
+                        if (ev.roots.isNotEmpty()) browseRoots.value = ev.roots
+                        when {
+                            seeding && ev.roots.isNotEmpty() -> {
+                                seeding = false
+                                ev.roots.forEach { r ->
+                                    pending.add(r); if (sid != null) boot?.listDirectory(sid, r)
+                                }
+                            }
+                            pending.remove(ev.path) -> {
+                                ev.dirs.forEach { d ->
+                                    pending.add(d); if (sid != null) boot?.listDirectory(sid, d)
+                                }
+                                if (ev.files.any { it.equals("AGENTS.md", true) } &&
+                                    ev.path !in found) found += ev.path
+                                if (pending.isEmpty()) {
+                                    codeProjectDirs.value = found.sorted()
+                                    main.removeCallbacks(stop); stop.run()
+                                }
+                            }
+                            else -> if (ev.files.any { it.equals("AGENTS.md", true) } &&
+                                ev.path !in found) found += ev.path
+                        }
+                        codeProjectDirs.value = found.sorted()
+                    }
+                    is AcpEvent.Error -> {}
+                    else -> {}
+                }
+            }
+        }.also { it.desiredCwd = DEFAULT_CWD; it.connect() }
     }
 
     /** True while waiting for the reply that will tell us what the roots are. */

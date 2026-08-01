@@ -2437,8 +2437,31 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String, on
         Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
             .verticalScroll(rememberScrollState())) {
 
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                Button(onClick = { cm.runRecipe(r.id); onOpenChat() }) { Text("Start session") }
+            // Start it, optionally somewhere specific. The directory matters for a coding
+            // recipe and is meaningless for a briefing, so it is offered rather than required:
+            // blank uses the default, which is what a chat wants.
+            var whereOpen by remember { mutableStateOf(false) }
+            var where by remember { mutableStateOf("") }
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = {
+                    cm.runRecipe(r.id, where.ifBlank { null }); onOpenChat()
+                }) { Text("Start session") }
+                Spacer(Modifier.width(12.dp))
+                Box {
+                    TextButton(onClick = { cm.scanCodeProjects(); whereOpen = true }) {
+                        Text(where.ifBlank { "in default folder" }
+                            .let { it.substringAfterLast('/').ifBlank { it } })
+                    }
+                    DropdownMenu(expanded = whereOpen, onDismissRequest = { whereOpen = false }) {
+                        DropdownMenuItem(text = { Text("Default folder") },
+                            onClick = { where = ""; whereOpen = false })
+                        (cm.codeProjectDirs.value + cm.browseRoots.value).distinct().forEach { d ->
+                            DropdownMenuItem(text = { Text(d) },
+                                onClick = { where = d; whereOpen = false })
+                        }
+                    }
+                }
             }
             if (r.description.isNotBlank()) {
                 Text(r.description, style = MaterialTheme.typography.bodySmall,
