@@ -68,13 +68,6 @@ dependencies {
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
-    // Exclude the connector's JVM tink; security-crypto needs tink-android (Android Keystore), so
-    // keep only that and bump it high enough for the connector's classes to resolve — otherwise the
-    // two Tink artifacts collide (duplicate classes).
-    implementation("org.unifiedpush.android:connector:3.3.3") {
-        exclude(group = "com.google.crypto.tink", module = "tink")
-    }
-    implementation("com.google.crypto.tink:tink-android:1.16.0")
     // Markdown rendering for agent output (headers, bold, lists, fenced code).
     implementation("com.halilibo.compose-richtext:richtext-commonmark:0.20.0")
     implementation("com.halilibo.compose-richtext:richtext-ui-material3:0.20.0")

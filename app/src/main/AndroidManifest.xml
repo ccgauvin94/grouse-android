@@ -3,7 +3,6 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- Battery-optimization exemption: the sanctioned no-notification way to keep the
          process (and its WebSocket) unfrozen in the background. User-granted via the
@@ -20,11 +19,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Grouse"
-        android:usesCleartextTraffic="true">
-        <meta-data
-            android:name="com.google.android.gms.car.application"
-            android:resource="@xml/automotive_app_desc" />
+        android:theme="@style/Theme.Grouse">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -77,42 +72,5 @@
                 <action android:name="id.gauvin.grouse.action.REPLY" />
             </intent-filter>
         </receiver>
-
-        <!-- UnifiedPush: the distributor delivers pushes to this service. -->
-        <service
-            android:name=".GoosePushService"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
-            </intent-filter>
-        </service>
-
-        <!-- Voice Tier 2: register as a digital-assistant (VoiceInteractionService). Bound only by
-             the system via BIND_VOICE_INTERACTION. -->
-        <service
-            android:name=".GooseVoiceInteractionService"
-            android:permission="android.permission.BIND_VOICE_INTERACTION"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.service.voice.VoiceInteractionService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.voice_interaction"
-                android:resource="@xml/interaction_service" />
-        </service>
-        <service
-            android:name=".GooseVoiceSessionService"
-            android:permission="android.permission.BIND_VOICE_INTERACTION"
-            android:exported="true" />
-        <service
-            android:name=".GooseRecognitionService"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.speech.RecognitionService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.speech"
-                android:resource="@xml/recognition_service" />
-        </service>
     </application>
 </manifest>

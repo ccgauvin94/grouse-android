@@ -121,35 +121,10 @@ class SecureStore(context: Context) {
         set(v) = cfg.edit().putBoolean("describe_images", v).apply()
 
 
-    /** Read agent replies aloud (TextToSpeech) when a turn finishes. */
-    var speakReplies: Boolean
-        get() = cfg.getBoolean("speak_replies", false)
-        set(v) = cfg.edit().putBoolean("speak_replies", v).apply()
-
-    // --- Voice assistant model override ---
-    // Self-hosted latency is painful for voice, so a voice turn can run on a faster (cloud) model
-    // just for that turn, then restore. Blank model = use the session's current model.
-    var voiceProvider: String
-        get() = cfg.getString("voice_provider", "") ?: ""
-        set(v) = cfg.edit().putString("voice_provider", v).apply()
-    var voiceModel: String
-        get() = cfg.getString("voice_model", "") ?: ""
-        set(v) = cfg.edit().putString("voice_model", v).apply()
-
     /** Last opened session, so a notification reply after process death can resume it. */
     var lastSessionId: String?
         get() = cfg.getString("last_session", null)
         set(v) = cfg.edit().putString("last_session", v).apply()
-
-    /** Session id of a prompt THIS device sent and hasn't seen a local TurnDone for yet — used to
-     *  filter the goose Stop-hook push, which fires for every client's turns (Desktop included) and
-     *  can't tell them apart server-side. lastSessionId ("session I have open") isn't enough: the
-     *  Assistant thread is one session shared by every client (title-matched), so Desktop typing in
-     *  it makes lastSessionId match too. This tracks "a turn I'm actually waiting on" instead.
-     *  Persisted (not in-memory) because the whole point is surviving process death while backgrounded. */
-    var pendingPushSessionId: String?
-        get() = cfg.getString("pending_push_session", null)
-        set(v) = cfg.edit().putString("pending_push_session", v).apply()
 
     /** Last known cwd PER session id, merged from every session/list and every open. The resume
      *  path MUST hand session/load the session's REAL cwd — a wrong value silently REWRITES the
@@ -183,28 +158,6 @@ class SecureStore(context: Context) {
     // works offline. These opt into the box's own models instead -- Kokoro sounds far better than
     // the stock Android voice, and Whisper transcribes better than on-device recognition. LocalAI
     // publishes 0.0.0.0:8080 so the phone reaches it directly; goose is not in this path.
-    /** Base URL of LocalAI. Defaults to the goose host on :8080, which is the usual setup. */
-    var localAiUrl: String
-        get() = cfg.getString("localai_url", "")?.takeIf { it.isNotBlank() } ?: "http://$host:8080"
-        set(v) = cfg.edit().putString("localai_url", v.trim().trimEnd('/')).apply()
-
-    /** Speak replies with LocalAI TTS instead of Android TextToSpeech. */
-    var serverTts: Boolean
-        get() = cfg.getBoolean("server_tts", false)
-        set(v) = cfg.edit().putBoolean("server_tts", v).apply()
-    var ttsModel: String
-        get() = cfg.getString("tts_model", "TTS-Kokoro") ?: "TTS-Kokoro"
-        set(v) = cfg.edit().putString("tts_model", v.trim()).apply()
-
-    /** Transcribe with LocalAI Whisper instead of Android SpeechRecognizer. Trade-off: no live
-     *  partial results -- the whole clip is uploaded when you stop talking. */
-    var serverStt: Boolean
-        get() = cfg.getBoolean("server_stt", false)
-        set(v) = cfg.edit().putBoolean("server_stt", v).apply()
-    var sttModel: String
-        get() = cfg.getString("stt_model", "STT-Whisper-Base") ?: "STT-Whisper-Base"
-        set(v) = cfg.edit().putString("stt_model", v.trim()).apply()
-
     /** Models the user has confirmed DO accept images, by sending anyway past the warning.
      *  isLikelyVisionModel() is a substring heuristic over model names and cannot be right in
      *  general -- it missed Qwen3.6-35B-A3B, which is vision-capable via its mmproj, and every
@@ -244,21 +197,6 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("assistant_enabled", true)
         set(v) = cfg.edit().putBoolean("assistant_enabled", v).apply()
 
-
-    // --- UnifiedPush ---
-    var pushEnabled: Boolean
-        get() = cfg.getBoolean("push_on", false)
-        set(v) = cfg.edit().putBoolean("push_on", v).apply()
-
-    /** The UnifiedPush endpoint URL the distributor gave us; phaethon POSTs here to reach us. */
-    var pushEndpoint: String
-        get() = cfg.getString("push_endpoint", "") ?: ""
-        set(v) = cfg.edit().putString("push_endpoint", v).apply()
-
-    /** Optional phaethon URL the app POSTs its endpoint to, so the server knows where to push. */
-    var pushRegistryUrl: String
-        get() = cfg.getString("push_registry", "") ?: ""
-        set(v) = cfg.edit().putString("push_registry", v).apply()
 
     /** Real model slugs we've seen active, scoped PER PROVIDER (goose hides non-featured models
      *  like z-ai/glm-5.2). Provider-scoping stops LocalAI models leaking into the OpenRouter list

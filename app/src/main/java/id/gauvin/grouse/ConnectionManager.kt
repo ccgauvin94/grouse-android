@@ -293,7 +293,6 @@ class ConnectionManager private constructor(context: Context) {
     val draftAttachments = mutableStateListOf<ImageBlock>()
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
-    val speakReplies = mutableStateOf(store.speakReplies)
     // Live model list for the CURRENT provider, from the server, in memory only -- never
     // persisted. See the AcpEvent.Config/SupportedModels handlers for why.
     val knownModels = mutableStateOf(emptySet<String>())
@@ -434,7 +433,6 @@ class ConnectionManager private constructor(context: Context) {
 
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
-    fun setSpeakReplies(v: Boolean) { store.speakReplies = v; speakReplies.value = v }
 
     private val main = Handler(Looper.getMainLooper())
     private var client: AcpClient? = null
@@ -469,41 +467,6 @@ class ConnectionManager private constructor(context: Context) {
     private var pendingOpenCwd: String = DEFAULT_CWD
 
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
-
-    // Voice: the voice sheet has a short lifecycle, so CM owns speaking the reply (it survives the
-    // sheet closing) and suppresses the finished-turn notification for voice turns. The turn can
-    // run on a faster voice model, restored afterwards.
-    @Volatile var voiceActive = false
-    @Volatile private var voiceReplyPending = false
-    @Volatile private var voiceModelActive = false
-    private var lastVoiceAt = 0L
-    private val voiceSpeaker by lazy { Speaker(appContext) }
-    private var serverPlayer: android.media.MediaPlayer? = null
-
-    /** Speak `text`, through LocalAI if the user turned that on, else Android TextToSpeech.
-     *  Falls back to the on-device voice when the server call fails, so a LocalAI outage degrades
-     *  the voice rather than silencing replies. */
-    fun say(text: String, whenDone: (() -> Unit)? = null) {
-        if (!store.serverTts) { voiceSpeaker.speak(text, whenDone); return }
-        serverPlayer?.let { runCatching { it.stop() }; runCatching { it.release() } }
-        serverPlayer = ServerSpeech.speak(
-            store.localAiUrl, store.ttsModel, text, appContext.cacheDir,
-            onError = { msg ->
-                main.post {
-                    status.value = "TTS: $msg"
-                    voiceSpeaker.speak(text, whenDone)   // fall back to the device voice
-                }
-            },
-            onDone = { main.post { whenDone?.invoke() } },
-        )
-    }
-
-    /** Stop any in-flight speech, whichever engine produced it. */
-    fun stopSpeaking() {
-        voiceSpeaker.stop()
-        serverPlayer?.let { runCatching { it.stop() }; runCatching { it.release() } }
-        serverPlayer = null
-    }
 
     val configured: Boolean get() = store.hasKey()
 
@@ -575,13 +538,6 @@ class ConnectionManager private constructor(context: Context) {
     /** Serialize a session server-side; the reply lands in [exportData] and the UI opens the
      *  Android share sheet with it. */
     fun exportSession(sessionId: String) { client?.exportSession(sessionId) }
-
-    /** Publish this device's UnifiedPush endpoint into goose's config.yaml (server-side),
-     *  where deliver.sh prefers it over the static .env value -- endpoint rotation then
-     *  self-heals instead of silently killing pushes. Best-effort. */
-    fun publishPushEndpoint(url: String) {
-        if (url.isNotBlank()) client?.upsertConfig("GROUSE_PUSH_ENDPOINT", url)
-    }
 
     /** Answer a pending elicitation form and drop it from the queue. */
     fun answerElicitation(e: AcpEvent.Elicitation, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
@@ -999,7 +955,6 @@ class ConnectionManager private constructor(context: Context) {
         // the Ready handler flushes.
         if (live && client?.ready == true && !turnInFlight) {
             turnInFlight = true
-            lastSessionId?.let { store.pendingPushSessionId = it }
             client?.sendPrompt(text, images, expect = currentSession.value)
         } else if (live && client?.ready == true && activeRunId != null && images.isEmpty()) {
             // A turn is running AND we know its run id: STEER — inject into the live turn
@@ -1025,38 +980,6 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Send once connected — used by notification replies, which may arrive disconnected. */
     fun sendWhenReady(text: String) = send(text)
-
-    /** Send from the voice assistant: CM speaks the reply (so it survives the sheet closing),
-     *  the finished-turn notification is suppressed, and the turn optionally runs on the fast
-     *  voice model (restored afterwards). */
-    fun sendVoice(text: String) {
-        voiceReplyPending = true
-        lastVoiceAt = SystemClock.elapsedRealtime()
-        voiceSpeaker   // touch → start TTS init now so it's ready by turn-end
-        val vm = store.voiceModel
-        if (vm.isNotBlank() && live) {
-            voiceModelActive = true   // suppress persisting this transient model to store
-            store.voiceProvider.takeIf { it.isNotBlank() }?.let { client?.setConfigOption("provider", it) }
-            client?.setConfigOption("model", vm)
-        }
-        send(text)
-    }
-
-    /** True during and briefly after a voice turn — used to drop the server's finished-turn push. */
-    fun recentVoice(): Boolean =
-        voiceReplyPending || (SystemClock.elapsedRealtime() - lastVoiceAt) < 20_000
-
-    /** Restore the app's saved provider/model after a voice turn that swapped in the voice model. */
-    private fun restoreModel() {
-        if (!voiceModelActive) return
-        voiceModelActive = false
-        val saved = store.savedOptions(optionIds)
-        saved["provider"]?.let { client?.setConfigOption("provider", it) }
-        // Never re-send the legacy "current" sentinel -- goose forwards it verbatim and LocalAI
-        // 404s. Devices that picked the old "Provider default" entry have it persisted, so
-        // without this they would keep re-poisoning the config on every reconnect.
-        saved["model"]?.takeIf { it != "current" }?.let { client?.setConfigOption("model", it) }
-    }
 
     fun setForeground(fg: Boolean) {
         appForeground = fg
@@ -1286,7 +1209,6 @@ class ConnectionManager private constructor(context: Context) {
                 } else {
                     messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false; turnInFlight = false
                     compacting.value = false   // safety net: a dropped/garbled status must never stick
-                    if (voiceReplyPending) { voiceReplyPending = false; restoreModel() }
                 }
             }
             is AcpEvent.ToolCall -> {
@@ -1387,25 +1309,11 @@ class ConnectionManager private constructor(context: Context) {
                 // idle between a queue and its turn.
                 val queued = dequeue()
                 busy.value = queued != null
-                // We got the authoritative completion straight from our own socket -- stop waiting
-                // on the Stop-hook push for this turn so a later turn from another client in the
-                // same (possibly shared) session doesn't spuriously match the stale flag.
-                store.pendingPushSessionId = null
-                if (voiceReplyPending) {
-                    // Voice turn: speak the reply here (survives the voice sheet closing) and do
-                    // NOT notify — the point of voice is to just talk back. Then restore the model.
-                    voiceReplyPending = false
-                    say(lastAssistantText())
-                    restoreModel()
-                } else if (!appForeground && !store.pushEnabled) {
-                    // If push is on, the goose Stop hook nudges the phone — don't double-notify.
-                    notifier.postReply(lastAssistantText())
-                }
+                if (!appForeground) notifier.postReply(lastAssistantText())
                 if (queued != null) {
                     // Send the queued prompt now that the wire is free. Service stays up (we are
                     // still busy), so backgrounding between the two turns is safe.
                     turnInFlight = true
-                    lastSessionId?.let { store.pendingPushSessionId = it }
                     client?.sendPrompt(queued.text, queued.images, expect = currentSession.value)
                 } else if (!store.persistentConnection) stopService()
             }
@@ -1432,10 +1340,8 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) {
                 config.value = ev.options
                 // Persist the true current values so re-apply on reconnect can't drift
-                // (e.g. leave a LocalAI model selected after switching to openrouter). Skip while a
-                // transient voice model is applied, so it doesn't overwrite the app's saved model.
-                if (!voiceModelActive)
-                    ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
+                // (e.g. leave a model selected after switching provider).
+                ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
                 // Models come from the SERVER, live, and are never persisted. The old design kept
                 // a per-provider set in SharedPreferences that only ever GREW: every slug goose
                 // ever reported stayed forever, so a model retired server-side (Qwen3_1.7B), an
@@ -1543,7 +1449,6 @@ class ConnectionManager private constructor(context: Context) {
                 // misattributes each reply, the exact failure the queue exists to prevent. It also
                 // left turnInFlight false, so the next send() would fire a concurrent prompt too.
                 dequeue()?.let { p ->
-                    store.pendingPushSessionId = ev.sessionId
                     turnInFlight = true
                     busy.value = true
                     client?.sendPrompt(p.text, p.images, expect = currentSession.value)

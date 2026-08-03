@@ -42,8 +42,6 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -120,9 +118,9 @@ private fun modeBlurb(value: String): String = when (value) {
 
 private val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")
 
-/** Run on the main looper. ServerSpeech's callbacks fire on its own worker threads; Compose
- *  snapshot state tolerates that, but UI state changes are clearer (and safer for anything that
- *  later touches a View) marshalled back. */
+/** Run on the main looper. Background callbacks may land off-thread; Compose snapshot state
+ *  tolerates that, but UI state changes are clearer (and safer for anything that later touches
+ *  a View) marshalled back. */
 private fun mainThread(block: () -> Unit) =
     android.os.Handler(android.os.Looper.getMainLooper()).post(block)
 
@@ -200,43 +198,6 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? -> uri?.let { readImage(ctx, it)?.let(attachments::add) } }
 
-    // Voice: push-to-talk STT streaming into the draft, and TTS to read replies aloud.
-    val voiceInput = remember { VoiceInput(ctx) }
-    val speaker = remember { Speaker(ctx) }
-    // Server-side (Whisper) recording in flight, when the LocalAI STT setting is on. Null while
-    // idle, or always if the user is on Android's recognizer.
-    var serverRec by remember { mutableStateOf<ServerSpeech.Recording?>(null) }
-    val listening = voiceInput.listening || serverRec != null
-
-    DisposableEffect(Unit) { onDispose { voiceInput.stop(); serverRec?.cancel(); speaker.shutdown() } }
-    fun startListening() {
-        val base = input
-        if (cm.store.serverStt) {
-            // Whisper has no streaming partials over this API -- the clip goes up when you stop.
-            serverRec = ServerSpeech.record(ctx.cacheDir)
-            return
-        }
-        voiceInput.start(
-            onPartial = { input = (base.trim() + " " + it).trim() },
-            onFinal = { input = (base.trim() + " " + it).trim() },
-            onError = {},
-        )
-    }
-
-    fun stopListening() {
-        val rec = serverRec
-        if (rec != null) {
-            serverRec = null
-            val base = input
-            rec.stop(cm.store.localAiUrl, cm.store.sttModel,
-                onText = { t -> mainThread { input = (base.trim() + " " + t).trim() } },
-                onError = { e -> mainThread { cm.status.value = "STT: $e" } })
-        } else voiceInput.stop()
-    }
-    val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) startListening()
-    }
-
     // Content shared into Goose from another app — append (don't clobber an in-progress draft).
     LaunchedEffect(cm.pendingShareText.value) {
         cm.pendingShareText.value?.let { input = (input.trim() + " " + it).trim(); cm.pendingShareText.value = null }
@@ -287,15 +248,6 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // rebuilds never touch `messages`, so the reading position survives untouched and this
     // never fires for them.
     LaunchedEffect(cm.replayDoneTick.value) { listState.scrollToItem(0) }
-    // Speak the reply aloud when a turn finishes (busy true→false), if enabled.
-    var wasBusy by remember { mutableStateOf(false) }
-    LaunchedEffect(cm.busy.value) {
-        if (wasBusy && !cm.busy.value && cm.speakReplies.value) {
-            // cm.say routes to LocalAI TTS or Android TTS per the setting (and falls back).
-            cm.messages.lastOrNull { it.role == "assistant" }?.text?.let { cm.say(it) }
-        }
-        wasBusy = cm.busy.value
-    }
     // Reconnect (resuming the session) when we return to the foreground.
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
@@ -494,7 +446,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         Text(if (cm.online.value) "Ask Grouse anything" else "Connecting…",
                             style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(4.dp))
-                        Text("Calendar, notes, web search, and memory are wired up — tap the mic or type below.",
+                        Text("Calendar, notes, web search, and memory are wired up — type below to start.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
                     }
@@ -666,45 +618,24 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                 modifier = Modifier.size(21.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        // One circle, three states: stop while a turn runs, send when there is
-                        // text, mic when there is not. Sending mid-turn queues, so the arrow is
-                        // never wrong -- it just may not go out immediately.
+                        // One circle, two states: stop while a turn runs, send when there is
+                        // text. Sending mid-turn queues, so the arrow is never wrong -- it just
+                        // may not go out immediately.
                         val canSend = input.isNotBlank()
                         FilledIconButton(
-                            onClick = {
-                                when {
-                                    cm.busy.value && !canSend -> cm.cancel()
-                                    canSend -> doSend()
-                                    listening -> stopListening()
-                                    androidx.core.content.ContextCompat.checkSelfPermission(
-                                        ctx, android.Manifest.permission.RECORD_AUDIO) ==
-                                        android.content.pm.PackageManager.PERMISSION_GRANTED ->
-                                            startListening()
-                                    else -> micPerm.launch(android.Manifest.permission.RECORD_AUDIO)
-                                }
-                            },
+                            onClick = { if (canSend) doSend() else if (cm.busy.value) cm.cancel() },
+                            enabled = canSend || cm.busy.value,
                             modifier = Modifier.size(42.dp),
                             colors = IconButtonDefaults.filledIconButtonColors(
-                                containerColor = when {
-                                    cm.busy.value && !canSend -> MaterialTheme.colorScheme.surface
-                                    canSend -> MaterialTheme.colorScheme.primary
-                                    listening -> MaterialTheme.colorScheme.error
-                                    else -> MaterialTheme.colorScheme.surface
-                                },
+                                containerColor = if (canSend) MaterialTheme.colorScheme.primary
+                                                 else MaterialTheme.colorScheme.surface,
                             ),
                         ) {
                             Icon(
-                                when {
-                                    cm.busy.value && !canSend -> Icons.Filled.Stop
-                                    canSend -> Icons.Filled.ArrowUpward
-                                    listening -> Icons.Filled.MicOff
-                                    else -> Icons.Filled.Mic
-                                },
+                                if (canSend) Icons.Filled.ArrowUpward else Icons.Filled.Stop,
                                 contentDescription = when {
-                                    cm.busy.value && !canSend -> "stop"
                                     canSend -> if (cm.busy.value) "queue" else "send"
-                                    listening -> "stop listening"
-                                    else -> "voice input"
+                                    else -> "stop"
                                 },
                                 modifier = Modifier.size(20.dp),
                             )
@@ -1401,21 +1332,6 @@ fun AssistantSettingsScreen(cm: ConnectionManager, nav: NavController) {
             // Everything they claimed to control is real on the Schedules screen: enabled is
             // pause, time is cron, model/provider/prompt are the recipe, and "run test now" is
             // Run now on the actual job.
-            // Android's assist gesture, not goose's Assistant thread -- they share a word and
-            // nothing else. It lives here because this is the page people look at when they want
-            // "the assistant" to do something, which is the only reason a settings item is ever
-            // hard to find.
-            SettingsSection("Device") {
-                SettingsNavRow("Set Grouse as device assistant",
-                    "Assist gesture / power-button hold opens voice Grouse (read-only).") {
-                    runCatching {
-                        ctx.startActivity(android.content.Intent(
-                            android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
-                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
-                }
-            }
-
             SettingsSection("Scheduled jobs") {
                 SettingsNavRow("Recipes",
                     cm.schedules.value.let { j ->
@@ -2910,22 +2826,6 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
             }
 
             SettingsSection("Notifications & background") {
-                var pushOn by remember { mutableStateOf(cm.store.pushEnabled) }
-                SettingsSwitchRow("Push notifications", pushOn) { on ->
-                    pushOn = on
-                    val act = ctx.findActivity()
-                    if (on && act != null) Push.enable(act) else Push.disable(ctx)
-                }
-                SettingCaption("Server-pushed briefings/alerts via your distributor (NextPush) — " +
-                    "no always-on socket, no FCM.")
-                val endpoint = cm.store.pushEndpoint
-                if (endpoint.isNotBlank()) {
-                    SelectionContainer {
-                        Text("Endpoint: $endpoint", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline)
-                    }
-                }
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
                 SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
                 SettingCaption("On: stay connected in the background (persistent notification, more battery). " +
                     "Off: connect while active; you still get a finished-turn notification.")
@@ -3035,58 +2935,6 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 model = cfg("VISION_MODEL"),
                 onModel = { cm.setServerConfig("VISION_MODEL", it) },
             )
-
-            // Speech is the odd one and says so rather than pretending: its providers are
-            // device-vs-LocalAI, not goose's, because Grouse makes these calls itself (goose has
-            // no TTS at all, and its dictation transcribes for goose's own UI rather than
-            // returning text to a client).
-            //
-            // "Speak replies aloud" USED TO BE A SEPARATE SWITCH sitting next to a "speak with
-            // LocalAI" switch, which is two controls for one question. The row's own toggle is
-            // now the feature -- on means replies are spoken -- and the provider picks what does
-            // the speaking. Nothing is spoken with it off, whichever provider is selected.
-            var sttProv by remember { mutableStateOf(if (cm.store.serverStt) "localai" else "device") }
-            var ttsProv by remember { mutableStateOf(if (cm.store.serverTts) "localai" else "device") }
-            ModelRow(
-                title = "Text to speech",
-                caption = "Reads each finished reply aloud. The device voice works offline; " +
-                    "LocalAI sounds better but needs the network, and a failed request falls " +
-                    "back to the device voice rather than going silent.",
-                enabled = cm.speakReplies.value,
-                onEnabled = { cm.setSpeakReplies(it) },
-                provider = ttsProv,
-                onProvider = { ttsProv = it; cm.store.serverTts = (it == "localai") },
-                providers = listOf("device", "localai"),
-                model = cm.store.ttsModel,
-                onModel = { cm.store.ttsModel = it },
-                showModel = ttsProv == "localai",
-            )
-            // No toggle: dictation is always available from the mic button, so the only question
-            // is which recogniser hears it.
-            ModelRow(
-                title = "Speech to text",
-                caption = "The device recogniser is offline and shows words as you say them; " +
-                    "LocalAI transcribes better but needs the network and only shows the text " +
-                    "once you stop talking.",
-                enabled = true, onEnabled = null,
-                provider = sttProv,
-                onProvider = { sttProv = it; cm.store.serverStt = (it == "localai") },
-                providers = listOf("device", "localai"),
-                model = cm.store.sttModel,
-                onModel = { cm.store.sttModel = it },
-                showModel = sttProv == "localai",
-            )
-
-            if (sttProv == "localai" || ttsProv == "localai") {
-                SettingsSection("LocalAI") {
-                    var laUrl by remember { mutableStateOf(cm.store.localAiUrl) }
-                    OutlinedTextField(laUrl, { laUrl = it; cm.store.localAiUrl = it },
-                        label = { Text("LocalAI URL") }, singleLine = true,
-                        modifier = Modifier.fillMaxWidth())
-                    SettingCaption("Grouse calls this directly, so it has to be reachable from " +
-                        "the phone — not only from the goose container.")
-                }
-            }
 
             SettingsSection("Catalog") {
                 SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }

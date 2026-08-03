@@ -14,6 +14,5 @@ class GooseApp : Application() {
             override fun onStart(owner: LifecycleOwner) = cm.setForeground(true)
             override fun onStop(owner: LifecycleOwner) = cm.setForeground(false)
         })
-        Push.refresh(this)                    // refresh the UnifiedPush endpoint if push is enabled
     }
 }
