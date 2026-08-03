@@ -3,4 +3,7 @@
      device-bound and never leaves the device, so a restored copy would be undecryptable. -->
 <full-backup-content>
     <exclude domain="sharedpref" path="goose_secure.xml" />
+    <!-- Chat transcript snapshots (cold-start repaint cache): private content, and the
+         server is the source of truth anyway - never ship them to cloud backup. -->
+    <exclude domain="file" path="transcripts" />
 </full-backup-content>

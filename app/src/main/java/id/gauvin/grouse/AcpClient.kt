@@ -50,6 +50,8 @@ data class SessionInfo(
     val updatedAt: String,
     val messageCount: Int,
     val model: String,
+    /** One-line preview of the last message (server-side, opt-in via includeLastMessageSnippet). */
+    val snippet: String = "",
     // Where the session's TOOLS run. No longer what a session belongs to -- see projectId.
     val cwd: String = "",
     /** True when this session was started from a recipe (session/list's `hasRecipe`).
@@ -228,10 +230,32 @@ sealed interface AcpEvent {
     /** `detail` is the tool's rawInput (command/args), same extraction the permission sheet already
      *  does — Desktop shows this; Grouse was discarding it and only showing `title`.
      *  `toolCallId` correlates later ToolCallUpdate events (status + output) to this call. */
-    data class ToolCall(val title: String, val detail: String = "", val toolCallId: String = "") : AcpEvent
+    data class ToolCall(
+        val title: String, val detail: String = "", val toolCallId: String = "",
+        // MCP-App fields, set when the tool_call carried _meta.goose.mcpApp: the server hosts
+        // an HTML template for this tool's output (autovisualiser's chart/sankey/radar/donut/
+        // treemap/chord/map/mermaid all work this way). appKey is "$ext|$uri" — the cache key.
+        // appInput is the tool's rawInput as JSON; the template extracts what it needs.
+        val appKey: String = "", val appUri: String = "", val appExt: String = "",
+        val appInput: String = "",
+    ) : AcpEvent
+    /** Reply to a _goose/unstable/resources/read issued for an MCP-App template. */
+    data class AppResource(val key: String, val html: String) : AcpEvent
     /** Progress for an in-flight tool call: status is in_progress/completed/failed; `output`
      *  carries the tool's result text when the update includes content (usually on completion). */
-    data class ToolCallUpdate(val toolCallId: String, val status: String, val output: String) : AcpEvent
+    /** `live=true` marks a streaming chunk (shell live_output): APPEND it to the tool's
+     *  output rather than replacing, and expect many per call. */
+    data class ToolCallUpdate(
+        val toolCallId: String, val status: String, val output: String,
+        val live: Boolean = false,
+    ) : AcpEvent
+    /** The session's active run started (runId set) or ended (null). Steering needs the id. */
+    data class ActiveRun(val sessionId: String, val runId: String?) : AcpEvent
+    /** probeSession reply. messageCount < 0 means the probe itself FAILED (dead socket or
+     *  vanished session) — reconnect, don't compare. */
+    data class Probe(val sessionId: String, val updatedAt: String?, val messageCount: Int) : AcpEvent
+    /** session/export reply: the session serialized for backup/sharing. */
+    data class SessionExport(val data: String) : AcpEvent
     /** A session's title/updatedAt changed server-side (auto-naming, a rename from any client). */
     data class SessionInfoChanged(val sessionId: String, val title: String?, val updatedAt: String?) : AcpEvent
     /** The session's approval mode changed (e.g. from another client). */
@@ -247,7 +271,11 @@ sealed interface AcpEvent {
      *  it may hold turns other clients (Desktop, deliver.sh) added while this app wasn't looking --
      *  so the UI drops its local copy and rebuilds from the replayed chunks. */
     object ReplayStart : AcpEvent
-    data class Error(val text: String) : AcpEvent
+    /** `background=true` means the failed call was NOT part of the visible turn (a sidebar
+     *  refresh, a config read). ConnectionManager must not put those in the transcript or
+     *  touch busy/turn state — a failed schedules/list once un-busied a live turn and left
+     *  an error bubble in an unrelated open chat. */
+    data class Error(val text: String, val background: Boolean = false) : AcpEvent
     data class Config(val options: List<ConfigOption>) : AcpEvent
     data class Ready(val sessionId: String) : AcpEvent
     data class Sessions(val list: List<SessionInfo>) : AcpEvent
@@ -337,6 +365,9 @@ class AcpClient(
     private val pendingPermissions = ConcurrentHashMap<String, JsonElement>()
     // Outstanding elicitation requests: requestKey -> the JSON-RPC id to answer.
     private val pendingElicitations = ConcurrentHashMap<String, JsonElement>()
+    // Recipe parameter requests share the elicitation FORM UI but not the response shape;
+    // ownership of a requestKey decides which reply respondElicitation() builds.
+    private val pendingRecipeParams = ConcurrentHashMap<String, JsonElement>()
     private val elicitSeq = AtomicInteger(1)
 
     /** Config values to re-apply once a session opens (persisted picks). id -> value. */
@@ -378,7 +409,11 @@ class AcpClient(
      *  `_meta.types` (goose ≥1.42) filters out scheduled sessions server-side; on older builds
      *  it's ignored and parseSessions() drops them client-side by title. */
     fun listSessions() = rpc("session/list", buildJsonObject {
-        putJsonObject("_meta") { putJsonArray("types") { add("user"); add("acp") } }
+        putJsonObject("_meta") {
+            putJsonArray("types") { add("user"); add("acp") }
+            // Opt-in: each entry's _meta then carries lastMessageSnippet for drawer previews.
+            putJsonObject("goose") { put("includeLastMessageSnippet", true) }
+        }
     })
 
     /** List goose projects. Reply arrives as [AcpEvent.Projects]. */
@@ -450,6 +485,43 @@ class AcpClient(
     fun listSkills() = rpc("_goose/unstable/sources/list",
         buildJsonObject { put("type", "skill") }, tag = SKILLS_TAG)
 
+    /** True once session/new or session/load has completed on this connection — the only
+     *  state in which session/prompt can succeed. Callers should QUEUE, not send, before it. */
+    val ready: Boolean get() = sessionId != null
+
+    /** Cheap liveness + freshness check: one session/info round trip. Doubles as a dead-socket
+     *  detector (no reply in a couple of seconds = the socket died while frozen and OkHttp
+     *  hasn't noticed) and a change detector (updatedAt/messageCount moved = another client
+     *  touched the session and a replay is worth its cost). Reply: AcpEvent.Probe. */
+    fun probeSession(sid: String) =
+        rpc("_goose/unstable/session/info", buildJsonObject { put("sessionId", sid) },
+            tag = "probe|$sid")
+
+    /** Inject a user message into the RUNNING turn (vs queueing until it ends). Needs the
+     *  runId from AcpEvent.ActiveRun; the server double-checks it so a just-ended run fails
+     *  cleanly rather than starting a stray turn. Text-only by design — steering mid-turn
+     *  with images has no sane rendering anyway. */
+    fun steer(text: String, runId: String) {
+        val sid = sessionId ?: return
+        rpc("_goose/unstable/session/steer", buildJsonObject {
+            put("sessionId", sid)
+            putJsonArray("prompt") { addJsonObject { put("type", "text"); put("text", text) } }
+            put("expectedRunId", runId)
+        })
+    }
+
+    /** Serialize a session for backup/sharing; reply arrives as AcpEvent.SessionExport. */
+    fun exportSession(sid: String) =
+        rpc("_goose/unstable/session/export", buildJsonObject { put("sessionId", sid) })
+
+    /** Fetch an MCP-App HTML template (ui://... resource) for a tool that declared one. */
+    fun readAppResource(key: String, uri: String, extensionName: String) {
+        val sid = sessionId ?: return
+        rpc("_goose/unstable/resources/read", buildJsonObject {
+            put("sessionId", sid); put("uri", uri); put("extensionName", extensionName)
+        }, tag = "appres|$key")
+    }
+
     /** Rewrite a skill. `path` identifies it, exactly as with projects. */
     fun updateSkill(path: String, name: String, description: String, content: String) =
         rpc("_goose/unstable/sources/update", buildJsonObject {
@@ -458,9 +530,12 @@ class AcpClient(
         })
 
     fun deleteSkill(path: String) =
+        // The #skill tag exists because projects and skills share this method: the untagged
+        // reply branch refreshes PROJECTS, so an untagged skill delete left stale skill rows
+        // until some unrelated refresh. Same mechanism as sources/list#skill.
         rpc("_goose/unstable/sources/delete", buildJsonObject {
             put("type", "skill"); put("path", path)
-        })
+        }, tag = "_goose/unstable/sources/delete#skill")
 
     fun pauseSchedule(id: String, paused: Boolean) =
         rpc("_goose/unstable/schedules/" + (if (paused) "pause" else "unpause"),
@@ -539,13 +614,13 @@ class AcpClient(
     // --- Explicit-target variants: operate on ANY session (the Assistant thread's tool
     // profile is edited from Settings without that session being the one on screen). ---
     fun listSessionExtensionsFor(target: String) {
-        val id = rpc("_goose/unstable/session/extensions/list",
-            buildJsonObject { put("sessionId", target) })
-        pendingExtListSids[id] = target
+        rpc("_goose/unstable/session/extensions/list",
+            buildJsonObject { put("sessionId", target) },
+            register = { pendingExtListSids[it] = target })
     }
     fun listToolsFor(target: String) {
-        val id = rpc("_goose/unstable/tools/list", buildJsonObject { put("sessionId", target) })
-        pendingToolListSids[id] = target
+        rpc("_goose/unstable/tools/list", buildJsonObject { put("sessionId", target) },
+            register = { pendingToolListSids[it] = target })
     }
     fun addSessionExtensionFor(target: String, extension: JsonObject) =
         rpc("_goose/unstable/session/extensions/add", buildJsonObject {
@@ -690,6 +765,19 @@ class AcpClient(
     /** Answer a pending elicitation. accept=true sends `values`; accept=false declines;
      *  values ignored when declining. Cancel (sheet dismissed) is decline=false+cancel. */
     fun respondElicitation(requestKey: String, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
+        // Recipe-params answers ride the same UI but a different wire shape:
+        // {action:"submit"|"cancel", values:{key:string}} — and values must be STRINGS
+        // (RecipeParamsResponse is HashMap<String,String> server-side).
+        pendingRecipeParams.remove(requestKey)?.let { id ->
+            respond(id, buildJsonObject {
+                if (cancelled || values == null) put("action", "cancel")
+                else {
+                    put("action", "submit")
+                    putJsonObject("values") { values.forEach { (k, v) -> put(k, v.content) } }
+                }
+            })
+            return
+        }
         val id = pendingElicitations.remove(requestKey) ?: return
         respond(id, buildJsonObject {
             when {
@@ -717,10 +805,18 @@ class AcpClient(
     /** @param tag what the reply dispatcher matches on. Defaults to the method, and differs
      *  only where one method serves two features -- `sources/list` backs both projects and
      *  skills, and the reply carries nothing that says which was asked for. */
-    private fun rpc(method: String, params: JsonObject, tag: String = method): Int {
+    private fun rpc(
+        method: String, params: JsonObject, tag: String = method,
+        // Correlation state that must exist BEFORE the frame is on the wire. A localhost
+        // reply can beat any bookkeeping done after send() returns — readConfig was
+        // rewritten for exactly this race; this hook makes the fix available to every call.
+        register: ((Int) -> Unit)? = null,
+    ): Int {
+        val sock = ws ?: return -1   // no socket: record nothing, so nothing leaks
         val id = nextId.getAndIncrement()
         pending[id] = tag
-        ws?.send(buildJsonObject {
+        register?.invoke(id)
+        sock.send(buildJsonObject {
             put("jsonrpc", "2.0"); put("id", id); put("method", method); put("params", params)
         }.toString())
         return id
@@ -729,6 +825,16 @@ class AcpClient(
     private fun respond(id: JsonElement, result: JsonObject) {
         ws?.send(buildJsonObject {
             put("jsonrpc", "2.0"); put("id", id); put("result", result)
+        }.toString())
+    }
+
+    /** JSON-RPC error reply. An unknown server request must get -32601, not an empty
+     *  result — `{}` is a structurally invalid response for every typed request (e.g.
+     *  fs/read_text_file expects `content`) and makes the failure the server's to debug. */
+    private fun respondError(id: JsonElement, code: Int, message: String) {
+        ws?.send(buildJsonObject {
+            put("jsonrpc", "2.0"); put("id", id)
+            putJsonObject("error") { put("code", code); put("message", message) }
         }.toString())
     }
 
@@ -747,7 +853,20 @@ class AcpClient(
                     // Purely additive — the standard usage_update still always fires regardless,
                     // so this can't regress anything already working.
                     putJsonObject("_meta") {
-                        putJsonObject("goose") { put("customNotifications", true) }
+                        putJsonObject("goose") {
+                            put("customNotifications", true)
+                            // Without this, session/new HARD-FAILS for any recipe that
+                            // declares parameters ("recipe requires parameters but the
+                            // client does not support recipeParameterRequests") — the
+                            // server refuses rather than degrades. The request arrives as
+                            // _goose/unstable/session/recipe/request-params and is rendered
+                            // through the same form UI as elicitations.
+                            put("recipeParameterRequests", true)
+                            // Free label quality: the server enriches tool_call titles for
+                            // clients that declare this (goose 1.45 feature). Read path is
+                            // unchanged — the enrichment arrives in the same `title` field.
+                            put("toolCallLabelEnrichment", true)
+                        }
                     }
                 }
             })
@@ -776,7 +895,11 @@ class AcpClient(
             when {
                 method != null && id != null -> serverRequest(method, id, obj["params"] as? JsonObject)
                 method != null -> notification(method, obj["params"] as? JsonObject)
-                id != null -> response(id.jsonPrimitive.intOrNull, obj["result"] as? JsonObject, obj["error"])
+                // Tolerate a string-typed id: the spec allows them, and a stringified int
+                // ("42") must still find its pending entry rather than silently leak it.
+                id != null -> response(
+                    (id as? JsonPrimitive)?.let { it.intOrNull ?: it.contentOrNull?.toIntOrNull() },
+                    obj["result"] as? JsonObject, obj["error"])
             }
         } catch (e: Exception) {
             onEvent(AcpEvent.Error("bad message: ${e.message}"))
@@ -786,7 +909,9 @@ class AcpClient(
     private fun response(id: Int?, result: JsonObject?, error: JsonElement?) {
         val method = id?.let { pending.remove(it) }   // ConcurrentHashMap rejects a null key
         if (error != null && error !is JsonNull) {
-            id?.let { pendingConfigKeys.remove(it) }   // an errored config/read never reaches its dispatch — clean its key map so it can't leak
+            // An errored call never reaches its dispatch — clean every per-id side map here
+            // or the entries leak (and a stale sid mapping mislabels a later reply).
+            id?.let { pendingConfigKeys.remove(it); pendingExtListSids.remove(it); pendingToolListSids.remove(it) }
             // A stale/expired session can't be resumed — fall back to a fresh one.
             if (method == "session/load") { replaying = false; startNewSession(); return }
             // Info probe failed (very old goose?): resume with /state rather than hanging.
@@ -803,7 +928,35 @@ class AcpClient(
                 }
                 return
             }
-            onEvent(AcpEvent.Error("$method: $error")); return
+            // A failed template fetch must clear the in-flight marker (via AppResource) or the
+            // bubble is wedged forever and no retry can ever start — not become an error bubble.
+            if (method != null && method.startsWith("appres|")) {
+                onEvent(AcpEvent.AppResource(method.substringAfter('|'), "")); return
+            }
+            // A failed probe IS its answer: the session (or socket) is gone — reconnect.
+            if (method != null && method.startsWith("probe|")) {
+                onEvent(AcpEvent.Probe(method.substringAfter('|'), null, -1)); return
+            }
+            // Only the calls whose failure IS the turn's failure belong in the transcript;
+            // everything else is a background refresh whose error must not corrupt the chat.
+            // steer is foreground: a failed steer means the user's message did NOT reach the
+            // model, which they must see (typically the run ended between typing and sending).
+            val foreground = method == "session/prompt" || method == "session/new" ||
+                method == "_goose/unstable/session/steer"
+            onEvent(AcpEvent.Error("$method: $error", background = !foreground)); return
+        }
+        // MCP-App template fetch: tag carries the cache key because several tools can share
+        // one template and several bubbles can wait on one fetch.
+        if (method != null && method.startsWith("appres|")) {
+            val key = method.substringAfter('|')
+            // ReadResourceResponse nests MCP's ReadResourceResult under "result":
+            // { result: { contents: [{ uri, mimeType, text }] } }
+            val html = ((result?.get("result") as? JsonObject)?.get("contents") as? JsonArray)
+                ?.firstNotNullOfOrNull {
+                    (it as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
+                }
+            onEvent(AcpEvent.AppResource(key, html ?: ""))
+            return
         }
         when (method) {
             "initialize" -> {
@@ -875,6 +1028,7 @@ class AcpClient(
             // create/assign replies carry no useful body; re-list so the drawer reflects them.
             "_goose/unstable/sources/create" -> listProjects()
             "_goose/unstable/sources/delete" -> listProjects()
+            "_goose/unstable/sources/delete#skill" -> listSkills()
             "_goose/unstable/session/project/update" -> listProjects()
             "_goose/unstable/config/extensions/list" -> onEvent(AcpEvent.Extensions(parseExtensions(result)))
             // After a toggle, re-list so the UI reflects the new enabled state.
@@ -921,6 +1075,10 @@ class AcpClient(
             }
             // Rename returns empty; re-list so every consumer sees the new title.
             "_goose/unstable/session/rename" -> listSessions()
+            "_goose/unstable/session/steer" -> {}   // the steered message streams back as chunks
+            "_goose/unstable/session/export" ->
+                result?.get("data")?.jsonPrimitive?.contentOrNull
+                    ?.let { onEvent(AcpEvent.SessionExport(it)) }
             "_goose/unstable/tools/call" -> {
                 val texts = (result?.get("content") as? JsonArray).orEmpty().mapNotNull {
                     (it as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
@@ -956,6 +1114,14 @@ class AcpClient(
             "session/set_mode" -> {}
             "session/prompt" ->
                 onEvent(AcpEvent.TurnDone(result?.get("stopReason")?.jsonPrimitive?.contentOrNull ?: "end"))
+            else -> if (method?.startsWith("probe|") == true) {
+                // Probe reply: list-style metadata without loading the conversation.
+                val s = result?.get("session") as? JsonObject
+                onEvent(AcpEvent.Probe(
+                    method.substringAfter('|'),
+                    s?.get("updatedAt")?.jsonPrimitive?.contentOrNull,
+                    (s?.get("_meta") as? JsonObject)?.get("messageCount")?.jsonPrimitive?.intOrNull ?: 0))
+            }
         }
     }
 
@@ -1113,6 +1279,7 @@ class AcpClient(
                 updatedAt = o["updatedAt"]?.jsonPrimitive?.contentOrNull ?: "",
                 messageCount = meta?.get("messageCount")?.jsonPrimitive?.intOrNull ?: 0,
                 model = meta?.get("modelId")?.jsonPrimitive?.contentOrNull ?: "",
+                snippet = meta?.get("lastMessageSnippet")?.jsonPrimitive?.contentOrNull ?: "",
                 cwd = o["cwd"]?.jsonPrimitive?.contentOrNull ?: "",
                 hasRecipe = meta?.get("hasRecipe")?.jsonPrimitive?.booleanOrNull ?: false,
                 projectId = meta?.get("projectId")?.jsonPrimitive?.contentOrNull,
@@ -1193,7 +1360,17 @@ class AcpClient(
         // history (see AcpEvent.ReplayStart). Suppression used to guard a socket blip against
         // duplicate bubbles, but it couldn't tell "what I already show" from "turns another client
         // added while I was away", so those turns were silently dropped.
-        fun text() = (update["content"] as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
+        // Non-text content blocks (image/audio/resource_link) used to vanish entirely; a
+        // placeholder keeps the message's existence visible even when we can't render it.
+        fun text(): String? {
+            val c = update["content"] as? JsonObject ?: return null
+            return when (val type = c["type"]?.jsonPrimitive?.contentOrNull) {
+                "text", null -> c["text"]?.jsonPrimitive?.contentOrNull
+                "resource_link" -> "[resource: ${c["name"]?.jsonPrimitive?.contentOrNull
+                    ?: c["uri"]?.jsonPrimitive?.contentOrNull ?: "unnamed"}]"
+                else -> "[$type]"
+            }
+        }
         fun msgId() = ((update["_meta"] as? JsonObject)?.get("goose") as? JsonObject)
             ?.get("messageId")?.jsonPrimitive?.contentOrNull
         when (tag) {
@@ -1203,13 +1380,32 @@ class AcpClient(
             // Thoughts stream live (own collapsible bubble); skipped in a rebuilt transcript.
             "agent_thought_chunk" -> if (!replaying) text()?.let { onEvent(AcpEvent.ThoughtChunk(it)) }
             "tool_call" -> {
-                val toolName = (((update["_meta"] as? JsonObject)?.get("goose") as? JsonObject)
-                    ?.get("toolCall") as? JsonObject)?.get("toolName")?.jsonPrimitive?.contentOrNull
+                val goose = (update["_meta"] as? JsonObject)?.get("goose") as? JsonObject
+                val toolName = (goose?.get("toolCall") as? JsonObject)
+                    ?.get("toolName")?.jsonPrimitive?.contentOrNull
                 val rawInput = update["rawInput"] as? JsonObject
-                // `as? JsonPrimitive` (not .jsonPrimitive) so a tool whose `data` arg is an
-                // object/array is simply treated as a normal tool call, not a crash.
-                val chartData = (rawInput?.get("data") as? JsonPrimitive)?.contentOrNull
-                if (toolName == "autovisualiser__show_chart" && chartData != null) {
+                // MCP-App path: the server names a UI resource for this tool's output and the
+                // client is expected to fetch + render it. This is how ALL the autovisualiser
+                // types work, not just charts — sankey/radar/map/mermaid never had a bespoke
+                // branch here, which is why they showed as bare tool calls.
+                val mcpApp = goose?.get("mcpApp") as? JsonObject
+                val appUri = mcpApp?.get("resourceUri")?.jsonPrimitive?.contentOrNull
+                val appExt = mcpApp?.get("extensionName")?.jsonPrimitive?.contentOrNull
+                // Legacy fallback only (server too old to send mcpApp meta): `data` arrives as
+                // an OBJECT, not a string — reading only the primitive form silently disabled
+                // every chart once.
+                val chartData = when (val d = rawInput?.get("data")) {
+                    is JsonObject -> d.toString()
+                    is JsonPrimitive -> d.contentOrNull
+                    else -> null
+                }
+                if (appUri != null && appExt != null) {
+                    onEvent(AcpEvent.ToolCall(
+                        update["title"]?.jsonPrimitive?.contentOrNull ?: "tool call",
+                        toolCallId = update["toolCallId"]?.jsonPrimitive?.contentOrNull ?: "",
+                        appKey = "$appExt|$appUri", appUri = appUri, appExt = appExt,
+                        appInput = rawInput?.toString() ?: "{}"))
+                } else if (toolName == "autovisualiser__show_chart" && chartData != null) {
                     onEvent(AcpEvent.Chart(chartData))
                 } else {
                     // Same rawInput.command-first extraction the permission sheet already does —
@@ -1234,6 +1430,18 @@ class AcpClient(
             "tool_call_update" -> {
                 val id = update["toolCallId"]?.jsonPrimitive?.contentOrNull ?: return
                 val status = update["status"]?.jsonPrimitive?.contentOrNull ?: ""
+                // Streaming shell output rides _meta.toolNotification (tagged union; the
+                // live_output variant carries {params:{chunks:[{stream,output}]}}). Without
+                // this a long shell run is a blank chip until it finishes.
+                val notif = (update["_meta"] as? JsonObject)?.get("toolNotification") as? JsonObject
+                if (notif?.get("type")?.jsonPrimitive?.contentOrNull == "live_output") {
+                    val chunk = ((notif["params"] as? JsonObject)?.get("chunks") as? JsonArray)
+                        .orEmpty().mapNotNull {
+                            (it as? JsonObject)?.get("output")?.jsonPrimitive?.contentOrNull
+                        }.joinToString("")
+                    if (chunk.isNotEmpty()) onEvent(AcpEvent.ToolCallUpdate(id, status, chunk, live = true))
+                    return
+                }
                 // content: [{type:"content", content:{type:"text", text:...}}, ...]
                 val output = (update["content"] as? JsonArray).orEmpty().mapNotNull { el ->
                     ((el as? JsonObject)?.get("content") as? JsonObject)
@@ -1243,6 +1451,13 @@ class AcpClient(
             }
             "session_info_update" -> {
                 val sid = params["sessionId"]?.jsonPrimitive?.contentOrNull ?: return
+                // This notification is overloaded: title updates, active-run lifecycle, and
+                // queued-steer acks share one tag, distinguished only by which _meta.goose
+                // keys are present. activeRunId is what makes session/steer possible at all.
+                val gm = (update["_meta"] as? JsonObject)?.get("goose") as? JsonObject
+                if (gm?.containsKey("activeRunId") == true) {
+                    onEvent(AcpEvent.ActiveRun(sid, gm["activeRunId"]?.jsonPrimitive?.contentOrNull))
+                }
                 onEvent(AcpEvent.SessionInfoChanged(
                     sid,
                     update["title"]?.jsonPrimitive?.contentOrNull,
@@ -1271,7 +1486,14 @@ class AcpClient(
             // which tools reach here; we just present the decision.
             val tc = params?.get("toolCall") as? JsonObject
             val toolCallId = tc?.get("toolCallId")?.jsonPrimitive?.contentOrNull
-            if (toolCallId == null) { respond(id, buildJsonObject {}); return }
+            if (toolCallId == null) {
+                // A permission we can't correlate can't be asked — answer with a VALID
+                // cancelled outcome, not `{}` (which is not a RequestPermissionResponse).
+                respond(id, buildJsonObject {
+                    putJsonObject("outcome") { put("outcome", "cancelled") }
+                })
+                return
+            }
             val title = tc["title"]?.jsonPrimitive?.contentOrNull ?: "tool"
             val detail = (tc["rawInput"] as? JsonObject)?.let { ri ->
                 ri["command"]?.jsonPrimitive?.contentOrNull ?: ri.toString()
@@ -1322,8 +1544,37 @@ class AcpClient(
                 params["message"]?.jsonPrimitive?.contentOrNull ?: "Input requested",
                 schema["title"]?.jsonPrimitive?.contentOrNull ?: "",
                 fields))
+        } else if (method == "_goose/unstable/session/recipe/request-params") {
+            // A recipe with declared parameters, started via _meta.recipeId. Rendered through
+            // the SAME form UI as elicitations (the field model maps 1:1); the answer is routed
+            // back here by which pending map owns the requestKey, because the response shapes
+            // differ: {action: "submit"|"cancel", values:{...}} vs elicitation's accept/content.
+            // NOTE the params envelope is camelCase but each parameter DTO is snake_case
+            // (input_type) — the recipes family's usual casing split.
+            val fields = (params?.get("parameters") as? JsonArray).orEmpty().mapNotNull { el ->
+                val o = el as? JsonObject ?: return@mapNotNull null
+                val key = o["key"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                val default = o["default"]?.jsonPrimitive?.contentOrNull
+                val desc = o["description"]?.jsonPrimitive?.contentOrNull ?: ""
+                AcpEvent.ElicitField(
+                    name = key,
+                    type = o["input_type"]?.jsonPrimitive?.contentOrNull ?: "string",
+                    title = key,
+                    // No `default` slot in the form model — surface it in the description so
+                    // the value is at least visible and copyable.
+                    description = if (default != null) "$desc (default: $default)" else desc,
+                    options = (o["options"] as? JsonArray).orEmpty().mapNotNull {
+                        it.jsonPrimitive.contentOrNull?.let { v -> Choice(v, v) }
+                    },
+                    required = o["requirement"]?.jsonPrimitive?.contentOrNull == "required",
+                )
+            }
+            val key = "recipeparams-${elicitSeq.getAndIncrement()}"
+            pendingRecipeParams[key] = id
+            onEvent(AcpEvent.Elicitation(key, "This recipe needs parameters", "Recipe parameters", fields))
         } else {
-            respond(id, buildJsonObject {})   // unknown request: empty result so the agent doesn't hang
+            // Unknown server request: a real JSON-RPC error, not `{}` — see respondError.
+            respondError(id, -32601, "not supported by this client: $method")
         }
     }
 }

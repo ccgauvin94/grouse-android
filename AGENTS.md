@@ -93,6 +93,22 @@ re-files sessions, and it has re-homed the assistant thread into the wrong direc
 `user` session; absent, it is `acp`. Desktop lists only `user` and `scheduled`, so omitting that
 field makes every chat this app creates invisible in Desktop.
 
+**MCP-App visualizations are server-hosted HTML, rendered client-side.** A tool_call whose
+`_meta.goose.mcpApp` names a `resourceUri` + `extensionName` (all eight autovisualiser types)
+expects the client to fetch the template via `_goose/unstable/resources/read` and render it.
+The template speaks JSON-RPC over postMessage to its PARENT frame (`ui/initialize` →
+`initialized` → `ui/notifications/tool-input` with the tool's arguments; height comes back as
+`ui/notifications/size-changed`), so it must live in an iframe — a bare WebView is its own
+parent and the handshake loops back to itself. `McpAppView` hosts the relay page. Do not try
+goose's `/mcp-app-proxy` route from the app: it is loopback-only by design. Also: the chart
+tool's `data` argument arrives as a JSON OBJECT — parsing it only as a string once disabled
+every chart silently.
+
+**`session_info_update` is three notifications wearing one tag.** Title/rename updates,
+active-run lifecycle (`_meta.goose.activeRunId` — what makes `session/steer` possible), and
+queued-steer acks are distinguished only by which `_meta.goose` keys are present. Parse by
+key presence, never assume the payload shape from the tag.
+
 **Utility features get a session of their own, not the chat's.** `scanWithScratchSession` (code
 scan) and `openBrowser` (directory picker) each open a private ACP session with cwd
 `DEFAULT_CWD`, because both are reached from the drawer, where a chat is usually not open —

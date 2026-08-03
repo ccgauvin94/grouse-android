@@ -37,6 +37,12 @@ data class ChatMessage(
     // rather than as one "latest" value so long-pressing any reply can show its own numbers;
     // replayed history has none, because the server transcript does not carry them.
     val usage: AcpEvent.MessageUsage? = null,
+    // MCP-App ("mcpapp" role) only: the server-hosted template that renders this tool's output,
+    // and the cache key it was fetched under. `detail` holds the tool input JSON the template
+    // consumes. appHtml is empty while the fetch is in flight — the renderer shows a plain tool
+    // row until it lands, and forever if it never does.
+    val appKey: String = "",
+    val appHtml: String = "",
 )
 
 /**
@@ -191,6 +197,11 @@ class ConnectionManager private constructor(context: Context) {
                         if (ev.roots.isNotEmpty()) browseRoots.value = ev.roots
                     }
                     is AcpEvent.Error -> browserBusy.value = false
+                    // This client has no UI for approvals/forms — ANSWER (cancel) rather than
+                    // ignore, or the server request sits unresolved forever. Both had been
+                    // falling into the else branch, which is exactly that hang.
+                    is AcpEvent.Permission -> browserClient?.respondPermission(ev.toolCallId, null)
+                    is AcpEvent.Elicitation -> browserClient?.respondElicitation(ev.requestKey, null, cancelled = true)
                     else -> {}
                 }
             }
@@ -258,6 +269,19 @@ class ConnectionManager private constructor(context: Context) {
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
     val elicitations = mutableStateListOf<AcpEvent.Elicitation>() // pending input forms, oldest first
+    // Last background RPC failure (sidebar refresh, config read...). Shown as a toast by the
+    // UI and cleared; never a transcript bubble. See the AcpEvent.Error handler.
+    val backgroundNotice = mutableStateOf<String?>(null)
+    // The current session's running turn id (from session_info_update's activeRunId _meta).
+    // Non-null while a run is live == steering is possible; cleared on TurnDone.
+    private var activeRunId: String? = null
+    // Resume-probe correlation: bumped per probe AND per reply, so a stale timeout can't
+    // fire after its probe was answered. syncStamp is the last known (updatedAt, count) —
+    // null means "no baseline", which a probe records without triggering a replay.
+    private var probeToken = 0
+    private var syncStamp: Pair<String?, Int>? = null
+    // A session/export result waiting for the UI to hand to the Android share sheet.
+    val exportData = mutableStateOf<String?>(null)
     // Handed in by OS entry points (share sheet, shortcut, tile), consumed by the UI.
     val pendingShareText = mutableStateOf<String?>(null)
     val pendingShareImages = mutableStateListOf<ImageBlock>()
@@ -415,6 +439,11 @@ class ConnectionManager private constructor(context: Context) {
     private val main = Handler(Looper.getMainLooper())
     private var client: AcpClient? = null
     private var clientGen = 0   // bumped per open(); drops events from superseded clients
+    // MCP-App template cache: "$extension|$uri" -> HTML. Templates are static per server
+    // version and shared across tools/messages/sessions, so one fetch serves everything —
+    // including transcript replays, which re-emit every historical tool_call.
+    private val appHtmlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val appFetchInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var streamingRole: String? = null
     private var live = false
     private var connecting = false
@@ -542,6 +571,10 @@ class ConnectionManager private constructor(context: Context) {
         sessions.value = sessions.value.filterNot { it.sessionId == sessionId }   // optimistic
         if (sessionId == store.assistantSessionId) store.assistantSessionId = null
     }
+
+    /** Serialize a session server-side; the reply lands in [exportData] and the UI opens the
+     *  Android share sheet with it. */
+    fun exportSession(sessionId: String) { client?.exportSession(sessionId) }
 
     /** Publish this device's UnifiedPush endpoint into goose's config.yaml (server-side),
      *  where deliver.sh prefers it over the static .env value -- endpoint rotation then
@@ -693,8 +726,9 @@ class ConnectionManager private constructor(context: Context) {
                     is AcpEvent.DirectToolResult ->
                         if (ev.isError) finish(ev.text.ifBlank { "tool call failed" }, ev.text)
                         else finish(null, ev.text)
-                    // No UI here — never let a form request hang the utility call.
+                    // No UI here — never let a form OR approval request hang the utility call.
                     is AcpEvent.Elicitation -> boot?.respondElicitation(ev.requestKey, null, cancelled = true)
+                    is AcpEvent.Permission -> boot?.respondPermission(ev.toolCallId, null)
                     is AcpEvent.Error -> finish(ev.text, "")
                     else -> {}
                 }
@@ -959,10 +993,20 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun dispatch(text: String, images: List<ImageBlock>) {
-        if (live && !turnInFlight) {
+        // `ready` gate: between reconnect and replay-complete the socket is live but has no
+        // bound session — a send in that window used to ERROR ("not ready — no session")
+        // instead of queueing, which was the visible "app must reconnect" failure. Queue;
+        // the Ready handler flushes.
+        if (live && client?.ready == true && !turnInFlight) {
             turnInFlight = true
             lastSessionId?.let { store.pendingPushSessionId = it }
             client?.sendPrompt(text, images, expect = currentSession.value)
+        } else if (live && client?.ready == true && activeRunId != null && images.isEmpty()) {
+            // A turn is running AND we know its run id: STEER — inject into the live turn
+            // instead of waiting for it to end. The server validates the id, so a run that
+            // ended between typing and sending fails loudly (foreground error) rather than
+            // spawning a stray turn. Images still queue: steering is text-only by design.
+            client?.steer(text, activeRunId!!)
         } else if (live) {
             // A turn is already running. Queue rather than firing a second sendPrompt into the
             // same session -- concurrent prompts interleave in the transcript and the second
@@ -1019,14 +1063,26 @@ class ConnectionManager private constructor(context: Context) {
         if (fg) {
             notifier.cancelAlert()
             ensureConnected()
-            // Even with the socket still alive, this session may have moved on without us: goosed
-            // only streams a turn to the connection that prompted it, so anything another client
-            // (Desktop, deliver.sh) added while we were backgrounded is invisible until a
-            // session/load replay. Reopen the current session to resync -- idle-only, so a turn
-            // this app is actually streaming is never yanked. ensureConnected() above covers the
-            // dropped-socket case (its resume now always replays too).
+            // This block used to REOPEN THE SESSION UNCONDITIONALLY on every foreground —
+            // a 2-second alt-tab paid a full session/load replay of the whole transcript,
+            // which is exactly the "whole app reconnects every time I look away" complaint.
+            // Now: one cheap session/info probe. Three outcomes:
+            //   reply, nothing changed  -> do nothing (the overwhelmingly common case)
+            //   reply, updatedAt/count moved -> another client touched the session; replay
+            //   no reply in 2.5s        -> socket died while frozen and OkHttp hasn't
+            //                              noticed (`live` is stale) — force a reconnect,
+            //                              which ensureConnected can't do (it trusts `live`).
             if (live && !busy.value && !turnInFlight) {
-                (lastSessionId ?: store.lastSessionId)?.let { open(resume = it) }
+                (lastSessionId ?: store.lastSessionId)?.let { sid ->
+                    val tok = ++probeToken
+                    client?.probeSession(sid)
+                    main.postDelayed({
+                        if (tok == probeToken && appForeground && !turnInFlight) {
+                            live = false
+                            open(resume = sid)
+                        }
+                    }, 2_500)
+                }
             }
             // Re-ask the server for its model list every time we come back. It was previously
             // fetched ONCE per provider per connection (guarded by liveModelsFetchedFor, which
@@ -1040,8 +1096,11 @@ class ConnectionManager private constructor(context: Context) {
                     ?.let { client?.listSupportedModels(it) }
             }
             if (!store.persistentConnection && !busy.value) stopService()
-        } else if (store.persistentConnection) {
-            startService()
+        } else {
+            // Losing focus is the last reliable moment before a possible process kill —
+            // snapshot the transcript now so a cold relaunch can repaint it instantly.
+            saveTranscriptCache()
+            if (store.persistentConnection) startService()
         }
     }
 
@@ -1097,7 +1156,47 @@ class ConnectionManager private constructor(context: Context) {
         permissions.remove(p)
     }
 
+    // --- Transcript snapshot cache ---------------------------------------------------------
+    // The replay buffer keeps the transcript on screen through a live reconnect, but it can't
+    // help when Android kills the process: a cold start has an empty `messages` and the user
+    // stares at the full-screen "Connecting…" until session/load finishes replaying. Snapshot
+    // the text bubbles to disk on every focus loss, and seed `messages` from the snapshot when
+    // a resume starts with an empty transcript — the replay then swaps in the server truth
+    // through the existing buffer without the blank screen ever appearing.
+    private fun transcriptCacheFile(sid: String): java.io.File =
+        java.io.File(java.io.File(appContext.filesDir, "transcripts").apply { mkdirs() },
+            sid.replace(Regex("[^A-Za-z0-9_-]"), "_") + ".json")
+
+    private fun saveTranscriptCache() {
+        val sid = currentSession.value ?: lastSessionId ?: return
+        if (replayActive.value) return   // mid-replay: `messages` is the OLD transcript
+        // Text bubbles only: tool cards, MCP-app views and usage stats don't survive a replay
+        // either, so caching them would just make the swap-in visibly churn.
+        val snap = messages.filter { (it.role == "user" || it.role == "assistant") && it.text.isNotBlank() }
+            .takeLast(60)
+        if (snap.isEmpty()) return
+        runCatching {
+            val arr = org.json.JSONArray()
+            snap.forEach { m -> arr.put(org.json.JSONObject().put("r", m.role).put("t", m.text)) }
+            transcriptCacheFile(sid).writeText(arr.toString())
+        }
+    }
+
+    private fun loadTranscriptCache(sid: String): List<ChatMessage> = runCatching {
+        val f = transcriptCacheFile(sid)
+        if (!f.exists()) return emptyList()
+        val arr = org.json.JSONArray(f.readText())
+        (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            ChatMessage(o.getString("r"), o.getString("t"))
+        }
+    }.getOrElse { emptyList() }
+
     private fun open(resume: String?, cwd: String? = null, kind: SessionKind? = null) {
+        // Cold start (or session switch): paint the cached transcript immediately so the reader
+        // sees content, not a Connecting screen, while the replay rebuilds the real one.
+        if (resume != null && messages.isEmpty())
+            loadTranscriptCache(resume).takeIf { it.isNotEmpty() }?.let { messages.addAll(it) }
         // If a reset/create-assistant is pending but THIS open() isn't the one it scheduled
         // (clientGen+1 != resetGen), a different navigation superseded it — abandon it so a later
         // unrelated Ready can't complete a stale rename.
@@ -1173,24 +1272,83 @@ class ConnectionManager private constructor(context: Context) {
                 }
             }
             is AcpEvent.Error -> {
-                messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false; turnInFlight = false
-                compacting.value = false   // safety net: a dropped/garbled status must never stick
-                if (voiceReplyPending) { voiceReplyPending = false; restoreModel() }
+                if (ev.background) {
+                    // A failed sidebar/config refresh is not the conversation's problem: no
+                    // transcript bubble, and ABOVE ALL no busy/turn-state reset — that reset
+                    // once cancelled a live turn because a schedules poll errored.
+                    // But the flags those calls set MUST clear, or the failure sticks: a dead
+                    // tools/list left `discovering` armed and the NEXT tools reply triggered a
+                    // spurious allowlist write; a dead extensions/list left the sheet spinning.
+                    if (ev.text.startsWith("_goose/unstable/tools/list")) discovering = null
+                    if (ev.text.startsWith("_goose/unstable/config/extensions/list")) extensionsBusy.value = false
+                    backgroundNotice.value = ev.text
+                    android.util.Log.w("Grouse", "background rpc error: ${ev.text}")
+                } else {
+                    messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false; turnInFlight = false
+                    compacting.value = false   // safety net: a dropped/garbled status must never stick
+                    if (voiceReplyPending) { voiceReplyPending = false; restoreModel() }
+                }
             }
             is AcpEvent.ToolCall -> {
-                t().add(ChatMessage("tool", ev.title, detail = ev.detail,
-                    toolCallId = ev.toolCallId, status = "in_progress"))
+                if (ev.appKey.isNotBlank()) {
+                    // Tool declared a server-hosted UI (autovisualiser et al). Add the bubble
+                    // immediately — with the template if cached, empty otherwise — and fetch
+                    // once per key no matter how many bubbles are waiting on it.
+                    t().add(ChatMessage("mcpapp", ev.title, detail = ev.appInput,
+                        toolCallId = ev.toolCallId, appKey = ev.appKey,
+                        appHtml = appHtmlCache[ev.appKey] ?: ""))
+                    if (!appHtmlCache.containsKey(ev.appKey) && appFetchInFlight.add(ev.appKey))
+                        client?.readAppResource(ev.appKey, ev.appUri, ev.appExt)
+                } else {
+                    t().add(ChatMessage("tool", ev.title, detail = ev.detail,
+                        toolCallId = ev.toolCallId, status = "in_progress"))
+                }
                 streamingRole = null
+            }
+            is AcpEvent.AppResource -> {
+                appFetchInFlight.remove(ev.key)
+                if (ev.html.isNotBlank()) {
+                    appHtmlCache[ev.key] = ev.html
+                    val tr = t()
+                    for (i in tr.indices)
+                        if (tr[i].role == "mcpapp" && tr[i].appKey == ev.key && tr[i].appHtml.isEmpty())
+                            tr[i] = tr[i].copy(appHtml = ev.html)
+                }
             }
             is AcpEvent.ToolCallUpdate -> {
                 if (ev.toolCallId.isNotBlank()) {
                     val i = t().indexOfLast { it.role == "tool" && it.toolCallId == ev.toolCallId }
                     if (i >= 0) t()[i] = t()[i].copy(
                         status = ev.status.ifBlank { t()[i].status },
-                        output = if (ev.output.isNotBlank()) ev.output else t()[i].output,
+                        // Live shell chunks APPEND (capped — a verbose build log must not grow
+                        // a transcript entry without bound); the final completion update still
+                        // replaces, so the finished chip shows the tool's real result.
+                        output = when {
+                            ev.live -> (t()[i].output + ev.output).takeLast(4000)
+                            ev.output.isNotBlank() -> ev.output
+                            else -> t()[i].output
+                        },
                     )
                 }
             }
+            is AcpEvent.ActiveRun -> {
+                // Only trust run ids for the session on screen — a notification for another
+                // session must not arm steering against the wrong run.
+                if (ev.sessionId == currentSession.value) activeRunId = ev.runId
+            }
+            is AcpEvent.Probe -> {
+                probeToken++   // cancels the pending dead-socket timeout
+                when {
+                    // The probe itself failed: session gone or socket dead — reconnect.
+                    ev.messageCount < 0 -> if (!turnInFlight) { open(resume = ev.sessionId) }
+                    // Baseline exists and moved: another client changed the session; replay.
+                    syncStamp != null && syncStamp != (ev.updatedAt to ev.messageCount) ->
+                        if (!busy.value && !turnInFlight) open(resume = ev.sessionId)
+                    // else: nothing changed — the 2-second alt-tab costs one info call.
+                }
+                syncStamp = ev.updatedAt to ev.messageCount
+            }
+            is AcpEvent.SessionExport -> exportData.value = ev.data
             is AcpEvent.SessionInfoChanged -> {
                 // Live title/updatedAt sync (auto-naming after the first turn, renames from any
                 // client) — previously only visible after a full session re-list.
@@ -1223,6 +1381,8 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.TurnDone -> {
                 streamingRole = null; compacting.value = false
                 turnInFlight = false
+                activeRunId = null   // the run this id named is over; steering it would fail
+                syncStamp = null     // our own turn changed the server state; re-baseline on next probe
                 // Drain one queued prompt, if any: send it and STAY busy, so the UI never flickers
                 // idle between a queue and its turn.
                 val queued = dequeue()

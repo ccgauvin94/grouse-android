@@ -310,6 +310,29 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
             onDecline = { cm.answerElicitation(e, null) },
             onCancel = { cm.answerElicitation(e, null, cancelled = true) })
     }
+
+    // Background RPC failures surface as a toast, not a transcript bubble — the chat is
+    // not where a failed sidebar refresh belongs.
+    val bgCtx = LocalContext.current
+    LaunchedEffect(cm.backgroundNotice.value) {
+        cm.backgroundNotice.value?.let {
+            Toast.makeText(bgCtx, it.take(200), Toast.LENGTH_SHORT).show()
+            cm.backgroundNotice.value = null
+        }
+    }
+
+    // A session export hands the JSON to the system share sheet — files app, Drive, whatever
+    // the user points it at. Text share deliberately: no FileProvider plumbing needed.
+    LaunchedEffect(cm.exportData.value) {
+        cm.exportData.value?.let { data ->
+            val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(android.content.Intent.EXTRA_TEXT, data)
+            }
+            bgCtx.startActivity(android.content.Intent.createChooser(intent, "Export session"))
+            cm.exportData.value = null
+        }
+    }
     cm.permissions.firstOrNull()?.let { req ->
         PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
     }
@@ -946,7 +969,13 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
             Column(Modifier.weight(1f)) {
                 Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(listOf("${s.messageCount} msgs", relativeTime(s.updatedAt))
+                // Last-message preview beats "N msgs" as a scent for which chat is which; the
+                // count/time line stays as the fallback when the server didn't send one.
+                if (s.snippet.isNotBlank())
+                    Text(s.snippet, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                else Text(listOf("${s.messageCount} msgs", relativeTime(s.updatedAt))
                     .filter { it.isNotBlank() }.joinToString("  ·  "),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline, maxLines = 1)
@@ -1034,6 +1063,7 @@ private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: 
                 Column {
                     TextButton(onClick = { mode = "rename" }) { Text("Rename…") }
                     TextButton(onClick = { mode = "move" }) { Text("Move to project…") }
+                    TextButton(onClick = { cm.exportSession(s.sessionId); onDone() }) { Text("Export…") }
                     TextButton(onClick = { mode = "archive" }) { Text("Archive…") }
                     TextButton(onClick = { mode = "delete" }) {
                         Text("Delete…", color = MaterialTheme.colorScheme.error)
@@ -1930,9 +1960,114 @@ fun MessageBubble(m: ChatMessage, streaming: Boolean = false, usage: AcpEvent.Me
         "tool" -> ToolChip(m)
         "error" -> ErrorBubble(m.text)
         "chart" -> ChartView(m.text)
+        "mcpapp" -> McpAppView(m)
         else -> AssistantBubble(m.text, streaming, usage)
     }
 }
+
+/**
+ * Renders a server-hosted MCP-App template (autovisualiser chart/sankey/radar/donut/treemap/
+ * chord/map/mermaid — anything whose tool_call carries _meta.goose.mcpApp).
+ *
+ * The template expects to live in an IFRAME and speak JSON-RPC over postMessage to its parent
+ * (see goose's mcp-app-bridge.js): it requests `ui/initialize`, announces `initialized`, then
+ * waits for a `ui/notifications/tool-input` carrying the tool's arguments, and reports its
+ * rendered height via `ui/notifications/size-changed`. A bare WebView can't be that parent —
+ * window.parent === window at the top level, so the guest's messages would loop back to
+ * itself. Hence the tiny HOST page: it iframes the guest via srcdoc (same-origin, so
+ * contentWindow is reachable), relays the protocol, and forwards height changes to Compose
+ * through a JS interface so the bubble grows to fit. goose's own /mcp-app-proxy route is
+ * loopback-only and can never serve a phone, which is why this is done client-side at all.
+ */
+@android.annotation.SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun McpAppView(m: ChatMessage) {
+    if (m.appHtml.isEmpty()) { ToolChip(m); return }   // fetch in flight, or failed: stay a tool row
+    val heightDp = remember(m.id) { androidx.compose.runtime.mutableIntStateOf(240) }
+    val dark = androidx.compose.foundation.isSystemInDarkTheme()
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(10.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                android.webkit.WebView(ctx).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    isVerticalScrollBarEnabled = false
+                    addJavascriptInterface(object {
+                        @android.webkit.JavascriptInterface fun guestHtml() = m.appHtml
+                        @android.webkit.JavascriptInterface fun toolInput() = m.detail.ifBlank { "{}" }
+                        @android.webkit.JavascriptInterface fun theme() = if (dark) "dark" else "light"
+                        @android.webkit.JavascriptInterface fun sizeChanged(h: Int) {
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                heightDp.intValue = h.coerceIn(120, 640)
+                            }
+                        }
+                        @android.webkit.JavascriptInterface fun log(msg: String) {
+                            android.util.Log.w("McpApp", msg)
+                        }
+                    }, "GrouseHost")
+                    // Guest console (iframe included) lands in logcat under "McpApp" too:
+                    // adb logcat -s McpApp
+                    webChromeClient = object : android.webkit.WebChromeClient() {
+                        override fun onConsoleMessage(c: android.webkit.ConsoleMessage): Boolean {
+                            android.util.Log.w("McpApp", "${c.messageLevel()} ${c.message()}")
+                            return true
+                        }
+                    }
+                    loadDataWithBaseURL(null, MCP_APP_HOST, "text/html", "utf-8", null)
+                }
+            },
+            modifier = Modifier.fillMaxWidth().height(heightDp.intValue.dp).padding(8.dp)
+        )
+    }
+}
+
+/** Host page for MCP-App guests: iframe + postMessage relay. See McpAppView. */
+private val MCP_APP_HOST = """
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{margin:0;padding:0;background:transparent}iframe{border:0;width:100%;display:block;height:224px}</style>
+</head><body><script>
+(function(){
+  var f = document.createElement('iframe');
+  function reply(msg){ if (f.contentWindow) f.contentWindow.postMessage(msg, '*'); }
+  window.addEventListener('message', function(ev){
+    var m = ev.data || {};
+    if (m.method === 'ui/initialize' && m.id != null) {
+      reply({jsonrpc:'2.0', id:m.id,
+             result:{hostContext:{theme:GrouseHost.theme(), displayMode:'inline'}}});
+    } else if (m.method === 'ui/notifications/initialized') {
+      var input; try { input = JSON.parse(GrouseHost.toolInput()); } catch(e) { input = {}; }
+      reply({jsonrpc:'2.0', method:'ui/notifications/tool-input', params:{arguments:input}});
+    } else if (m.method === 'ui/notifications/size-changed') {
+      var h = (m.params && m.params.height) || 0;
+      if (h > 0) { f.style.height = h + 'px'; GrouseHost.sizeChanged(Math.round(h)); }
+    } else if (m.id != null && m.method) {
+      // Answer anything else (display-mode requests etc.) with an empty result so no
+      // guest awaits a reply forever.
+      reply({jsonrpc:'2.0', id:m.id, result:{}});
+    }
+  });
+  f.addEventListener('load', function(){
+    try {
+      var w = f.contentWindow;
+      // Surface guest failures — an iframe error is otherwise a silent blank chart.
+      w.addEventListener('error', function(e){ GrouseHost.log('guest: ' + e.message); });
+      // Animations run on rAF, and rAF inside a nested srcdoc iframe stalls on some
+      // Android WebViews — Chart.js then paints axes/legend but freezes the data
+      // elements at t=0, i.e. a fully-drawn EMPTY chart. Static render sidesteps it.
+      if (w.Chart && w.Chart.defaults) w.Chart.defaults.animation = false;
+    } catch(e) { GrouseHost.log('hook: ' + e); }
+  });
+  f.srcdoc = GrouseHost.guestHtml();
+  document.body.appendChild(f);
+})();
+</script></body></html>
+""".trimIndent()
 
 /** Renders an autovisualiser chart spec (Chart.js JSON) in a WebView with bundled Chart.js. */
 @android.annotation.SuppressLint("SetJavaScriptEnabled")
@@ -2794,6 +2929,36 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
                 SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
                 SettingCaption("On: stay connected in the background (persistent notification, more battery). " +
                     "Off: connect while active; you still get a finished-turn notification.")
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                // The no-notification middle ground: a battery-optimization exemption keeps the
+                // process (and its socket) unfrozen in the background WITHOUT a foreground
+                // service. OS-granted, OS-revocable, OEM-dependent in how much it helps — but
+                // it directly extends how long a background blip stays a non-event.
+                val pm = ctx.getSystemService(android.content.Context.POWER_SERVICE)
+                    as android.os.PowerManager
+                var exempt by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
+                val owner2 = LocalLifecycleOwner.current
+                DisposableEffect(owner2) {
+                    val obs = LifecycleEventObserver { _, e ->
+                        if (e == Lifecycle.Event.ON_RESUME)
+                            exempt = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+                    }
+                    owner2.lifecycle.addObserver(obs)
+                    onDispose { owner2.lifecycle.removeObserver(obs) }
+                }
+                SettingsSwitchRow("Unrestricted battery", exempt) { want ->
+                    val intent = if (want && !exempt)
+                        android.content.Intent(
+                            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            android.net.Uri.parse("package:${ctx.packageName}"))
+                    else // revoking has no direct intent; open the app's battery settings
+                        android.content.Intent(
+                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.parse("package:${ctx.packageName}"))
+                    runCatching { ctx.startActivity(intent) }
+                }
+                SettingCaption("Exempts Grouse from the background app freezer so short absences " +
+                    "keep the connection — no notification needed. The system dialog asks for consent.")
             }
 
 

@@ -5,6 +5,8 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="goose_secure.xml" />
+        <!-- Transcript snapshots: private content, server holds the truth. -->
+        <exclude domain="file" path="transcripts" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="goose_secure.xml" />
