@@ -17,9 +17,9 @@ owns and the two disagreeing.
 Two consequences worth internalising:
 
 - **The phone shares no filesystem with the server.** A path that exists here does not exist
-  there, and vice versa. Anything that needs a server path (browsing directories, opening a
-  repo) has to ask the server for it — see `fs/list_directory`, which is bounded by
-  `GOOSE_BROWSE_ROOTS` on the server side.
+  there, and vice versa, so a path typed on the phone is a claim about a machine it cannot see.
+  On `master` there is exactly one such path — the configured working directory — and the user
+  supplies it; nothing else in the app reasons about server layout.
 - **Other clients exist.** Goose Desktop and the CLI talk to the same server and change the same
   sessions. Anything cached here can be made stale by a client this app cannot see.
 
