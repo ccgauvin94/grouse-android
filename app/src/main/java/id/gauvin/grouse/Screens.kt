@@ -132,6 +132,7 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
     var host by remember { mutableStateOf(cm.store.host) }
     var port by remember { mutableStateOf(cm.store.port) }
     var key by remember { mutableStateOf("") }
+    var workdir by remember { mutableStateOf(cm.store.workingDir) }
     var showKey by remember { mutableStateOf(false) }
     Scaffold(topBar = { TopAppBar(title = { Text("Connect to Grouse") }) }) { pad ->
         Column(
@@ -158,10 +159,17 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
                     TextButton(onClick = { showKey = !showKey }) { Text(if (showKey) "Hide" else "Show") }
                 },
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+            // goose refuses a session/new whose cwd is not absolute, and has no per-user default
+            // to fall back on, so this is asked for rather than guessed. It is the directory the
+            // agent's tools run in -- AGENTS.md is read from here up to the git root.
+            OutlinedTextField(workdir, { workdir = it }, label = { Text("Working directory") },
+                supportingText = { Text("Absolute path on the server, e.g. /home/you/projects") },
+                singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
             Spacer(Modifier.height(20.dp))
             Button(
-                onClick = { cm.connect(host.trim(), port.trim(), key.trim()); onConnected() },
-                enabled = key.isNotBlank() && host.isNotBlank(), modifier = Modifier.fillMaxWidth()
+                onClick = { cm.connect(host.trim(), port.trim(), key.trim(), workdir.trim()); onConnected() },
+                enabled = key.isNotBlank() && host.isNotBlank() && workdir.trim().startsWith("/"),
+                modifier = Modifier.fillMaxWidth()
             ) { Text("Connect") }
         }
     }
@@ -847,7 +855,7 @@ private fun prettyOption(raw: String) = when (raw) {
 // ---- Sessions ---------------------------------------------------------------
 
 /** The drawer's chats area: projects (collapsible groups of sessions, grouped by cwd —
- *  ConnectionManager.projectOf unifies /workspace with the Desktop cwd-shim spellings) on top,
+ *  grouped by goose's project id) on top,
  *  free chats below. The project list is the union of names seen in session cwds and the
  *  typed-recents store, so a just-created project with no sessions yet still shows.
  *  Tap opens a session; long-press offers Rename / Archive. Lives INSIDE ModalDrawerSheet —
@@ -1164,11 +1172,9 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     // projects (Cooking, Hacking, Inbox) whose sessions were filed by working directory and
     // never migrated -- dropping it would empty those screens.
     val projectId = cm.projects.value.firstOrNull { it.name.equals(project, true) }?.id
-    var picking by remember { mutableStateOf(false) }
     val chats = cm.sessions.value.filter { s ->
         ConnectionManager.sessionKind(s) != SessionKind.ASSISTANT &&
-            (if (projectId != null && s.projectId != null) s.projectId == projectId
-             else ConnectionManager.projectOf(s.cwd) == project)
+            projectId != null && s.projectId == projectId
     }
     Scaffold(topBar = {
         TopAppBar(
@@ -1187,28 +1193,12 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
                     modifier = Modifier.padding(start = 6.dp, top = 10.dp, bottom = 4.dp))
             }
             item {
-                // A ROOTED project (one carrying `root: <path>`) asks where first: its chats are
-                // pieces of work in a directory, and which directory is the whole point. An
-                // ordinary project just starts a chat -- its chats do not care where tools run.
-                val root = cm.projects.value.firstOrNull { it.id == projectId }?.root.orEmpty()
-                if (root.isNotBlank() && picking) DirectoryPicker(cm, startAt = root,
-                    onPick = { dir ->
-                        picking = false
-                        if (projectId != null) cm.newChatInProject(projectId, dir)
-                        goToChat()
-                    },
-                    onDismiss = { picking = false })
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    // File the new chat under the project. It must NOT create a session in
-                    // /home/colin/Projects/<name>: a virtual project has no directory there, and
-                    // session/new answers "invalid directory path" -- which is what opening any
-                    // project created since projects went virtual actually did.
+                    // Filing is by project id. A project is a TAG, not a directory -- creating
+                    // a session in a path named after it produced "invalid directory path" for
+                    // every project made since projects went virtual.
                     .clickable {
-                        when {
-                            root.isNotBlank() -> picking = true
-                            projectId != null -> { cm.newChatInProject(projectId); goToChat() }
-                            else -> { cm.newProjectDirSession(project); goToChat() }
-                        }
+                        projectId?.let { cm.newChatInProject(it); goToChat() }
                     }) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Add, contentDescription = null)
@@ -2502,25 +2492,11 @@ fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String, on
         Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
             .verticalScroll(rememberScrollState())) {
 
-            // Start it, optionally somewhere specific. The directory matters for a coding
-            // recipe and is meaningless for a briefing, so it is offered rather than required:
-            // blank uses the default, which is what a chat wants.
-            var whereOpen by remember { mutableStateOf(false) }
-            var where by remember { mutableStateOf("") }
-            if (whereOpen) DirectoryPicker(cm,
-                onPick = { d -> where = d; whereOpen = false },
-                onDismiss = { whereOpen = false })
             Row(Modifier.fillMaxWidth().padding(top = 8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Button(onClick = {
-                    cm.runRecipe(r.id, where.ifBlank { null }); onOpenChat()
+                    cm.runRecipe(r.id); onOpenChat()
                 }) { Text("Start session") }
-                Spacer(Modifier.width(12.dp))
-                // Browse for it rather than list guesses: the same picker a rooted project uses.
-                TextButton(onClick = { whereOpen = true }) {
-                    Text(where.ifBlank { "in default folder" }
-                        .let { it.substringAfterLast('/').ifBlank { it } })
-                }
             }
             if (r.description.isNotBlank()) {
                 Text(r.description, style = MaterialTheme.typography.bodySmall,
@@ -2819,9 +2795,13 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
                 OutlinedTextField(newKey, { newKey = it }, label = { Text("Replace secret key (optional)") },
                     singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                var wdir by remember { mutableStateOf(cm.store.workingDir) }
+                OutlinedTextField(wdir, { wdir = it }, label = { Text("Working directory") },
+                    supportingText = { Text("Absolute path on the server; new sessions start here") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
                 Button(onClick = {
                     val key = newKey.trim().ifBlank { cm.store.secretKey }
-                    cm.connect(host.trim(), port.trim(), key); nav.popBackStack()
+                    cm.connect(host.trim(), port.trim(), key, wdir.trim()); nav.popBackStack()
                 }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("Save & reconnect") }
             }
 
@@ -3128,93 +3108,9 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
 
 
 
-/** Pick a directory on the SERVER. Roots at the top, walk down, "Use this folder" to commit.
- *
- *  The phone shares no filesystem with the server, so a native picker is useless here and typing
- *  a path means knowing it exactly -- which is how starting a session in the right place stayed
- *  hard long after everything it needed existed. The server bounds where this can go
- *  (GOOSE_BROWSE_ROOTS); it refuses anything outside, and reports the parent as null at a root
- *  so there is nothing to walk up into. */
-@Composable
-fun DirectoryPicker(
-    cm: ConnectionManager,
-    startAt: String? = null,
-    onPick: (String) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    LaunchedEffect(Unit) { cm.openBrowser(startAt) }
-    DisposableEffect(Unit) { onDispose { cm.closeBrowser() } }
-    val path = cm.browserPath.value
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Choose a folder") },
-        text = {
-            Column(Modifier.heightIn(max = 420.dp)) {
-                Text(path.ifBlank { "…" }, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline)
-                if (cm.browserBusy.value) {
-                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 6.dp))
-                }
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                LazyColumn(Modifier.weight(1f)) {
-                    // Roots first when there is nowhere to go up to; they are the only way to
-                    // cross from one allowed tree into another.
-                    if (cm.browserParent.value == null && cm.browseRoots.value.size > 1) {
-                        items(cm.browseRoots.value, key = { "root:" + it }) { r ->
-                            Row(Modifier.fillMaxWidth().clickable { cm.browseTo(r) }
-                                .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Filled.Folder, contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(10.dp))
-                                Text(r, style = MaterialTheme.typography.bodyMedium)
-                            }
-                        }
-                    }
-                    cm.browserParent.value?.let { up ->
-                        item {
-                            Row(Modifier.fillMaxWidth().clickable { cm.browseTo(up) }
-                                .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null,
-                                    modifier = Modifier.size(18.dp),
-                                    tint = MaterialTheme.colorScheme.outline)
-                                Spacer(Modifier.width(10.dp))
-                                Text("..", style = MaterialTheme.typography.bodyMedium)
-                            }
-                        }
-                    }
-                    items(cm.browserDirs.value, key = { it }) { d ->
-                        Row(Modifier.fillMaxWidth().clickable { cm.browseTo(d) }
-                            .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Folder, contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.outline)
-                            Spacer(Modifier.width(10.dp))
-                            Text(d.substringAfterLast('/'), Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodyMedium)
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.outline)
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(enabled = path.isNotBlank(), onClick = { onPick(path) }) {
-                Text("Use this folder")
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
 
-// The Code screen stood here and is GONE. It was a second place for the same idea: a list of
-// coding projects, separate from Chats, with its own scan and its own new-session flow. One
-// project carrying `root: <path>` does the job inside Chats -- each codebase is a chat in it,
-// which is what a codebase actually is here, and there is one list of conversations again
-// rather than two that partition it.
-//
-// What it taught is kept: DirectoryPicker above is its file browser, and a project's root is
-// where that browser starts.
+// A Code screen and a server-side directory picker stood here and are GONE from this branch.
+// Both depended on _goose/unstable/fs/list_directory, which is a fork method rather than
+// something upstream goose answers, and on knowing this one server's layout. Sessions here are
+// filed by goose's own project id and run wherever the configured working directory points.
 

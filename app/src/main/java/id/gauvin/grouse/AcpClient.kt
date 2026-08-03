@@ -19,13 +19,6 @@ import java.util.concurrent.atomic.AtomicInteger
  * homedir shims). Safe to move sessions around because the assistant carries no
  * developer/shell extension, so its cwd is cosmetic.
  */
-const val DEFAULT_CWD = "/home/colin/Projects/Inbox"
-
-// There is deliberately NO code-root constant here. An earlier cut hardcoded "/workspace",
-// which is this one server's mount and nobody else's -- the app would have shown an empty Code
-// section against any other goose. The server reports its own browsable roots in the
-// fs/list_directory reply (GOOSE_BROWSE_ROOTS), and that is where they come from.
-
 /** A selectable value inside a [ConfigOption] (goose "select" config). */
 data class Choice(val value: String, val label: String)
 
@@ -284,17 +277,6 @@ sealed interface AcpEvent {
     data class Schedules(val list: List<ScheduleInfo>) : AcpEvent
     data class Recipes(val list: List<RecipeInfo>) : AcpEvent
     data class Skills(val list: List<SkillInfo>) : AcpEvent
-    /** Reply to listDirectory: directories under [path], plus the roots the SERVER is willing
-     *  to browse at all. The roots are the generalizable answer to "where does code live" --
-     *  server configuration, not a client guess. */
-    data class Directory(
-        val path: String,
-        val dirs: List<String>,
-        val files: List<String>,
-        val roots: List<String>,
-        /** The parent directory, or null at a root -- the server decides how far up you may go. */
-        val parent: String? = null,
-    ) : AcpEvent
     data class Extensions(val list: List<ExtInfo>) : AcpEvent
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
      *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
@@ -380,16 +362,16 @@ class AcpClient(
     /** The cwd to resume `resumeSessionId` with (session/load). Must match the session's actual
      *  working_dir -- session/load's cwd param silently REWRITES working_dir if it differs, so
      *  passing the wrong value here would un-scope a Code session back to whatever's passed. */
-    var resumeCwd: String = DEFAULT_CWD
+    var resumeCwd: String = ""
     /** False when the caller could NOT determine the session's real cwd: the client then asks
      *  the server (_goose/unstable/session/info) before session/load, instead of guessing --
      *  a wrong guess is a silent working_dir rewrite (this re-homed the assistant thread once). */
     var resumeCwdKnown: Boolean = true
     private var loadAwaitingInfo = false
-    /** The cwd for a brand-new session (session/new) when resumeSessionId is null. Defaults to
-     *  [DEFAULT_CWD] (the Inbox project) for Chat/Assistant; set a project path for anything
-     *  filed. Whatever this is becomes the session's project name in Goose Desktop. */
-    var desiredCwd: String = DEFAULT_CWD
+    /** The cwd for a brand-new session (session/new) when resumeSessionId is null. goose
+     *  validates this is ABSOLUTE and rejects anything else, so there is no sane built-in
+     *  default -- the caller supplies the user's configured working directory. */
+    var desiredCwd: String = ""
 
     /** Library id of a recipe to start the new session FROM. goose loads the recipe, applies its
      *  extensions/settings/instructions, and titles the session after it -- which is also how a
@@ -469,16 +451,6 @@ class AcpClient(
 
     /** List saved recipes. Reply arrives as [AcpEvent.Recipes]. */
     fun listRecipes() = rpc("_goose/unstable/recipes/list", buildJsonObject {})
-
-    /** List a server-side directory. Reply arrives as [AcpEvent.Directory].
-     *
-     *  Needs a sessionId even though it reads nothing session-specific, and is bounded by
-     *  GOOSE_BROWSE_ROOTS on the server -- a path outside those roots is refused rather than
-     *  listed, which is what makes it safe to point a phone at. */
-    fun listDirectory(target: String, path: String) =
-        rpc("_goose/unstable/fs/list_directory", buildJsonObject {
-            put("sessionId", target); put("path", path)
-        })
 
     /** List skills. Reply arrives as [AcpEvent.Skills]. Recipes are NOT listable this way --
      *  `sources/list` rejects type "recipe" outright; they have their own API above. */
@@ -999,21 +971,6 @@ class AcpClient(
             "_goose/unstable/schedules/list" -> onEvent(AcpEvent.Schedules(parseSchedules(result)))
             "_goose/unstable/recipes/list" -> onEvent(AcpEvent.Recipes(parseRecipes(result)))
             SKILLS_TAG -> onEvent(AcpEvent.Skills(parseSkills(result)))
-            "_goose/unstable/fs/list_directory" -> onEvent(AcpEvent.Directory(
-                result?.get("path")?.jsonPrimitive?.contentOrNull ?: "",
-                (result?.get("entries") as? JsonArray).orEmpty().mapNotNull { e ->
-                    val o = e as? JsonObject ?: return@mapNotNull null
-                    if (o["isDir"]?.jsonPrimitive?.booleanOrNull != true) null
-                    else o["path"]?.jsonPrimitive?.contentOrNull
-                },
-                (result?.get("entries") as? JsonArray).orEmpty().mapNotNull { e ->
-                    val o = e as? JsonObject ?: return@mapNotNull null
-                    if (o["isDir"]?.jsonPrimitive?.booleanOrNull == true) null
-                    else o["name"]?.jsonPrimitive?.contentOrNull
-                },
-                (result?.get("roots") as? JsonArray).orEmpty()
-                    .mapNotNull { it.jsonPrimitive.contentOrNull },
-                result?.get("parent")?.jsonPrimitive?.contentOrNull))
             "_goose/unstable/sources/update" -> listSkills()
             // Every mutation re-lists rather than patching local state: the server owns the
             // paused/running flags, and run-now in particular changes them without telling us.
@@ -1096,7 +1053,7 @@ class AcpClient(
                     ?.get("cwd")?.jsonPrimitive?.contentOrNull
                 if (loadAwaitingInfo) {
                     loadAwaitingInfo = false
-                    resumeCwd = cwd?.takeIf { it.isNotBlank() } ?: DEFAULT_CWD
+                    resumeCwd = cwd?.takeIf { it.isNotBlank() } ?: desiredCwd
                     resumeCwdKnown = true
                     val resume = resumeSessionId
                     if (resume != null) {

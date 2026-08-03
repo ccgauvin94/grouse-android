@@ -147,79 +147,6 @@ class ConnectionManager private constructor(context: Context) {
 
     fun deleteSkill(path: String) { client?.deleteSkill(path) }
 
-    /** Absolute directories the server is willing to browse, and what is inside the one asked
-     *  for. Both come from fs/list_directory: the roots are GOOSE_BROWSE_ROOTS on the server,
-     *  so the client never has to know where this particular box keeps code. */
-    val browseRoots = mutableStateOf<List<String>>(emptyList())
-    val browsedPath = mutableStateOf("")
-    val browsedDirs = mutableStateOf<List<String>>(emptyList())
-
-    // The AGENTS.md scan lived here and is GONE with the Code screen. It listed every
-    // directory under the server's roots looking for a context file, to decide which were
-    // "coding projects" -- inference that a project carrying `root: <path>` states outright.
-    // AGENTS.md still matters: goose reads it from a session's cwd up to the git root, so it
-    // is what makes a chat in a repo behave like that repo. Nothing had to detect it.
-
-    // ---- File browser -----------------------------------------------------------------------
-    //
-    // Owns a session of its own for as long as the browser is open. Everything here previously
-    // borrowed the current chat's session, which meant browsing worked only when a chat happened
-    // to be open -- and the Code screen is reached from the drawer, where one usually is not.
-
-    private var browserClient: AcpClient? = null
-    private var browserStart: String? = null
-    private var browserSession: String? = null
-    val browserPath = mutableStateOf("")
-    val browserDirs = mutableStateOf<List<String>>(emptyList())
-    val browserParent = mutableStateOf<String?>(null)
-    val browserBusy = mutableStateOf(false)
-
-    fun openBrowser(startAt: String? = null) {
-        browserStart = startAt
-        if (browserClient != null) { browserBusy.value = false; return }
-        browserBusy.value = true
-        browserDirs.value = emptyList()
-        val url = "wss://${store.host}:${store.port}/acp"
-        browserClient = AcpClient(url, store.secretKey) { ev ->
-            main.post {
-                when (ev) {
-                    is AcpEvent.Ready -> {
-                        browserSession = ev.sessionId
-                        // Start at the session's own cwd: guaranteed inside the server's roots,
-                        // and its reply is what tells us what those roots are.
-                        browserClient?.listDirectory(ev.sessionId, browserStart ?: DEFAULT_CWD)
-                    }
-                    is AcpEvent.Directory -> {
-                        browserBusy.value = false
-                        browserPath.value = ev.path
-                        browserDirs.value = ev.dirs
-                        browserParent.value = ev.parent
-                        if (ev.roots.isNotEmpty()) browseRoots.value = ev.roots
-                    }
-                    is AcpEvent.Error -> browserBusy.value = false
-                    // This client has no UI for approvals/forms — ANSWER (cancel) rather than
-                    // ignore, or the server request sits unresolved forever. Both had been
-                    // falling into the else branch, which is exactly that hang.
-                    is AcpEvent.Permission -> browserClient?.respondPermission(ev.toolCallId, null)
-                    is AcpEvent.Elicitation -> browserClient?.respondElicitation(ev.requestKey, null, cancelled = true)
-                    else -> {}
-                }
-            }
-        }.also { it.desiredCwd = DEFAULT_CWD; it.connect() }
-    }
-
-    fun browseTo(path: String) {
-        val sid = browserSession ?: return
-        browserBusy.value = true
-        browserClient?.listDirectory(sid, path)
-    }
-
-    fun closeBrowser() {
-        val c = browserClient
-        browserClient = null; browserSession = null
-        main.postDelayed({ c?.close() }, 300)
-    }
-
     fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
         val byName = projects.value.associate { it.id to it.name }
         return sessions.value
@@ -236,7 +163,7 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Start a chat already filed under [projectId].
      *
-     *  cwd is DEFAULT_CWD regardless: a project no longer decides where tools run, so a chat in
+     *  cwd is the configured working directory regardless: a project no longer decides where tools run, so a chat in
      *  "cooking" and a chat in "hacking" share a working directory and differ only by the field
      *  that actually means membership. Filing happens once the server hands back a session id --
      *  session/new has no projectId parameter. */
@@ -244,7 +171,7 @@ class ConnectionManager private constructor(context: Context) {
         pendingProjectFiling = projectId
         // A rooted project passes the directory the chat should work in; an ordinary one does
         // not, and its chats run at the default cwd exactly as before.
-        newSession(cwd = cwd ?: DEFAULT_CWD, kind = SessionKind.CHAT)
+        newSession(cwd = cwd ?: store.workingDir, kind = SessionKind.CHAT)
     }
 
     /** Set while a new-chat-in-project is in flight; consumed when Ready delivers the id. */
@@ -464,7 +391,7 @@ class ConnectionManager private constructor(context: Context) {
         if (replayActive.value) replayBuffer else messages
     // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
     // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
-    private var pendingOpenCwd: String = DEFAULT_CWD
+    private var pendingOpenCwd: String = ""
 
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
 
@@ -493,8 +420,9 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** Save new credentials and connect fresh (from the Connect screen). */
-    fun connect(host: String, port: String, key: String) {
+    fun connect(host: String, port: String, key: String, workingDir: String) {
         store.host = host; store.port = port; store.secretKey = key
+        store.workingDir = workingDir
         lastSessionId = null; config.value = emptyList()
         open(resume = null)
     }
@@ -590,7 +518,7 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun newSession(
-        cwd: String = DEFAULT_CWD,
+        cwd: String = "",
         kind: SessionKind = SessionKind.CHAT,
         recipeId: String? = null,
     ) {
@@ -611,25 +539,7 @@ class ConnectionManager private constructor(context: Context) {
      *  executing it once and discarding it. The scheduled jobs use the same recipes through the
      *  scheduler; this is the same object driven by hand. */
     fun runRecipe(recipeId: String, cwd: String? = null) =
-        newSession(cwd = cwd ?: DEFAULT_CWD, kind = SessionKind.CHAT, recipeId = recipeId)
-
-    /** Start a chat in a directory under the chat-projects mount.
-     *
-     *  NOT code: this is /home/colin/Projects, the workspace Desktop groups chats by. It was
-     *  called newCodeSession back when a "project" WAS a directory; projects are virtual now
-     *  (project_id), and real code lives under CODE_ROOT -- see newRepoSession. */
-    fun newProjectDirSession(project: String) {
-        // Forgive "/workspace/foo" and "workspace/foo" -- typing the full path used to build
-        // /workspace/workspace/foo, whose session/new rejection looked like a silent no-op.
-        val clean = project.trim().trim('/').removePrefix("projects/")
-            .removePrefix("Projects/").removePrefix("workspace/").trim('/')
-        require(clean.isNotEmpty() && !clean.contains("..")) { "invalid project name" }
-        // PROJECT_ROOT, not "/projects/", so a project opened here and the same project opened
-        // from Goose Desktop produce the SAME cwd string. Desktop groups its project list by
-        // exact cwd, so two spellings of one directory render as two projects with identical
-        // names. All three spellings are the same host dir; only the string matters.
-        newSession(cwd = "$PROJECT_ROOT$clean", kind = SessionKind.CODE)
-    }
+        newSession(cwd = cwd ?: store.workingDir, kind = SessionKind.CHAT, recipeId = recipeId)
 
     /** Run one shell command server-side via a DIRECT tool call and report (error, output).
      *
@@ -690,7 +600,7 @@ class ConnectionManager private constructor(context: Context) {
                 }
             }
         }.also {
-            it.desiredCwd = DEFAULT_CWD
+            it.desiredCwd = store.workingDir
             it.connect()
         }
     }
@@ -1156,14 +1066,14 @@ class ConnectionManager private constructor(context: Context) {
         // because session/load REWRITES working_dir, this line did not merely guess wrong, it
         // actively dragged the Assistant back to /state within seconds of every correction,
         // including edits made directly in the sessions DB. Ask the server instead; after
-        // DEFAULT_CWD was fixed this was the ONE remaining hardcoded /state, and it silently
+        // the default cwd was fixed this was the ONE remaining hardcoded /state, and it silently
         // undid that fix.
         //
         // Resolution order for a resume: live cache -> the per-session cwd map -> ASK THE SERVER
         // (null: the client queries _goose/unstable/session/info before session/load). NEVER a
         // guess: session/load rewrites working_dir when handed the wrong cwd, and a global
         // last-used guess re-homed the assistant thread into a project once.
-        val resolvedCwd: String? = cwd ?: if (resume == null) DEFAULT_CWD else
+        val resolvedCwd: String? = cwd?.takeIf { it.isNotBlank() } ?: if (resume == null) store.workingDir else
             sessions.value.firstOrNull { it.sessionId == resume }?.cwd?.takeIf { it.isNotBlank() }
                 ?: store.sessionCwd(resume)
         pendingOpenCwd = resolvedCwd ?: ""
@@ -1174,9 +1084,9 @@ class ConnectionManager private constructor(context: Context) {
         client = AcpClient(url, store.secretKey) { ev -> main.post { if (gen == clientGen) onEvent(ev) } }.also {
             it.desiredOptions = if (resume == null) saved else emptyMap()
             it.resumeSessionId = resume
-            it.resumeCwd = resolvedCwd ?: DEFAULT_CWD
+            it.resumeCwd = resolvedCwd ?: store.workingDir
             it.resumeCwdKnown = resolvedCwd != null
-            it.desiredCwd = resolvedCwd ?: DEFAULT_CWD
+            it.desiredCwd = resolvedCwd ?: store.workingDir
             it.desiredRecipeId = pendingRecipeId.also { _ -> pendingRecipeId = null }
             it.connect()
         }
@@ -1458,11 +1368,6 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Schedules -> schedules.value = ev.list
             is AcpEvent.Recipes -> recipes.value = ev.list
             is AcpEvent.Skills -> skills.value = ev.list
-            is AcpEvent.Directory -> {
-                browsedPath.value = ev.path
-                browsedDirs.value = ev.dirs
-                if (ev.roots.isNotEmpty()) browseRoots.value = ev.roots
-            }
             is AcpEvent.Sessions -> {
                 sessions.value = ev.list
                 store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })
@@ -1549,41 +1454,12 @@ class ConnectionManager private constructor(context: Context) {
          *  Renamed from "goose-assistant" 2026-07-28 -- coordinated with sessions.db and
          *  deliver.sh's SESSION_NAME, since resolution on all sides is an exact title match. */
         const val ASSISTANT_TITLE = "Assistant"
-        /** goose has no session tags/labels -- cwd is the native signal. A project session is one
-         *  scoped to a project directory; everything else on the default /state is Chat, unless
-         *  its title marks it as the privileged Assistant thread. */
-        fun sessionKind(s: SessionInfo): SessionKind = when {
-            s.title == ASSISTANT_TITLE -> SessionKind.ASSISTANT
-            projectOf(s.cwd) != null -> SessionKind.CODE
-            else -> SessionKind.CHAT
-        }
+        /** Sessions are filed by goose's own project id, never by inspecting cwd -- a path is
+         *  this server's layout and means nothing on anyone else's. Only the Assistant thread
+         *  is special, and it is identified by title. */
+        fun sessionKind(s: SessionInfo): SessionKind =
+            if (s.title == ASSISTANT_TITLE) SessionKind.ASSISTANT else SessionKind.CHAT
 
-        /** All server paths that mean "project <name>". /workspace is the canonical spelling
-         *  (Grouse-created sessions); the other two are the SAME host directory (~/dev) reached
-         *  through the Desktop cwd-shims -- goose stores cwd verbatim as each client sent it
-         *  (no canonicalize on session/new), so the spellings coexist and must be unified here. */
-        /** Where WE create projects. Matches what Goose Desktop's directory picker produces on
-         *  Linux, because Desktop's project list is a grouping of the raw cwd string and two
-         *  spellings of one directory show up as two identically-named projects. Desktop on a
-         *  Mac still yields /Users/colin/Projects/<name>; no single path is native to both, so
-         *  that one duplicate is accepted (see goose.container). */
-        const val PROJECT_ROOT = "/home/colin/Projects/"
-
-        // Order matters only for readability; each is a distinct spelling of the same host dir
-        // (~/services/goose-projects, mounted at /projects and under both homedir shims).
-        // PROJECT_ROOT is canonical for new sessions; /projects/ is what Grouse itself used
-        // until 2026-07-30 and /workspace/ before 2026-07-28, when projects lived alongside
-        // source code. The dev-shim paths are what an older Desktop picker produced. All kept
-        // so existing sessions keep grouping instead of dropping into the free-chat list.
-        private val PROJECT_PREFIXES = listOf(
-            PROJECT_ROOT, "/Users/colin/Projects/", "/projects/", "/workspace/",
-            "/Users/colin/dev/", "/home/colin/dev/")
-
-        /** The project name a session cwd belongs to, or null for non-project paths. */
-        fun projectOf(cwd: String): String? = PROJECT_PREFIXES.firstNotNullOfOrNull { p ->
-            if (cwd.startsWith(p)) cwd.removePrefix(p).trim('/').substringBefore('/')
-                .takeIf { it.isNotEmpty() } else null
-        }
         @Volatile private var instance: ConnectionManager? = null
         fun get(context: Context): ConnectionManager =
             instance ?: synchronized(this) {

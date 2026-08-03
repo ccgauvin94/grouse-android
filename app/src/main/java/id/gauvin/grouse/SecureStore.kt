@@ -121,6 +121,13 @@ class SecureStore(context: Context) {
         set(v) = cfg.edit().putBoolean("describe_images", v).apply()
 
 
+    /** Absolute directory new sessions are created in. goose validates that session/new's cwd
+     *  is absolute and refuses anything else, and it has no notion of a per-user default, so
+     *  this is asked for at connect time rather than guessed. */
+    var workingDir: String
+        get() = cfg.getString("working_dir", "") ?: ""
+        set(v) = cfg.edit().putString("working_dir", v.trim().trimEnd('/')).apply()
+
     /** Last opened session, so a notification reply after process death can resume it. */
     var lastSessionId: String?
         get() = cfg.getString("last_session", null)

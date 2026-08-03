@@ -38,6 +38,32 @@ paths and a moved tree confuses it.
 If it reports no Java 17, install one or set `JAVA_HOME` before sourcing it; do not hardcode a
 path back into the file.
 
+## Two branches, and which one you are on matters
+
+`master` is the **goose/ACP-only** client: everything in it speaks ACP to `goose serve` and
+nothing else. It is the branch that could be handed to someone with a different goose server.
+
+`phaethon` is `master` plus the parts of this app that goose has no protocol surface for, and
+which therefore talk to something else: LocalAI STT/TTS (`ServerSpeech.kt`, `Speech.kt`), the
+voice-assistant surface (`VoiceAssistant.kt` + its three manifest services), UnifiedPush
+(`Push.kt`, `GoosePushService`, the connector dependency), and the Android Auto descriptor.
+`usesCleartextTraffic` and `RECORD_AUDIO` live there too — they existed only for those features.
+
+Also absent from `master`: the server-side **directory picker** and everything that switched a
+session's directory. Both leaned on `_goose/unstable/fs/list_directory`, which is a method in the
+phaethon fork rather than something upstream goose answers, and on knowing one server's layout.
+Sessions are filed by goose's own **project id** — a tag, not a path — and new sessions start in
+the working directory the user configures at connect time. goose validates that `session/new`'s
+cwd is absolute and has no default of its own, which is why that setting is asked for and not
+inferred.
+
+**Direction of travel is one-way: master → phaethon.** A goose/ACP change lands on `master`
+and gets merged forward. A change to voice or push lands on `phaethon` and stays. Committing an
+ACP fix onto `phaethon` alone strands it there, and the next merge will not bring it back.
+
+Before adding anything that reaches the network, ask which branch it belongs on: if it does not
+go over the ACP socket, it is not a `master` change.
+
 ## Two agents share this checkout
 
 It is worked on from the host (`~/dev/grouse`) and from inside the goose container, which mounts
