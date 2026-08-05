@@ -1,0 +1,101 @@
+# Build a signed release APK and attach it to a GitHub Release.
+#
+# Triggered by pushing a tag like v0.12. Also runnable by hand (workflow_dispatch) to check
+# the build without publishing anything.
+#
+# SIGNING. The four GROUSE_* repo secrets hold the release keystore and its passwords. They
+# are decoded to a file that never leaves the runner, and the file is removed in an
+# always()-guarded step so a failed build cannot leave it behind. If the secrets are absent
+# the Gradle config falls back to DEBUG signing — which must never be published, so the job
+# fails loudly instead (see "verify signing" below) rather than shipping a debug-signed APK.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to create the Release and upload the APK
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The wrapper jar is a checked-in binary; this verifies it against Gradle's published
+      # checksums so nobody has to take it on trust.
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode keystore
+        env:
+          KS_B64: ${{ secrets.GROUSE_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KS_B64" ]; then
+            echo "::error::GROUSE_KEYSTORE_B64 is not set — refusing to build an unsigned release."
+            exit 1
+          fi
+          printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/grouse-release.jks"
+          chmod 600 "$RUNNER_TEMP/grouse-release.jks"
+
+      - name: Build release APK
+        env:
+          GROUSE_KEYSTORE: ${{ runner.temp }}/grouse-release.jks
+          GROUSE_STORE_PASSWORD: ${{ secrets.GROUSE_STORE_PASSWORD }}
+          GROUSE_KEY_ALIAS: ${{ secrets.GROUSE_KEY_ALIAS }}
+          GROUSE_KEY_PASSWORD: ${{ secrets.GROUSE_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      # The Gradle config silently falls back to debug signing when the keystore is missing or
+      # unreadable. A debug-signed APK is signed with a key every SDK ships, so anyone could
+      # push a hostile "update" over it — catching that here is the whole point of this step.
+      - name: Verify it is NOT debug-signed
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          [ -n "$APK" ] || { echo "::error::no APK produced"; exit 1; }
+          # apksigner, NOT keytool: a modern APK is signed with APK Signature Scheme v2/v3,
+          # which is not a JAR signature, so `keytool -printcert -jarfile` answers "Not a
+          # signed jar file". Its output would then contain no Owner: line, the debug check
+          # below would match nothing, and this step would PASS a debug-signed APK — failing
+          # open, which is the exact thing it exists to stop. (Caught locally, 2026-08-05.)
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+          CERT=$("$APKSIGNER" verify --print-certs "$APK")
+          echo "$CERT" | grep -E 'DN:|SHA-256 digest'
+          echo "$CERT" | grep -q 'DN:' || { echo "::error::could not read APK signer"; exit 1; }
+          case "$CERT" in
+            *"Android Debug"*) echo "::error::APK is DEBUG-signed — refusing to publish."; exit 1 ;;
+          esac
+          sha256sum "$APK" | tee "$RUNNER_TEMP/sha256.txt"
+          cp "$APK" "$RUNNER_TEMP/grouse-${GITHUB_REF_NAME:-dev}.apk"
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/grouse-release.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grouse-apk
+          path: ${{ runner.temp }}/grouse-*.apk
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "$RUNNER_TEMP/grouse-$GITHUB_REF_NAME.apk" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Alpha build. Sideload only — not on any store.
+
+          SHA-256: \`$(cut -d' ' -f1 "$RUNNER_TEMP/sha256.txt")\`
+
+          Needs a reachable \`goose serve\` and its secret key. See the README; read the
+          exposure note there before putting goose on the internet."

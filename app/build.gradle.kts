@@ -22,14 +22,44 @@ android {
         versionName = "0.11-20260726"
     }
 
+    // Release signing, used ONLY when the four properties below are supplied (CI sets them from
+    // repo secrets; locally they come from ~/.android/grouse-release.env). Absent them the block
+    // is not created at all and `release` falls back to debug signing — see below.
+    //
+    // NEVER commit the keystore or these values. Losing the keystore is unrecoverable: Android
+    // will not accept an update signed by a different key, so every installed user would have to
+    // uninstall and lose local state.
+    val ksPath = (findProperty("grouse.keystore") ?: System.getenv("GROUSE_KEYSTORE"))?.toString()
+    val ksStorePass = (findProperty("grouse.storePassword") ?: System.getenv("GROUSE_STORE_PASSWORD"))?.toString()
+    val ksAlias = (findProperty("grouse.keyAlias") ?: System.getenv("GROUSE_KEY_ALIAS"))?.toString()
+    val ksKeyPass = (findProperty("grouse.keyPassword") ?: System.getenv("GROUSE_KEY_PASSWORD"))?.toString()
+    val hasReleaseSigning = !ksPath.isNullOrBlank() && file(ksPath).exists() &&
+        !ksStorePass.isNullOrBlank() && !ksAlias.isNullOrBlank() && !ksKeyPass.isNullOrBlank()
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(ksPath!!)
+                storePassword = ksStorePass
+                keyAlias = ksAlias
+                keyPassword = ksKeyPass
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Sideload build: sign with the debug keystore so the release APK installs OVER the
-            // debug app (same signature, no uninstall) and needs no separate keystore. The point is
-            // isDebuggable=false — that's what removes Compose's debug-mode jank (debug builds skip
-            // ART optimization and run Compose instrumented). Not for Play, ideal for personal use.
-            signingConfig = signingConfigs.getByName("debug")
+            // With a real keystore: a distributable build. Without one: sign with the DEBUG
+            // keystore so the release APK installs OVER the debug app (same signature, no
+            // uninstall) — the personal sideload path, unchanged. What matters either way is
+            // isDebuggable=false, which is what removes Compose's debug-mode jank.
+            //
+            // The debug keystore is fine for your own phone and NOT fine for distribution: it is
+            // `androiddebugkey`/`android`, shipped with every SDK, so anyone can sign an APK that
+            // Android will accept as an update over it. Published builds must use the real key.
+            signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release")
+                            else signingConfigs.getByName("debug")
         }
     }
     compileOptions {
