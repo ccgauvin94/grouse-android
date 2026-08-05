@@ -1084,7 +1084,7 @@ class AcpClient(
 
     private fun startNewSession() = rpc("session/new", buildJsonObject {
         // cwd must exist INSIDE the goose container (not the host). Conversational chats live
-        // under /home/colin/Projects/<Name> (Inbox for unfiled) -- that path is also what Goose
+        // under <home>/Projects/<Name> (Inbox for unfiled) -- that path is also what Goose
         // Desktop groups on to build its project list, so the cwd IS the project.
         put("cwd", desiredCwd)
         putJsonArray("mcpServers") {}

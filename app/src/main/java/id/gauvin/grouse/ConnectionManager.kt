@@ -1062,7 +1062,7 @@ class ConnectionManager private constructor(context: Context) {
         // REWRITES the session's working_dir if wrong, so this must be right, not just "close enough".
         // There used to be an "assistant hard rule" here pinning that thread to /state BY
         // CONSTRUCTION. It stopped being true on 2026-07-30, when conversational sessions moved
-        // under /home/colin/Projects/ so Goose Desktop would group them as projects -- and
+        // under <home>/Projects/ so Goose Desktop would group them as projects -- and
         // because session/load REWRITES working_dir, this line did not merely guess wrong, it
         // actively dragged the Assistant back to /state within seconds of every correction,
         // including edits made directly in the sessions DB. Ask the server instead; after

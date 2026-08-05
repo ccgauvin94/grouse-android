@@ -149,7 +149,7 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
                 textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
             Spacer(Modifier.height(28.dp))
             OutlinedTextField(host, { host = it }, label = { Text("Host") },
-                supportingText = { Text("e.g. 192.168.1.5 or a Tailscale name") },
+                supportingText = { Text("host or IP of the machine running goose serve") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(port, { port = it }, label = { Text("Port") }, singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
@@ -871,7 +871,7 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     if (showNewProject) NewProjectDialog(
         cm = cm,
         // Start the first chat FILED under the new project. Not a session in
-        // /home/colin/Projects/<name>: createProject makes a virtual project and no directory,
+        // <home>/Projects/<name>: createProject makes a virtual project and no directory,
         // so that path does not exist and session/new refuses it with "invalid directory path".
         // The id is the name the dialog already constrains to the server's slug alphabet.
         onCreated = { name ->
@@ -1531,9 +1531,23 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 SettingsNavRow("Tools", "Extensions and the tools they expose") {
                     nav.navigate("extensions")
                 }
-                SettingsNavRow("Assistant", "The persistent thread and its scheduled jobs") {
-                    nav.navigate("assistant_settings")
+                // Only reachable when the feature is switched on below — otherwise this row
+                // would lead to a screen configuring jobs the server does not run.
+                if (cm.assistantEnabled.value) {
+                    SettingsNavRow("Assistant", "The persistent thread and its scheduled jobs") {
+                        nav.navigate("assistant_settings")
+                    }
                 }
+            }
+
+            SettingsSection("Assistant") {
+                SettingsSwitchRow("Enable assistant", cm.assistantEnabled.value) {
+                    cm.setAssistantEnabled(it)
+                }
+                SettingCaption("Off by default. The assistant is one persistent thread kept fed " +
+                    "by scheduled recipes running on the server. Turn it on only if your server " +
+                    "has those jobs — without them the thread stays empty and its status reads " +
+                    "permanently stale. With it off, this is a plain chat client.")
             }
 
             SettingsSection("Appearance") {

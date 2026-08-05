@@ -79,7 +79,7 @@ class SecureStore(context: Context) {
     }
 
     var host: String
-        get() = cfg.getString("host", "192.168.1.5") ?: "192.168.1.5"
+        get() = cfg.getString("host", "192.168.1.") ?: "192.168.1."
         set(v) = cfg.edit().putString("host", v).apply()
 
     var port: String
@@ -198,10 +198,18 @@ class SecureStore(context: Context) {
         set(v) = cfg.edit().putString("assistant_session", v).apply()
 
     /** How the privileged Assistant thread handles tool actions: confirm | auto | readonly. */
-    /** Master switch for all assistant features (UI + server jobs). Mirrored to the server
-     *  key ASSISTANT_ENABLED so deliver.sh's jobs pause too. */
+    /** Master switch for every assistant feature — the drawer entry, landing on the thread at
+     *  startup, and the Assistant settings screen. OFF BY DEFAULT, deliberately.
+     *
+     *  The "Assistant" is one persistent thread named by ASSISTANT_TITLE, kept fed by scheduled
+     *  recipes that run server-side. That is a setup a particular server has, not something a
+     *  stock `goose serve` provides: on a server without those jobs the drawer entry opens a
+     *  thread nothing ever writes to, and the briefing-health indicator reads permanently stale.
+     *  Defaulting it off means a fresh install against any goose server is a plain chat client
+     *  and nothing is broken-looking; turning it on is an explicit choice by someone who knows
+     *  they have the jobs. */
     var assistantEnabled: Boolean
-        get() = cfg.getBoolean("assistant_enabled", true)
+        get() = cfg.getBoolean("assistant_enabled", false)
         set(v) = cfg.edit().putBoolean("assistant_enabled", v).apply()
 
 
