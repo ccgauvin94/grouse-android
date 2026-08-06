@@ -421,10 +421,29 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Save new credentials and connect fresh (from the Connect screen). */
     fun connect(host: String, port: String, key: String, workingDir: String) {
-        store.host = host; store.port = port; store.secretKey = key
+        val (h, p) = normalizeHostPort(host, port)
+        store.host = h; store.port = p; store.secretKey = key
         store.workingDir = workingDir
         lastSessionId = null; config.value = emptyList()
         open(resume = null)
+    }
+
+    /** Accept a host pasted in any shape and return a bare (host, port), because the socket URL is
+     *  built as `wss://host:port/acp` with plain interpolation — a leftover `https://` or trailing
+     *  `/acp` produces `wss://https://…` and silently never connects (this bit a real setup).
+     *  Strips any scheme and path; if the host carried its own `:port` that wins over the field. */
+    private fun normalizeHostPort(rawHost: String, rawPort: String): Pair<String, String> {
+        var h = rawHost.trim()
+            .replace(Regex("^[A-Za-z][A-Za-z0-9+.-]*://"), "")   // strip scheme (http/https/ws/wss)
+            .substringBefore('/')                                 // drop any path
+            .trim()
+        var p = rawPort.trim()
+        val colon = h.lastIndexOf(':')                            // host:port -> split (IPv4/host only)
+        if (colon > 0) {
+            val tail = h.substring(colon + 1)
+            if (tail.isNotEmpty() && tail.all { it.isDigit() }) { p = tail; h = h.substring(0, colon) }
+        }
+        return h to p
     }
 
     /** Reconnect silently after Android drops the socket in the background. The resume always
