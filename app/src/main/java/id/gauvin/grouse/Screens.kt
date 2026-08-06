@@ -421,8 +421,11 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             modifier = Modifier.size(9.dp).align(Alignment.TopEnd)) {}
                     }
                 }
+                val roamPeer = ConnectionManager.roamPeer(cm.currentSession.value)
                 // Live tool count for THIS session — tap to see/toggle which are actually on.
-                AssistChip(
+                // Hidden for federated sessions: the tools live on the peer, the probes that
+                // would count them aren't routed, and toggling couldn't work either.
+                if (roamPeer == null) AssistChip(
                     onClick = { showTools = true },
                     label = { Text("${cm.sessionExtensionNames.value.size}") },
                     leadingIcon = { Icon(Icons.Filled.Build, contentDescription = "tools",
@@ -433,7 +436,6 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 // refuses set_config_option for them (goose fork, acp federation) — so the
                 // config panel would be a panel of dead knobs. Show where the session lives
                 // instead of a Tune button that errors on every touch.
-                val roamPeer = ConnectionManager.roamPeer(cm.currentSession.value)
                 if (roamPeer != null) {
                     AssistChip(
                         onClick = {},

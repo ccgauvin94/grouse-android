@@ -1337,10 +1337,16 @@ class ConnectionManager private constructor(context: Context) {
                 // tools/list fired here returns only the builtins (measured -- nextcloud, beeper,
                 // kagi and memory were all absent from a list taken immediately). Ask again shortly
                 // for the full picture rather than caching a half-built one.
-                client?.listTools()
-                val genAtReady = clientGen
-                main.postDelayed({ if (genAtReady == clientGen) client?.listTools() }, 2500)
-                client?.listSessionExtensions()
+                // Skip the tool/extension probes for a federated session: tools/list and
+                // session/extensions/list are _goose/unstable methods the fork's federation
+                // doesn't route, so each call is a guaranteed error toast. The chip is hidden
+                // for these sessions anyway (Screens.kt shows the peer instead).
+                if (roamPeer(ev.sessionId) == null) {
+                    client?.listTools()
+                    val genAtReady = clientGen
+                    main.postDelayed({ if (genAtReady == clientGen) client?.listTools() }, 2500)
+                    client?.listSessionExtensions()
+                } else sessionExtensionNames.value = emptyList()
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Name it so both
                 // the app (title match) and deliver.sh (name-grep) resolve it as the assistant
