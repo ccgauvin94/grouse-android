@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -428,7 +429,19 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         modifier = Modifier.size(16.dp)) },
                     modifier = Modifier.padding(end = 4.dp),
                 )
-                IconButton(onClick = { showConfig = !showConfig }) {
+                // A federated session's model/provider live on the remote node — the server
+                // refuses set_config_option for them (goose fork, acp federation) — so the
+                // config panel would be a panel of dead knobs. Show where the session lives
+                // instead of a Tune button that errors on every touch.
+                val roamPeer = ConnectionManager.roamPeer(cm.currentSession.value)
+                if (roamPeer != null) {
+                    AssistChip(
+                        onClick = {},
+                        label = { Text(roamPeer) },
+                        leadingIcon = { Icon(Icons.Filled.Public, contentDescription = "remote session",
+                            modifier = Modifier.size(16.dp)) },
+                    )
+                } else IconButton(onClick = { showConfig = !showConfig }) {
                     Icon(Icons.Filled.Tune, contentDescription = "model")
                 }
             }
@@ -574,11 +587,16 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         val modeOpt = cm.config.value.firstOrNull { it.id == "mode" }
                         val modeLabel = prettyMode(modeOpt?.currentValue)
                         var modeMenu by remember { mutableStateOf(false) }
+                        // A remote session's load response carries the REMOTE node's config
+                        // options, so modeOpt is non-null — but set_config_option on a
+                        // federated id is refused server-side. Show the mode, don't offer
+                        // to change it.
+                        val remoteSession = ConnectionManager.roamPeer(cm.currentSession.value) != null
                         Box {
                             Surface(
                                 shape = RoundedCornerShape(20.dp),
                                 color = MaterialTheme.colorScheme.surface,
-                                modifier = Modifier.clickable(enabled = modeOpt != null) {
+                                modifier = Modifier.clickable(enabled = modeOpt != null && !remoteSession) {
                                     modeMenu = true
                                 },
                             ) {
@@ -905,9 +923,17 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
             .padding(start = if (indent) 34.dp else 10.dp, end = 8.dp)
             .padding(vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically) {
+            val peer = ConnectionManager.roamPeer(s.sessionId)
             Column(Modifier.weight(1f)) {
-                Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (peer != null) {
+                        Icon(Icons.Filled.Public, contentDescription = "remote — on $peer",
+                            modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.outline)
+                        Spacer(Modifier.width(5.dp))
+                    }
+                    Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 // Last-message preview beats "N msgs" as a scent for which chat is which; the
                 // count/time line stays as the fallback when the server didn't send one.
                 if (s.snippet.isNotBlank())
@@ -999,7 +1025,15 @@ private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: 
             onDismissRequest = onDone,
             title = { Text(s.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             text = {
-                Column {
+                val peer = ConnectionManager.roamPeer(s.sessionId)
+                if (peer != null) {
+                    // Rename/move/export/archive/delete all operate on the LOCAL session
+                    // store; a federated session lives on the peer, so none of them can
+                    // work here (goose fork, acp federation v1). Say where it lives
+                    // instead of offering five buttons that error.
+                    Text("This chat lives on $peer. Manage it there — only reading and " +
+                        "chatting work from this phone.")
+                } else Column {
                     TextButton(onClick = { mode = "rename" }) { Text("Rename…") }
                     TextButton(onClick = { mode = "move" }) { Text("Move to project…") }
                     TextButton(onClick = { cm.exportSession(s.sessionId); onDone() }) { Text("Export…") }
@@ -1212,11 +1246,19 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
                     .combinedClickable(onClick = { cm.openSession(s.sessionId); goToChat() },
                         onLongClick = { actionsFor = s })) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        val peer = ConnectionManager.roamPeer(s.sessionId)
                         Column(Modifier.weight(1f)) {
-                            Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (peer != null) {
+                                    Icon(Icons.Filled.Public, contentDescription = "remote — on $peer",
+                                        modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.outline)
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                             Spacer(Modifier.height(2.dp))
-                            Text(listOf("${s.messageCount} msgs", s.model, relativeTime(s.updatedAt))
+                            Text(listOf(peer?.let { "on $it" } ?: "", "${s.messageCount} msgs", s.model, relativeTime(s.updatedAt))
                                 .filter { it.isNotBlank() }.joinToString("  ·  "),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline, maxLines = 1,

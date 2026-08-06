@@ -1486,6 +1486,14 @@ class ConnectionManager private constructor(context: Context) {
         fun sessionKind(s: SessionInfo): SessionKind =
             if (s.title == ASSISTANT_TITLE) SessionKind.ASSISTANT else SessionKind.CHAT
 
+        /** A session living on a roam peer arrives as `roam:<peer>:<remote id>` (the goose
+         *  fork's ACP federation). Local ids never carry the prefix, so it doubles as the
+         *  client-side "this session is remote" signal. Returns the peer nickname, or null
+         *  for a local session. */
+        fun roamPeer(sessionId: String?): String? =
+            sessionId?.takeIf { it.startsWith("roam:") }
+                ?.removePrefix("roam:")?.substringBefore(':')?.ifBlank { null }
+
         @Volatile private var instance: ConnectionManager? = null
         fun get(context: Context): ConnectionManager =
             instance ?: synchronized(this) {
