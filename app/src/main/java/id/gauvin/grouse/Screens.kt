@@ -908,19 +908,26 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     // other session (the 2026-08-01 migration filed it under "inbox"), so it needs excluding
     // explicitly or it renders twice -- once pinned, once as an ordinary chat.
     val all = cm.sessions.value.filter { ConnectionManager.sessionKind(it) != SessionKind.ASSISTANT }
-    val byProjectId = all.groupBy { it.projectId }
+    // Remote sessions split out BEFORE project grouping, and not only for the section
+    // below: a federated SessionInfo carries the REMOTE server's project_id, which matches
+    // no local project — grouped naively it lands in neither a project nor the null bucket
+    // and silently vanishes from the drawer.
+    val (remoteChats, localChats) = all.partition { ConnectionManager.roamPeer(it.sessionId) != null }
+    val remoteByPeer = remoteChats.groupBy { ConnectionManager.roamPeer(it.sessionId)!! }
+    val byProjectId = localChats.groupBy { it.projectId }
     val freeChats = byProjectId[null].orEmpty()
     val projects = cm.projects.value
 
     @Composable
-    fun sessionRow(s: SessionInfo, indent: Boolean) {
+    fun sessionRow(s: SessionInfo, indent: Boolean, markRemote: Boolean = true) {
         Row(Modifier.fillMaxWidth()
             .combinedClickable(onClick = { cm.openSession(s.sessionId); onOpen() },
                 onLongClick = { actionsFor = s })
             .padding(start = if (indent) 34.dp else 10.dp, end = 8.dp)
             .padding(vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            val peer = ConnectionManager.roamPeer(s.sessionId)
+            // markRemote=false under a peer group header, where a per-row globe is noise.
+            val peer = ConnectionManager.roamPeer(s.sessionId).takeIf { markRemote }
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (peer != null) {
@@ -1006,6 +1013,48 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
         }
         item { addRow("New chat", indent = false) { cm.newSession(); onOpen() } }
         items(freeChats, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = false) }
+        // Federated sessions get their own section, one collapsible group per roam peer —
+        // out of the daily local flow but one tap away. Groups only render for peers that
+        // are online with sessions; an offline peer contributes nothing (server behavior),
+        // so its group disappears rather than showing empty.
+        if (remoteByPeer.isNotEmpty()) {
+            item {
+                Text("REMOTE", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
+            }
+            remoteByPeer.toSortedMap().forEach { (peerName, chats) ->
+                val peerKey = "peer:$peerName"
+                val open = peerKey in expanded
+                item(key = peerKey) {
+                    Row(Modifier.fillMaxWidth().padding(start = 10.dp)
+                        .clickable { expanded = if (open) expanded - peerKey else expanded + peerKey },
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1f).padding(vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Public, contentDescription = null,
+                                modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(10.dp))
+                            Text(peerName, style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${chats.size}", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                        IconButton(onClick = {
+                            expanded = if (open) expanded - peerKey else expanded + peerKey
+                        }) {
+                            Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                contentDescription = if (open) "collapse" else "expand",
+                                tint = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                }
+                if (open) items(chats, key = { "s:" + it.sessionId }) { s ->
+                    sessionRow(s, indent = true, markRemote = false)
+                }
+            }
+        }
     }
 }
 
