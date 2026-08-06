@@ -159,6 +159,11 @@ data class ExtInfo(
     // methods accept -- a listed remote extension is `type: streamable_http`, which add rejects
     // outright -- so it goes through toExtensionDto on the way back in.
     val raw: JsonObject = JsonObject(emptyMap()),
+    // True when this object came from a roam PEER's session/extensions/list. Session-scoped
+    // tool operations on a federated session must only ever round-trip these: a local
+    // catalog DTO of the same name can carry commands/paths that don't exist on the peer,
+    // and pushing one would silently rewrite the peer's session extension.
+    val fromPeer: Boolean = false,
 )
 
 /** Events surfaced from the ACP connection to the UI layer. */
@@ -280,7 +285,13 @@ sealed interface AcpEvent {
     data class Extensions(val list: List<ExtInfo>) : AcpEvent
     /** Names of a SPECIFIC session's currently-enabled extensions (session-scoped, not the global
      *  catalog) -- reply to listSessionExtensions, used to diff-and-apply an extension profile. */
-    data class SessionExtensions(val sessionId: String, val names: List<String>) : AcpEvent
+    data class SessionExtensions(
+        val sessionId: String,
+        val names: List<String>,
+        // Full extension objects, needed for federated sessions where the peer's own DTOs
+        // are the only sound thing to write back (see ExtInfo.fromPeer).
+        val infos: List<ExtInfo> = emptyList(),
+    ) : AcpEvent
     /** Tools active in a session, as `extension__tool` names straight from goose.
      *  sessionId is null for the client's own session (legacy), set for targeted queries. */
     data class Tools(val names: List<String>, val sessionId: String? = null) : AcpEvent
@@ -994,11 +1005,24 @@ class AcpClient(
             // array elements ARE the extension objects (goose's tagged union carries `name` at the
             // top level), unlike config/extensions/list's {extension:{...}, enabled, configKey} wrap.
             "_goose/unstable/session/extensions/list" -> {
-                val names = (result?.get("extensions") as? JsonArray).orEmpty().mapNotNull {
-                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
-                }
                 val target = id?.let { pendingExtListSids.remove(it) } ?: sessionId
-                target?.let { onEvent(AcpEvent.SessionExtensions(it, names)) }
+                val infos = (result?.get("extensions") as? JsonArray).orEmpty().mapNotNull { el ->
+                    val ext = el as? JsonObject ?: return@mapNotNull null
+                    val name = ext["name"]?.jsonPrimitive?.contentOrNull
+                        ?: (ext["server"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                        ?: return@mapNotNull null
+                    ExtInfo(
+                        name = name,
+                        enabled = true,   // attached to the session by definition
+                        type = ext["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        description = ext["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                        configKey = name,
+                        bundled = ext["bundled"]?.jsonPrimitive?.booleanOrNull ?: false,
+                        raw = ext,
+                        fromPeer = target?.startsWith("roam:") == true,
+                    )
+                }
+                target?.let { onEvent(AcpEvent.SessionExtensions(it, infos.map { i -> i.name }, infos)) }
             }
             // add/remove reply empty -- ConnectionManager's diff-and-apply already knows the target
             // state, so there's nothing to re-fetch (unlike the global toggle above).

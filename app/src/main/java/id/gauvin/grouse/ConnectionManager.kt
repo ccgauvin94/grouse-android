@@ -232,6 +232,14 @@ class ConnectionManager private constructor(context: Context) {
     // and its management sheet. Refreshed on every session open (Ready); optimistically updated by
     // toggleSessionExtension since add/remove replies are empty (no server re-list to react to).
     val sessionExtensionNames = mutableStateOf<List<String>>(emptyList())
+    // Full extension objects for the CURRENT session (same reply as the names above). On a
+    // federated session these are the PEER's DTOs — the only objects that may be written back
+    // to it — and the tool sheet's row source, since the peer's global catalog is unreachable.
+    val sessionExtensionInfos = mutableStateOf<List<ExtInfo>>(emptyList())
+    // Peer extensions toggled OFF this session, kept so their row (and DTO) survives to be
+    // toggled back on. Cleared on session open; local sessions never need it because their
+    // rows come from the local global catalog.
+    val detachedPeerExts = mutableStateOf<List<ExtInfo>>(emptyList())
     // Tools ACTIVE in the current session, grouped extension -> tool names (the `ext__tool` prefix
     // goose uses, stripped). Reflects available_tools filtering, so it is the "checked" set.
     val sessionTools = mutableStateOf<Map<String, List<String>>>(emptyMap())
@@ -240,8 +248,23 @@ class ConnectionManager private constructor(context: Context) {
     // discoverTools() and cached here for the process lifetime. Absent = not discovered yet.
     val toolCatalog = mutableStateOf<Map<String, List<String>>>(emptyMap())
     // Extension whose full catalogue is being discovered; its tools/list reply is the catalogue,
-    // not the live set, so the Tools handler must not treat it as sessionTools.
-    private var discovering: String? = null
+    // not the live set, so the Tools handler must not treat it as sessionTools. Held as the full
+    // ExtInfo so the restore step can round-trip the same object it discovered with.
+    private var discovering: ExtInfo? = null
+
+    /** toolCatalog key. A peer's extension can share a name with a local one while exposing a
+     *  different tool set, so peer-sourced entries are namespaced by the owning peer. */
+    fun catKey(e: ExtInfo): String =
+        if (e.fromPeer) "peer:${roamPeer(currentSession.value)}:${e.name}" else e.name
+
+    /** Discovered full tool set for this extension, or null if not discovered yet. */
+    fun catalogOf(e: ExtInfo): List<String>? = toolCatalog.value[catKey(e)]
+
+    /** True when a session-scoped tool operation with this ExtInfo would be unsound: the
+     *  current session lives on a peer but the DTO is local (e.g. the Settings extension page
+     *  open while a remote chat is current). Callers must no-op rather than push it. */
+    private fun wrongNode(e: ExtInfo): Boolean =
+        (roamPeer(currentSession.value) != null) != e.fromPeer
     // Per-message generation stats (tok/s, cost) for the most recently finished assistant reply.
     // Cleared when a new turn starts so stale numbers don't linger under the next streaming bubble.
     val lastMessageUsage = mutableStateOf<AcpEvent.MessageUsage?>(null)
@@ -297,20 +320,22 @@ class ConnectionManager private constructor(context: Context) {
         // can both miss a slow one. Expanding a cached row used to early-return without any
         // refresh, so the sheet rendered the PREVIOUS session's tool state after a global-default
         // change -- "the session tools list isn't accurate". Refresh cheaply instead.
-        if (toolCatalog.value.containsKey(ext.name)) { refreshTools(); return }
+        if (toolCatalog.value.containsKey(catKey(ext))) { refreshTools(); return }
+        if (wrongNode(ext)) { refreshTools(); return }
         val c = client ?: return
         val unfiltered = JsonObject(ext.raw.toMutableMap().apply {
             put("available_tools", JsonArray(emptyList()))
         })
-        discovering = ext.name
+        discovering = ext
         c.removeSessionExtension(ext.name)
         c.addSessionExtension(unfiltered)   // its reply triggers listTools -- see AcpClient
     }
 
     /** Restrict `ext` to `allowed` for THIS session only (no config.yaml write). Empty = all. */
     fun setSessionTools(ext: ExtInfo, allowed: Set<String>) {
+        if (wrongNode(ext)) return
         val c = client ?: return
-        val full = toolCatalog.value[ext.name].orEmpty()
+        val full = catalogOf(ext).orEmpty()
         // An allowlist equal to the whole catalogue is the same as no allowlist, and storing []
         // keeps it that way if the extension later gains tools.
         val list = if (allowed.size >= full.size && full.isNotEmpty()) emptyList() else allowed.toList()
@@ -344,13 +369,18 @@ class ConnectionManager private constructor(context: Context) {
     /** Enable/disable one extension for just THIS session (session-scoped API — never touches
      *  config.yaml or any other open session). Optimistic: add/remove replies are empty, so
      *  sessionExtensionNames is updated immediately rather than waiting on a re-list. */
-    fun toggleSessionExtension(name: String, enabled: Boolean) {
+    fun toggleSessionExtension(e: ExtInfo, enabled: Boolean) {
+        if (wrongNode(e)) return
         if (enabled) {
-            extensions.value.firstOrNull { it.name == name }?.let { client?.addSessionExtension(it.raw) }
-            sessionExtensionNames.value = sessionExtensionNames.value + name
+            client?.addSessionExtension(e.raw)
+            sessionExtensionNames.value = sessionExtensionNames.value + e.name
+            detachedPeerExts.value = detachedPeerExts.value.filterNot { it.name == e.name }
         } else {
-            client?.removeSessionExtension(name)
-            sessionExtensionNames.value = sessionExtensionNames.value - name
+            client?.removeSessionExtension(e.name)
+            sessionExtensionNames.value = sessionExtensionNames.value - e.name
+            // Keep the peer DTO so the row survives to be re-enabled; the peer's global
+            // catalog can't be listed, so a dropped row would be gone until reopen.
+            if (e.fromPeer) detachedPeerExts.value = detachedPeerExts.value + e
         }
     }
 
@@ -1275,6 +1305,11 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.UserChunk -> { t().add(ChatMessage("user", ev.text)); streamingRole = null }
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) {
                 config.value = ev.options
+                // A federated session's options are the PEER's (session/load passes them
+                // through). Persisting them would overwrite the sticky local defaults with
+                // the peer's model/provider, and fetching "supported models" would ask
+                // the LOCAL provider registry about the peer's provider id. Display only.
+                if (roamPeer(currentSession.value) != null) return
                 // Persist the true current values so re-apply on reconnect can't drift
                 // (e.g. leave a model selected after switching provider).
                 ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
@@ -1337,16 +1372,15 @@ class ConnectionManager private constructor(context: Context) {
                 // tools/list fired here returns only the builtins (measured -- nextcloud, beeper,
                 // kagi and memory were all absent from a list taken immediately). Ask again shortly
                 // for the full picture rather than caching a half-built one.
-                // Skip the tool/extension probes for a federated session: tools/list and
-                // session/extensions/list are _goose/unstable methods the fork's federation
-                // doesn't route, so each call is a guaranteed error toast. The chip is hidden
-                // for these sessions anyway (Screens.kt shows the peer instead).
-                if (roamPeer(ev.sessionId) == null) {
-                    client?.listTools()
-                    val genAtReady = clientGen
-                    main.postDelayed({ if (genAtReady == clientGen) client?.listTools() }, 2500)
-                    client?.listSessionExtensions()
-                } else sessionExtensionNames.value = emptyList()
+                // Since roam-5 the probes route to the owning peer for federated sessions
+                // too (tools/list and session/extensions/list are session-scoped), so they
+                // run unconditionally. Stale state from the previous session is cleared by
+                // the replies; the detached-row cache is per-session and cleared here.
+                detachedPeerExts.value = emptyList()
+                client?.listTools()
+                val genAtReady = clientGen
+                main.postDelayed({ if (genAtReady == clientGen) client?.listTools() }, 2500)
+                client?.listSessionExtensions()
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Name it so both
                 // the app (title match) and deliver.sh (name-grep) resolve it as the assistant
@@ -1435,19 +1469,24 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Commands -> commands.value = ev.names
             is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }
-            is AcpEvent.SessionExtensions -> sessionExtensionNames.value = ev.names
+            is AcpEvent.SessionExtensions -> {
+                sessionExtensionNames.value = ev.names
+                sessionExtensionInfos.value = ev.infos
+                // A re-listed name is attached again; its detached-row copy is stale.
+                detachedPeerExts.value = detachedPeerExts.value.filterNot { it.name in ev.names.toSet() }
+            }
             is AcpEvent.Tools -> {
                 val g = group(ev.names)
                 val target = discovering
                 if (target != null) {
-                    // Catalogue read: record the full set, then restore the session's real setting.
-                    toolCatalog.value = toolCatalog.value + (target to g[target].orEmpty())
+                    // Catalogue read: record the full set, then restore the session's real
+                    // setting by round-tripping the SAME ExtInfo the discovery ran with (a
+                    // peer DTO for federated sessions — never re-looked-up locally by name).
+                    toolCatalog.value = toolCatalog.value + (catKey(target) to g[target.name].orEmpty())
                     discovering = null
-                    extensions.value.firstOrNull { it.name == target }?.let { e ->
-                        val allowed = (e.raw["available_tools"] as? JsonArray)
-                            ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
-                        setSessionTools(e, if (allowed.isEmpty()) g[target].orEmpty().toSet() else allowed)
-                    }
+                    val allowed = (target.raw["available_tools"] as? JsonArray)
+                        ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
+                    setSessionTools(target, if (allowed.isEmpty()) g[target.name].orEmpty().toSet() else allowed)
                 } else sessionTools.value = g
             }
             is AcpEvent.MessageUsage -> {

@@ -423,9 +423,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 }
                 val roamPeer = ConnectionManager.roamPeer(cm.currentSession.value)
                 // Live tool count for THIS session — tap to see/toggle which are actually on.
-                // Hidden for federated sessions: the tools live on the peer, the probes that
-                // would count them aren't routed, and toggling couldn't work either.
-                if (roamPeer == null) AssistChip(
+                // Shown for federated sessions too since roam-5: the probes and the
+                // session-scoped toggles all route to the owning peer.
+                AssistChip(
                     onClick = { showTools = true },
                     label = { Text("${cm.sessionExtensionNames.value.size}") },
                     leadingIcon = { Icon(Icons.Filled.Build, contentDescription = "tools",
@@ -454,8 +454,14 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 hintDismissed = true; cm.store.assistantHintSeen = true
             }
             // Model/mode picker opens from the Tune button in the top bar (no always-on bar).
+            // On a federated session the options came from the PEER, but knownModels is the
+            // LOCAL provider's live list — merging them offered models the peer doesn't have.
+            // The peer's own choices (plus "Custom model…") are the honest set.
             if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
-                cm.configuredProviders, cm.knownModels.value, cm::setOption, cm::compact, cm.compacting.value)
+                cm.configuredProviders,
+                if (ConnectionManager.roamPeer(cm.currentSession.value) != null) emptySet()
+                else cm.knownModels.value,
+                cm::setOption, cm::compact, cm.compacting.value)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (cm.messages.isEmpty() && !cm.busy.value) {
                     Column(
@@ -814,12 +820,27 @@ private fun ToolManagementSheet(cm: ConnectionManager, onDismiss: () -> Unit) {
                 "made since — flip it here if it's stale.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
             Spacer(Modifier.height(12.dp))
-            if (cm.extensions.value.isEmpty()) {
+            // A federated session's rows come from the PEER's own session extension list
+            // (plus any detached this session, so they can be re-enabled). The peer's global
+            // catalog isn't queryable — config/extensions/list has no session id to route on —
+            // so extensions not attached to the remote session simply don't appear.
+            val remotePeer = ConnectionManager.roamPeer(cm.currentSession.value)
+            val rows = if (remotePeer != null)
+                (cm.sessionExtensionInfos.value + cm.detachedPeerExts.value).sortedBy { it.name }
+            else cm.extensions.value
+            if (remotePeer != null) {
+                Text("This chat lives on $remotePeer — changes apply there, and only " +
+                    "extensions already in the chat are listed.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline)
+                Spacer(Modifier.height(12.dp))
+            }
+            if (rows.isEmpty()) {
                 Text("loading…", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline)
             }
             val active = cm.sessionExtensionNames.value.toSet()
-            cm.extensions.value.forEach { e ->
+            rows.forEach { e ->
                 val isOn = e.name in active
                 Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f).padding(end = 12.dp)) {
@@ -837,7 +858,7 @@ private fun ToolManagementSheet(cm: ConnectionManager, onDismiss: () -> Unit) {
                     // conversation.
                     Switch(
                         checked = isOn,
-                        onCheckedChange = { on -> cm.toggleSessionExtension(e.name, on) },
+                        onCheckedChange = { on -> cm.toggleSessionExtension(e, on) },
                     )
                 }
                 if (isOn) ToolList(cm, e, cm.sessionTools.value[e.name].orEmpty().toSet()) {
@@ -1521,7 +1542,7 @@ fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>,
     // rendering a row for them showed a permanent "0 tools" that opened onto nothing.
     if (!cm.toolsAttributable(e)) return
     var open by remember { mutableStateOf(false) }
-    val catalog = cm.toolCatalog.value[e.name]
+    val catalog = cm.catalogOf(e)
     // Local echo so a checkbox responds instantly; the server round-trip refreshes it after.
     var sel by remember(e.name, active) { mutableStateOf(active) }
 
@@ -1739,7 +1760,7 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
                         val saved = (e.raw["available_tools"] as? JsonArray)
                             ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
                         val active = if (saved.isEmpty())
-                            cm.toolCatalog.value[e.name]?.toSet()
+                            cm.catalogOf(e)?.toSet()
                                 ?: cm.sessionTools.value[e.name].orEmpty().toSet()
                         else saved
                         ToolList(cm, e, active) {
