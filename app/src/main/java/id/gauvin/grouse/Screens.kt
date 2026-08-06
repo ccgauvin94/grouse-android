@@ -1550,6 +1550,29 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     "permanently stale. With it off, this is a plain chat client.")
             }
 
+            SettingsSection("Notifications") {
+                var pushOn by remember { mutableStateOf(cm.store.pushEnabled) }
+                SettingsSwitchRow("Push notifications", pushOn) { on ->
+                    pushOn = on
+                    val act = ctx.findActivity()
+                    if (on && act != null) Push.enable(act) else Push.disable(ctx)
+                }
+                SettingCaption("Receive server-pushed briefings and alerts through a UnifiedPush " +
+                    "distributor (e.g. NextPush on your Nextcloud) — no FCM and no always-on socket. " +
+                    "Turning this on prompts you to pick the distributor, then registers this device.")
+                val endpoint = cm.store.pushEndpoint
+                if (pushOn && endpoint.isNotBlank()) {
+                    SelectionContainer {
+                        Text("Endpoint: $endpoint", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline)
+                    }
+                    SettingCaption("This device's endpoint is published to the server automatically " +
+                        "(GROUSE_PUSH_ENDPOINT), so it stays current across reinstalls.")
+                } else if (pushOn) {
+                    SettingCaption("Waiting for the distributor to issue an endpoint…")
+                }
+            }
+
             SettingsSection("Appearance") {
                 SettingsSwitchRow("Material You dynamic color", cm.dynamicColor.value) { cm.setDynamicColor(it) }
                 SettingCaption("Off uses the built-in goose-green palette.")

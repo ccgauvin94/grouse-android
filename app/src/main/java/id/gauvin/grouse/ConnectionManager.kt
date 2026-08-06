@@ -467,6 +467,13 @@ class ConnectionManager private constructor(context: Context) {
      *  Android share sheet with it. */
     fun exportSession(sessionId: String) { client?.exportSession(sessionId) }
 
+    /** Publish this device's UnifiedPush endpoint into the server's config (GROUSE_PUSH_ENDPOINT),
+     *  so the server's senders always POST to the current token. This is what makes a reinstall /
+     *  endpoint-rotation self-heal instead of silently pushing at a dead token. Best-effort. */
+    fun publishPushEndpoint(url: String) {
+        if (url.isNotBlank()) client?.upsertConfig("GROUSE_PUSH_ENDPOINT", url)
+    }
+
     /** Answer a pending elicitation form and drop it from the queue. */
     fun answerElicitation(e: AcpEvent.Elicitation, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
         client?.respondElicitation(e.requestKey, values, cancelled)

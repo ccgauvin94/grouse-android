@@ -18,8 +18,8 @@ android {
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 12
-        versionName = "0.12-20260805"
+        versionCode = 13
+        versionName = "0.13-20260806"
     }
 
     // Release signing, used ONLY when the four properties below are supplied (CI sets them from
@@ -101,4 +101,12 @@ dependencies {
     // Markdown rendering for agent output (headers, bold, lists, fenced code).
     implementation("com.halilibo.compose-richtext:richtext-commonmark:0.20.0")
     implementation("com.halilibo.compose-richtext:richtext-ui-material3:0.20.0")
+    // UnifiedPush: receive server-pushed briefings/alerts via a distributor (NextPush) — no FCM,
+    // no always-on socket. Exclude the connector's JVM tink; security-crypto needs tink-android
+    // (Android Keystore), so keep only that and bump it high enough for the connector's classes to
+    // resolve — otherwise the two Tink artifacts collide (duplicate classes).
+    implementation("org.unifiedpush.android:connector:3.3.3") {
+        exclude(group = "com.google.crypto.tink", module = "tink")
+    }
+    implementation("com.google.crypto.tink:tink-android:1.16.0")
 }

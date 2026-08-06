@@ -187,6 +187,27 @@ class SecureStore(context: Context) {
         get() = cfg.getString("last_briefing_text", "") ?: ""
         set(v) = cfg.edit().putString("last_briefing_text", v).apply()
 
+    // --- UnifiedPush ---
+    /** Whether the user has turned push on (drives register/refresh). */
+    var pushEnabled: Boolean
+        get() = cfg.getBoolean("push_on", false)
+        set(v) = cfg.edit().putBoolean("push_on", v).apply()
+
+    /** The distributor-issued endpoint URL the server POSTs to. Set by GoosePushService. */
+    var pushEndpoint: String
+        get() = cfg.getString("push_endpoint", "") ?: ""
+        set(v) = cfg.edit().putString("push_endpoint", v).apply()
+
+    /** Optional external registry to POST the endpoint to on rotation. Blank = disabled. */
+    var pushRegistryUrl: String
+        get() = cfg.getString("push_registry", "") ?: ""
+        set(v) = cfg.edit().putString("push_registry", v).apply()
+
+    /** The session id this device is awaiting a finished-turn nudge for (turn-push filtering). */
+    var pendingPushSessionId: String?
+        get() = cfg.getString("pending_push_session", null)
+        set(v) = cfg.edit().putString("pending_push_session", v).apply()
+
     /** Whether the one-time "this is your assistant" hint has been dismissed. */
     var assistantHintSeen: Boolean
         get() = cfg.getBoolean("assistant_hint_seen", false)
