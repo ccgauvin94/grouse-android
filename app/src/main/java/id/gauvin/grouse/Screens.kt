@@ -432,18 +432,18 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         modifier = Modifier.size(16.dp)) },
                     modifier = Modifier.padding(end = 4.dp),
                 )
-                // A federated session's model/provider live on the remote node — the server
-                // refuses set_config_option for them (goose fork, acp federation) — so the
-                // config panel would be a panel of dead knobs. Show where the session lives
-                // instead of a Tune button that errors on every touch.
-                if (roamPeer != null) {
-                    AssistChip(
-                        onClick = {},
-                        label = { Text(roamPeer) },
-                        leadingIcon = { Icon(Icons.Filled.Public, contentDescription = "remote session",
-                            modifier = Modifier.size(16.dp)) },
-                    )
-                } else IconButton(onClick = { showConfig = !showConfig }) {
+                // Since roam-4 the server routes set_config_option to the owning peer, and
+                // the options shown came from the peer via session/load — so the config
+                // panel is live for federated sessions too. The chip stays as the "this
+                // chat is remote" marker next to it.
+                if (roamPeer != null) AssistChip(
+                    onClick = {},
+                    label = { Text(roamPeer) },
+                    leadingIcon = { Icon(Icons.Filled.Public, contentDescription = "remote session",
+                        modifier = Modifier.size(16.dp)) },
+                    modifier = Modifier.padding(end = 4.dp),
+                )
+                IconButton(onClick = { showConfig = !showConfig }) {
                     Icon(Icons.Filled.Tune, contentDescription = "model")
                 }
             }
@@ -589,16 +589,11 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         val modeOpt = cm.config.value.firstOrNull { it.id == "mode" }
                         val modeLabel = prettyMode(modeOpt?.currentValue)
                         var modeMenu by remember { mutableStateOf(false) }
-                        // A remote session's load response carries the REMOTE node's config
-                        // options, so modeOpt is non-null — but set_config_option on a
-                        // federated id is refused server-side. Show the mode, don't offer
-                        // to change it.
-                        val remoteSession = ConnectionManager.roamPeer(cm.currentSession.value) != null
                         Box {
                             Surface(
                                 shape = RoundedCornerShape(20.dp),
                                 color = MaterialTheme.colorScheme.surface,
-                                modifier = Modifier.clickable(enabled = modeOpt != null && !remoteSession) {
+                                modifier = Modifier.clickable(enabled = modeOpt != null) {
                                     modeMenu = true
                                 },
                             ) {
@@ -1028,17 +1023,18 @@ private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: 
             title = { Text(s.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             text = {
                 val peer = ConnectionManager.roamPeer(s.sessionId)
-                if (peer != null) {
-                    // Rename/move/export/archive/delete all operate on the LOCAL session
-                    // store; a federated session lives on the peer, so none of them can
-                    // work here (goose fork, acp federation v1). Say where it lives
-                    // instead of offering five buttons that error.
-                    Text("This chat lives on $peer. Manage it there — only reading and " +
-                        "chatting work from this phone.")
-                } else Column {
+                Column {
+                    if (peer != null) Text("Lives on $peer",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline)
                     TextButton(onClick = { mode = "rename" }) { Text("Rename…") }
-                    TextButton(onClick = { mode = "move" }) { Text("Move to project…") }
-                    TextButton(onClick = { cm.exportSession(s.sessionId); onDone() }) { Text("Export…") }
+                    // Projects and export are LOCAL concepts — the fork's federation routes
+                    // rename/archive/delete to the owning peer (since roam-4), but a remote
+                    // session can't be filed into this server's projects or exported here.
+                    if (peer == null) {
+                        TextButton(onClick = { mode = "move" }) { Text("Move to project…") }
+                        TextButton(onClick = { cm.exportSession(s.sessionId); onDone() }) { Text("Export…") }
+                    }
                     TextButton(onClick = { mode = "archive" }) { Text("Archive…") }
                     TextButton(onClick = { mode = "delete" }) {
                         Text("Delete…", color = MaterialTheme.colorScheme.error)
