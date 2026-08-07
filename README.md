@@ -67,6 +67,21 @@ Off by default. It surfaces one persistent thread kept fed by scheduled recipes 
 server-side — a setup a particular server has, not something a stock `goose serve` provides.
 With it off this is a plain chat client. Settings › Assistant turns it on.
 
+## Remote sessions (roam)
+
+This branch adds support for goose's roam federation: sessions living on other machines
+appear in the drawer under a per-peer REMOTE section, marked with a globe. The phone still
+holds exactly one connection — the home server's `goose serve` recognises `roam:<peer>:<id>`
+session ids and forwards those calls over an iroh bridge to the peer's `goose roam share`.
+Chatting, the model/mode picker, tool management, rename, archive and delete all work on a
+remote session; the server refuses anything it can't forward soundly.
+
+Needs a server built from the `feat/acp-federate-roam` branch of
+[ccgauvin94/goose](https://github.com/ccgauvin94/goose) with `GOOSE_ROAM_FEDERATE=<peers>`
+set. A stock server ignores all of this and the app behaves as plain Grouse.
+
+![How the roam connection works](docs/roam-connection.svg)
+
 ## Compatibility
 
 Everything here speaks stock ACP: no server-side patches, no forked goose methods.
