@@ -90,12 +90,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "$RUNNER_TEMP/grouse-$GITHUB_REF_NAME.apk" \
-            --title "$GITHUB_REF_NAME" \
-            --notes "Alpha build. Sideload only — not on any store.
+          # This tag's CHANGELOG section, if it has one: everything between its own `## <ver>`
+          # heading and the next one. Absent (or no CHANGELOG at all), the notes are just the
+          # standing preamble — a missing entry must not fail the release.
+          NOTES_FILE="$RUNNER_TEMP/notes.md"
+          VER="${GITHUB_REF_NAME#v}"
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="$VER" '
+              $0 ~ "^## " ver "( |$)" { p = 1; next }
+              p && /^## / { exit }
+              p { print }
+            ' CHANGELOG.md > "$RUNNER_TEMP/section.md"
+            if [ -s "$RUNNER_TEMP/section.md" ]; then
+              cat "$RUNNER_TEMP/section.md" >> "$NOTES_FILE"
+              printf '\n---\n\n' >> "$NOTES_FILE"
+            fi
+          fi
+          cat >> "$NOTES_FILE" <<EOF
+          Alpha build. Sideload only — not on any store.
 
           SHA-256: \`$(cut -d' ' -f1 "$RUNNER_TEMP/sha256.txt")\`
 
           Needs a reachable \`goose serve\` and its secret key. See the README; read the
-          exposure note there before putting goose on the internet."
+          exposure note there before putting goose on the internet.
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            "$RUNNER_TEMP/grouse-$GITHUB_REF_NAME.apk" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$NOTES_FILE"
