@@ -23,6 +23,13 @@ and the other way round.
 - Quick Settings tile, share target, notification replies
 - Optional biometric lock
 
+## Screenshots
+
+<p>
+  <img src="docs/screenshots/drawer.png" width="36%" alt="Drawer: projects and chats">
+  <img src="docs/screenshots/chat.png" width="36%" alt="A chat with the per-session tool sheet open">
+</p>
+
 ## Requirements
 
 A reachable `goose serve` with a secret key:
