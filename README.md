@@ -69,22 +69,43 @@ With it off this is a plain chat client. Settings › Assistant turns it on.
 
 ## Remote sessions (roam)
 
-This branch adds support for goose's roam federation: sessions living on other machines
-appear in the drawer under a per-peer REMOTE section, marked with a globe. The phone still
-holds exactly one connection — the home server's `goose serve` recognises `roam:<peer>:<id>`
-session ids and forwards those calls over an iroh bridge to the peer's `goose roam share`.
-Chatting, the model/mode picker, tool management, rename, archive and delete all work on a
-remote session; the server refuses anything it can't forward soundly.
+This branch works against the `feat/acp-federate-roam` branch of
+[ccgauvin94/goose](https://github.com/ccgauvin94/goose): that server merges sessions from
+other machines — reached over goose's roam transport — into its own session list, addressed
+as `roam:<peer>:<session id>`. The phone keeps its single connection; prompts, config
+changes, renames and tool edits for those sessions are forwarded to the machine that owns
+them.
 
-Needs a server built from the `feat/acp-federate-roam` branch of
-[ccgauvin94/goose](https://github.com/ccgauvin94/goose) with `GOOSE_ROAM_FEDERATE=<peers>`
-set. A stock server ignores all of this and the app behaves as plain Grouse.
+Being clear about what is and isn't standard here: the *methods* are ordinary ACP — the
+same session, config and tool calls used for local sessions. The *addressing* is not.
+`roam:<peer>:<id>` is a private convention of that fork, and this branch of Grouse knows
+it and special-cases federated sessions wherever treating them as local would be wrong:
+
+- The drawer groups them under a per-peer REMOTE section (globe icon) instead of by
+  project — their project ids belong to the peer, not this server.
+- The model picker offers only the options the peer reported for that session; the live
+  model list fetched from the local provider doesn't apply there and is suppressed.
+- A remote session's settings are never saved as local defaults for new chats.
+- The tool sheet shows only what the peer's session reports, and only ever writes back
+  objects it got from the peer — a same-named local extension may not exist there.
+  Extensions not attached to the remote session can't be listed.
+- Move-to-project and export stay local-only.
+
+`ConnectionManager.roamPeer()` is the single place the id convention is parsed; if the
+scheme changes, that is the one thing to update.
+
+The server needs `GOOSE_ROAM_FEDERATE=<peer names>` set and a `goose roam share` running
+on each peer. An offline peer's sessions drop out of the list until it returns.
 
 ![How the roam connection works](docs/roam-connection.svg)
 
 ## Compatibility
 
-Everything here speaks stock ACP: no server-side patches, no forked goose methods.
+Against a stock `goose serve` this branch behaves exactly like master: a stock server
+never produces `roam:` session ids, so every roam code path stays dormant and the app is a
+plain ACP client. The remote-session feature itself is **not** stock — it needs the fork
+named above, and the `roam:` addressing is a convention shared between that fork and this
+branch, not part of ACP or upstream goose.
 
 goose's ACP surface is explicitly unstable — the methods live under `_goose/unstable/` — so a
 goose upgrade can change or remove things this app calls. Please open an issue if something
