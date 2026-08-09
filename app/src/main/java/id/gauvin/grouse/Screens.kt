@@ -1124,7 +1124,7 @@ private fun NewProjectDialog(cm: ConnectionManager, onCreated: (String) -> Unit,
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
-    LaunchedEffect(Unit) { cm.listSessions() }
+    LaunchedEffect(Unit) { cm.refreshSidebar() }
     var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var deleteBusy by remember { mutableStateOf(false) }

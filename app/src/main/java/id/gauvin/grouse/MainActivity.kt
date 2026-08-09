@@ -195,7 +195,7 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             ModalDrawerSheet {
                 // Re-fetch the session list whenever the menu opens — it IS the chats list now,
                 // so it must reflect renames/archives/new sessions from any client.
-                LaunchedEffect(drawerState.isOpen) { if (drawerState.isOpen) cm.listSessions() }
+                LaunchedEffect(drawerState.isOpen) { if (drawerState.isOpen) cm.refreshSidebar() }
                 Column(Modifier.fillMaxHeight().padding(vertical = 12.dp)) {
                     if (cm.assistantEnabled.value) {
                         NavigationDrawerItem(

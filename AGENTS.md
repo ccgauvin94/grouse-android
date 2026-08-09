@@ -93,7 +93,7 @@ it is added. Do not strand an ACP fix on a side branch expecting a merge to brin
 |`app/src/main/assets/`|`chart.min.js` (Chart.js 4.4.4) — loaded by the chart WebView at `file:///android_asset/`|
 |`docs/screenshots/`|README screenshots (drawer, chat)|
 |`.github/workflows/`|`release.yml` — the only CI|
-|Root|`README.md`, `CHANGELOG.md`, `AUDIT-20260803.md`, `ACP-AUDIT-20260803.md`, `env.sh`|
+|Root|`README.md`, `CHANGELOG.md`, `env.sh`|
 
 ## Development Commands
 
@@ -224,8 +224,8 @@ carries the date (`0.14-20260806`) so "which build is this?" is answerable from 
 - **Testability convention:** parsers and the dispatcher (`handle`) are `internal`, not
   `private`, so tests drive them directly without a socket. Keep pure parsing code free of
   Android dependencies — that is what keeps the suite JVM-only and fast.
-- **Before touching wire code, read the audits:** `ACP-AUDIT-20260803.md` (protocol coverage:
-  116 server methods vs ~45 used, with P0–P2 findings) and `AUDIT-20260803.md` (security audit,
-  findings with fixes). They record what was already audited so you don't re-litigate it.
+- **Before touching wire code:** the ACP surface was audited 2026-08-03 (protocol coverage,
+  P0–P2 findings, and a security pass); the findings were folded into the code and the audit
+  files deleted. Don't re-litigate the audited ground — the code comments note what remains.
 - `CHANGELOG.md` is per-release; the release workflow cuts notes from the matching `## <ver>`
   section.

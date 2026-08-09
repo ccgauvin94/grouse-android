@@ -30,6 +30,12 @@ internal fun parsePush(raw: String): Triple<String?, String?, String> = try {
     Triple(null, null, raw)
 }
 
+/** True when a finished-turn push should become a notification: the app is backgrounded, the
+ *  envelope names a session, and it is the session this device armed (sent a turn and is still
+ *  waiting on completion). Top-level internal so the JVM unit tests can exercise it. */
+internal fun shouldShowTurnNudge(pushedSessionId: String?, pendingSessionId: String?, isForeground: Boolean): Boolean =
+    !isForeground && pushedSessionId != null && pushedSessionId == pendingSessionId
+
 /**
  * UnifiedPush wiring. The distributor (e.g. NextPush, backed by the uppush app on the user's
  * Nextcloud) holds the one battery-friendly connection; the server POSTs to the endpoint URL to
@@ -69,10 +75,10 @@ class GoosePushService : PushService() {
             // Finished-turn nudge (fires for every goose turn, Desktop too -- the server can't tell
             // clients apart). Only show it for a turn THIS device actually sent and is still waiting
             // on, and not while you're already watching (foreground). Tap deep-links to that session.
-            if (cm.isForeground) return
-            if (session == null || session != cm.store.pendingPushSessionId) return
-            cm.store.pendingPushSessionId = null
-            Notifier(this).postReply(text, session)
+            if (shouldShowTurnNudge(session, cm.store.pendingPushSessionId, cm.isForeground)) {
+                cm.store.pendingPushSessionId = null
+                Notifier(this).postReply(text, session)
+            }
         } else {
             // Briefing/proactive: ALWAYS record for the Assistant status/dialog — even when
             // foreground, or a briefing that lands while you're in the app is lost and the dialog
