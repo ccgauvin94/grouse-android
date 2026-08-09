@@ -16,6 +16,20 @@ import org.unifiedpush.android.connector.data.PushEndpoint
 import org.unifiedpush.android.connector.data.PushMessage
 import java.util.concurrent.Executors
 
+/** Parse a push envelope {type,session,text}; plain text (no type) is a briefing. Malformed
+ *  JSON falls through to the raw text as a briefing. Top-level internal so the JVM unit tests
+ *  can exercise it without instantiating the Android service. */
+internal fun parsePush(raw: String): Triple<String?, String?, String> = try {
+    val o = Json.parseToJsonElement(raw).jsonObject
+    Triple(
+        o["type"]?.jsonPrimitive?.contentOrNull,
+        o["session"]?.jsonPrimitive?.contentOrNull,
+        o["text"]?.jsonPrimitive?.contentOrNull ?: raw,
+    )
+} catch (e: Exception) {
+    Triple(null, null, raw)
+}
+
 /**
  * UnifiedPush wiring. The distributor (e.g. NextPush, backed by the uppush app on the user's
  * Nextcloud) holds the one battery-friendly connection; the server POSTs to the endpoint URL to
@@ -67,17 +81,6 @@ class GoosePushService : PushService() {
             SecureStore(this).apply { lastBriefingAt = System.currentTimeMillis(); lastBriefingText = text }
             if (!cm.isForeground) Notifier(this).postProactive(text, session)
         }
-    }
-
-    private fun parsePush(raw: String): Triple<String?, String?, String> = try {
-        val o = Json.parseToJsonElement(raw).jsonObject
-        Triple(
-            o["type"]?.jsonPrimitive?.contentOrNull,
-            o["session"]?.jsonPrimitive?.contentOrNull,
-            o["text"]?.jsonPrimitive?.contentOrNull ?: raw,
-        )
-    } catch (e: Exception) {
-        Triple(null, null, raw)
     }
 
     override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) {

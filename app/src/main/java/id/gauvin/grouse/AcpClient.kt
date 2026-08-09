@@ -176,7 +176,7 @@ data class ExtInfo(
  *  error surfaced anywhere -- which looks exactly like "my tool changes do nothing".
  *
  *  builtin and platform pass through: they are already variants the add method knows. */
-private fun toExtensionDto(raw: JsonObject): JsonObject {
+internal fun toExtensionDto(raw: JsonObject): JsonObject {
     val type = raw["type"]?.jsonPrimitive?.contentOrNull ?: return raw
     if (type == "builtin" || type == "platform" || type == "mcp") return raw
     val name = raw["name"]?.jsonPrimitive?.contentOrNull ?: return raw
@@ -854,7 +854,7 @@ class AcpClient(
         }
     }
 
-    private fun handle(text: String) {
+    internal fun handle(text: String) {
         val obj = try { json.parseToJsonElement(text).jsonObject } catch (e: Exception) {
             onEvent(AcpEvent.Error("bad json: ${e.message}")); return
         }
@@ -1104,7 +1104,7 @@ class AcpClient(
         }
     })
 
-    private fun parseConfig(result: JsonObject?): List<ConfigOption> {
+    internal fun parseConfig(result: JsonObject?): List<ConfigOption> {
         val arr = result?.get("configOptions") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1125,7 +1125,7 @@ class AcpClient(
 
     /** sources/list returns SourceEntry objects; a project's slug is its file stem, which is
      *  what session.projectId holds. `name` is the human label and may differ. */
-    private fun parseProjects(result: JsonObject?): List<ProjectInfo> {
+    internal fun parseProjects(result: JsonObject?): List<ProjectInfo> {
         val arr = result?.get("sources") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1145,7 +1145,7 @@ class AcpClient(
         }.sortedBy { it.name.lowercase() }
     }
 
-    private fun parseSkills(result: JsonObject?): List<SkillInfo> {
+    internal fun parseSkills(result: JsonObject?): List<SkillInfo> {
         val arr = result?.get("sources") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1160,7 +1160,7 @@ class AcpClient(
         }.sortedBy { it.name.lowercase() }
     }
 
-    private fun parseSchedules(result: JsonObject?): List<ScheduleInfo> {
+    internal fun parseSchedules(result: JsonObject?): List<ScheduleInfo> {
         val arr = result?.get("jobs") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1176,7 +1176,7 @@ class AcpClient(
         }.sortedBy { it.id.lowercase() }
     }
 
-    private fun parseRecipes(result: JsonObject?): List<RecipeInfo> {
+    internal fun parseRecipes(result: JsonObject?): List<RecipeInfo> {
         val arr = result?.get("recipes") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val e = el as? JsonObject ?: return@mapNotNull null
@@ -1216,7 +1216,7 @@ class AcpClient(
         }.sortedBy { it.title.lowercase() }
     }
 
-    private fun parseSessions(result: JsonObject?): List<SessionInfo> {
+    internal fun parseSessions(result: JsonObject?): List<SessionInfo> {
         val arr = result?.get("sessions") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1245,7 +1245,7 @@ class AcpClient(
     }
 
     /** Parse the config/extensions/list reply: {extensions:[{extension:{name,type,description}, enabled, configKey}]}. */
-    private fun parseExtensions(result: JsonObject?): List<ExtInfo> {
+    internal fun parseExtensions(result: JsonObject?): List<ExtInfo> {
         val arr = result?.get("extensions") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null

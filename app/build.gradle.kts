@@ -109,4 +109,10 @@ dependencies {
         exclude(group = "com.google.crypto.tink", module = "tink")
     }
     implementation("com.google.crypto.tink:tink-android:1.16.0")
+
+    // JVM unit tests: parsers and wire framing only — no Android framework, no Robolectric.
+    // Defends the ACP contracts that have bitten repeatedly (casing, session_info_update keys,
+    // extension DTO shapes, _meta.client). See app/src/test/java/id/gauvin/grouse/.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
