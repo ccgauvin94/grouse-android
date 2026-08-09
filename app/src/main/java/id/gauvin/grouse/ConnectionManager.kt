@@ -1075,6 +1075,7 @@ class ConnectionManager private constructor(context: Context) {
         busy.value = false; streamingRole = null; compacting.value = false
             // The superseded client will never report TurnDone here, so free the wire.
             turnInFlight = false
+        activeRunId = null   // a stale run id belongs to the superseded session; steer would target the wrong run
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         replayWiped = false
         replayActive.value = false

@@ -212,6 +212,13 @@ internal fun toExtensionDto(raw: JsonObject): JsonObject {
 
 private const val SKILLS_TAG = "_goose/unstable/sources/list#skill"
 
+/** session/update tags that mutate the on-screen transcript. Any other tag carries its own
+ *  session id in the event and is wanted no matter which session it names. */
+private val TRANSCRIPT_TAGS = setOf(
+    "user_message_chunk", "agent_message_chunk", "agent_thought_chunk",
+    "tool_call", "tool_call_update", "usage_update",
+)
+
 sealed interface AcpEvent {
     data class Status(val text: String) : AcpEvent
     /** messageId is set on REPLAYED chunks (goose stamps _meta.goose.messageId per source
@@ -1299,6 +1306,11 @@ class AcpClient(
             // timeToFirstTokenMs, cost — camelCase on the wire). Distinct from the standard ACP
             // usage_update (context-window used/size) already handled in standardUpdate().
             "message_usage" -> {
+                // Per-message stats belong to the bound session's turn; a broadcast for another
+                // session would stamp wrong numbers onto this chat's last reply.
+                val bound = sessionId ?: resumeSessionId
+                val sid = params?.get("sessionId")?.jsonPrimitive?.contentOrNull
+                if (bound != null && sid != null && sid != bound) return
                 val usage = update["usage"] as? JsonObject ?: return
                 val outTok = usage["outputTokens"]?.jsonPrimitive?.intOrNull ?: return
                 val elapsed = usage["elapsedMs"]?.jsonPrimitive?.longOrNull ?: return
@@ -1313,6 +1325,18 @@ class AcpClient(
     private fun standardUpdate(params: JsonObject?) {
         val update = params?.get("update") as? JsonObject ?: return
         val tag = update["sessionUpdate"]?.jsonPrimitive?.contentOrNull
+        // goose broadcasts session/update for OTHER sessions onto the same socket (turns this
+        // client started elsewhere, active-run lifecycles). The transcript-mutating tags must
+        // only render when they belong to the session THIS transport is bound to — otherwise a
+        // response to a chat you left streams into whichever chat is on screen. Metadata tags
+        // (session_info_update, mode/config/commands) carry their own session id and are wanted
+        // regardless of which session they name, so they pass. During the pre-bind replay
+        // window (sessionId null) resumeSessionId is the session being loaded.
+        if (tag in TRANSCRIPT_TAGS) {
+            val bound = sessionId ?: resumeSessionId
+            val sid = params?.get("sessionId")?.jsonPrimitive?.contentOrNull
+            if (bound != null && sid != null && sid != bound) return
+        }
         // Replays are never suppressed: every reconnect rebuilds the transcript from the server's
         // history (see AcpEvent.ReplayStart). Suppression used to guard a socket blip against
         // duplicate bubbles, but it couldn't tell "what I already show" from "turns another client

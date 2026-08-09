@@ -107,4 +107,53 @@ class AcpClientWireTest {
         assertFalse(frame.contains("\"cron\":"))
         server.shutdown()
     }
+
+    @Test
+    fun `stream events for another session are dropped, the bound session renders`() {
+        // The wrong-chat bug: goose broadcasts session/update for OTHER sessions onto the same
+        // socket. A finished-turn response for a chat the user left must not render in the chat
+        // that is on screen. This binds the client to "sess-B" (full handshake), then feeds one
+        // chunk for a foreign session and one for the bound session.
+        val server = MockWebServer()
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                received.add(text)
+                val obj = json.parseToJsonElement(text).jsonObject
+                val method = obj.get("method")?.jsonPrimitive?.contentOrNull
+                val id = obj.get("id")?.jsonPrimitive?.contentOrNull ?: return
+                when (method) {
+                    "initialize" -> webSocket.send("""{"jsonrpc":"2.0","id":$id,"result":{}}""")
+                    "session/new" -> webSocket.send(
+                        """{"jsonrpc":"2.0","id":$id,"result":{"sessionId":"sess-B"}}""")
+                }
+            }
+        }))
+        val events = java.util.concurrent.CopyOnWriteArrayList<AcpEvent>()
+        val client = AcpClient(wsUrl(server), "k") { events.add(it) }
+        client.desiredCwd = "/home/user/Projects/Inbox"
+        client.connect()
+        waitForEvents(events) { it.any { e -> e is AcpEvent.Ready && e.sessionId == "sess-B" } }
+        events.clear()
+
+        // A response for ANOTHER session must not land in the on-screen transcript.
+        client.handle("""{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-A","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"reply for A"}}}}""")
+        assertEquals(0, events.size)
+
+        // The bound session's own stream renders as usual.
+        client.handle("""{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-B","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"reply for B"}}}}""")
+        assertEquals(listOf(AcpEvent.AgentChunk("reply for B", null)), events)
+        server.shutdown()
+    }
+
+    private fun waitForEvents(
+        events: java.util.concurrent.CopyOnWriteArrayList<AcpEvent>,
+        timeoutMs: Long = 5000,
+        cond: (List<AcpEvent>) -> Boolean,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!cond(events)) {
+            if (System.currentTimeMillis() > deadline) throw AssertionError("timeout waiting for events: $events")
+            Thread.sleep(20)
+        }
+    }
 }

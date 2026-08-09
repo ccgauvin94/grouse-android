@@ -158,6 +158,14 @@ carries the date (`0.14-20260806`) so "which build is this?" is answerable from 
   active-run lifecycle (`_meta.goose.activeRunId` — what makes `session/steer` possible), and
   queued-steer acks are distinguished only by which `_meta.goose` keys are present. Parse by key
   presence, never by assumed payload shape.
+- **goose broadcasts session/update for OTHER sessions on your socket.** Every `session/update`
+  notification carries `params.sessionId`, and goose pushes active-run lifecycles and finished
+  turns of sessions this client did not load onto the same transport. The transcript-mutating
+  tags (`agent_message_chunk`, `tool_call`, `tool_call_update`, `usage_update`, …) are filtered
+  in `AcpClient.standardUpdate` against the bound session (`sessionId ?: resumeSessionId` —
+  resume covers the pre-bind replay window). Metadata tags (`session_info_update`, mode/config)
+  pass: they carry their own id and other clients' renames must still reach the drawer. If a
+  response to a chat you left appears in the wrong chat, the filter is the first thing to check.
 - **Utility features get a session of their own, not the chat's.** `scanWithScratchSession`
   (code scan) and `openBrowser` (directory picker) each open a private ACP session with cwd
   `DEFAULT_CWD`, because both are reached from the drawer where a chat is usually not open; their
