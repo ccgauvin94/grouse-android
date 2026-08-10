@@ -3,6 +3,25 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.15-20260810
+
+Dev-branch test build (watchdog hardening + the 0.14.1-era fixes folded into master).
+
+**Resume probe no longer restarts a live replay.** The 2.5-second dead-socket watchdog
+fired while a big session was still replaying: the probe reply queues behind the replay
+stream on a busy server, the window elapsed, and the app force-reconnected — restarting
+the whole replay from zero. That made 1000+ message sessions look like they "time out
+when fetching" and re-ran the entire history on every alt-tab. The probe and its watchdog
+are now skipped while a replay is streaming (the chunks themselves prove the socket is
+alive), and the dead-socket window is 10s.
+
+**Finished-turn push nudges work again.** The gate compared against an armed-session id
+that was never set (the arming was lost in the master ACP-only refactor), so no push ever
+became a notification; arming restored on send, cleared on completion.
+
+**Transcript cache is bounded.** Cold-start snapshots accumulated one file per session
+forever; capped at 20, oldest pruned.
+
 ## 0.14 — 2026-08-06
 
 **Push notifications are back.** 0.12 stripped UnifiedPush out along with the LocalAI
