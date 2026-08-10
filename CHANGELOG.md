@@ -3,6 +3,20 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.17-20260810
+
+**Transcript snapshot survives a kill during load.** The snapshot was skipped while a
+session/load replay was streaming, so backgrounding mid-load (the most likely moment,
+with a big session still loading) left no cache at all — the next cold start went
+straight back to a blank "Loading…". Mid-replay the shown transcript is still a valid
+snapshot (the pre-replay content or the cached paint), so it's now saved; the next
+background after the replay completes overwrites it with the fresh transcript.
+
+Verified against the server: `session/load` does NOT change a session's delta (only
+one-time normalization writes, then stable), and the resume probe's messageCount is
+live (computed from the messages table) — the "does loading change the delta?"
+question is no.
+
 ## 0.16-20260810
 
 **Replay shows live progress.** Loading a big session sat on a static amber

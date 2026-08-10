@@ -1036,7 +1036,11 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun saveTranscriptCache() {
         val sid = currentSession.value ?: lastSessionId ?: return
-        if (replayActive.value) return   // mid-replay: `messages` is the OLD transcript
+        // Mid-replay `messages` holds the last fully-shown transcript (pre-replay content or the
+        // cold-start paint) — still a valid snapshot, and the only one a process kill during a
+        // long load would leave. No replayActive gate: every path keeps messages in step with
+        // currentSession (openSession clears before painting; newSession nulls both), and an
+        // empty list is caught below. The next background after Ready overwrites this.
         // Text bubbles only: tool cards, MCP-app views and usage stats don't survive a replay
         // either, so caching them would just make the swap-in visibly churn.
         val snap = messages.filter { (it.role == "user" || it.role == "assistant") && it.text.isNotBlank() }
