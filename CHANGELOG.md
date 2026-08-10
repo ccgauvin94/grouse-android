@@ -3,6 +3,14 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.16-20260810
+
+**Replay shows live progress.** Loading a big session sat on a static amber
+"Connecting…" with a blank chat until the whole history had streamed in — on a fresh
+install there is no cached snapshot to paint, so a 1000+ message session looked hung
+for the duration. The title now counts replayed messages ("Loading… 342") as the
+stream arrives, so a long load reads as working.
+
 ## 0.15-20260810
 
 Dev-branch test build (watchdog hardening + the 0.14.1-era fixes folded into master).

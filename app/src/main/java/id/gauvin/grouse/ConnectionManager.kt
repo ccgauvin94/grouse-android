@@ -382,6 +382,10 @@ class ConnectionManager private constructor(context: Context) {
     // pins unconditionally; the tick fires one final snap when the rebuild completes.
     val replayActive = mutableStateOf(false)
     val replayDoneTick = mutableStateOf(0)
+    // Replayed source messages counted so far — feeds the "Loading… N" title while a big
+    // history streams in. Without it a long replay sat on a static "Connecting…" and looked
+    // hung; the count proves it is advancing.
+    val replayProgress = mutableStateOf(0)
     // Replays rebuild into this buffer instead of mutating `messages`; Ready swaps it in only
     // when the content actually differs. The common background-reconnect replay is identical,
     // so the visible list is never touched and the scroll position survives by construction —
@@ -1276,6 +1280,7 @@ class ConnectionManager private constructor(context: Context) {
                 // so rebuild from scratch — into the side buffer; `messages` stays visible and
                 // untouched until Ready decides whether anything actually changed.
                 replayBuffer.clear()
+                replayProgress.value = 0
                 streamingRole = null
                 replayWiped = true
                 replayActive.value = true
@@ -1283,13 +1288,20 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.AgentChunk -> {
                 // Replay boundary: a NEW messageId means a new source message — break the
                 // bubble instead of gluing (consecutive assistant messages, e.g. a briefing
-                // relay followed by an appended digest, used to merge into one).
-                if (ev.messageId != null && ev.messageId != streamMsgId) streamingRole = null
+                // relay followed by an appended digest, used to merge into one). The same
+                // boundary counts a replayed message for the Loading progress.
+                if (ev.messageId != null && ev.messageId != streamMsgId) {
+                    streamingRole = null
+                    if (replayActive.value) replayProgress.value++
+                }
                 if (ev.messageId != null) streamMsgId = ev.messageId
                 appendStream("assistant", ev.text)
             }
             is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
-            is AcpEvent.UserChunk -> { t().add(ChatMessage("user", ev.text)); streamingRole = null }
+            is AcpEvent.UserChunk -> {
+                t().add(ChatMessage("user", ev.text)); streamingRole = null
+                if (replayActive.value) replayProgress.value++   // one UserChunk per replayed user message
+            }
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) {
                 config.value = ev.options
                 // Persist the true current values so re-apply on reconnect can't drift

@@ -363,6 +363,12 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         // instead of visually breaking.
                         Text(
                             when {
+                                // A session/load replay is streaming into the buffer: count
+                                // replayed messages live — a big history can take tens of
+                                // seconds and a static "Connecting…" looked hung. The counter
+                                // proves it's advancing; it also covers the fresh-install
+                                // case where there is no cached snapshot to paint meanwhile.
+                                cm.replayActive.value -> "Loading… ${cm.replayProgress.value}"
                                 cm.onAssistant && busy -> "Assistant · working…"
                                 cm.onAssistant -> "Assistant"
                                 online && busy -> "Grouse · working…"
