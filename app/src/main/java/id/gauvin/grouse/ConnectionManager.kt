@@ -929,19 +929,22 @@ class ConnectionManager private constructor(context: Context) {
             // Now: one cheap session/info probe. Three outcomes:
             //   reply, nothing changed  -> do nothing (the overwhelmingly common case)
             //   reply, updatedAt/count moved -> another client touched the session; replay
-            //   no reply in 2.5s        -> socket died while frozen and OkHttp hasn't
+            //   no reply in 10s         -> socket died while frozen and OkHttp hasn't
             //                              noticed (`live` is stale) — force a reconnect,
             //                              which ensureConnected can't do (it trusts `live`).
-            if (live && !busy.value && !turnInFlight) {
+            // No probe (and no watchdog) while a replay is streaming: the chunks themselves
+            // prove the socket is alive, a reply would queue behind the stream (a huge replay
+            // can outrun the window), and a force-reconnect would restart the whole replay.
+            if (live && !busy.value && !turnInFlight && !replayActive.value) {
                 (lastSessionId ?: store.lastSessionId)?.let { sid ->
                     val tok = ++probeToken
                     client?.probeSession(sid)
                     main.postDelayed({
-                        if (tok == probeToken && appForeground && !turnInFlight) {
+                        if (tok == probeToken && appForeground && !turnInFlight && !replayActive.value) {
                             live = false
                             open(resume = sid)
                         }
-                    }, 2_500)
+                    }, 10_000)
                 }
             }
             // Re-ask the server for its model list every time we come back. It was previously
@@ -1201,7 +1204,11 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Probe -> {
                 probeToken++   // cancels the pending dead-socket timeout
-                when {
+                // While a replay streams, the socket is demonstrably alive and the rebuild is
+                // already bringing the fresh content — acting on the verdict here would just
+                // open() and RESTART the replay (same bug the watchdog guard above fixes).
+                // Keep only the baseline refresh; the replay's Ready supersedes any verdict.
+                if (!replayActive.value) when {
                     // The probe itself failed: session gone or socket dead — reconnect.
                     ev.messageCount < 0 -> if (!turnInFlight) { open(resume = ev.sessionId) }
                     // Baseline exists and moved: another client changed the session; replay.
