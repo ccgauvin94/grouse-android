@@ -22,8 +22,8 @@ android {
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 22
-        versionName = "0.22-20260811"
+        versionCode = 23
+        versionName = "0.23-20260811"
     }
 
     // Release signing, used ONLY when the four properties below are supplied (CI sets them from
@@ -64,6 +64,16 @@ android {
             // Android will accept as an update over it. Published builds must use the real key.
             signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release")
                             else signingConfigs.getByName("debug")
+        }
+    }
+    // JNA (the roam transport's FFI) loads native libs via System.loadLibrary —
+    // that needs them EXTRACTED to nativeLibraryDir at install. The AGP default
+    // (extractNativeLibs=false) left the libs in the APK and every uniffi call
+    // died with an opaque class-init error; JNA's APK-resource fallback looks
+    // under android-aarch64/, which AGP's lib/arm64-v8a/ layout never matches.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
     compileOptions {

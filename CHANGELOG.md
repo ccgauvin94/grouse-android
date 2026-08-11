@@ -3,6 +3,16 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.23-20260811
+
+**Roam native transport loads at last.** Every uniffi call died with an opaque
+`uniffi.grouse_roam_core UniffiLib` error since 0.19: the AGP default keeps
+native libs inside the APK (`extractNativeLibs=false`), but JNA — the FFI layer
+of the roam transport — loads libs via `System.loadLibrary`, which needs them
+extracted at install; its APK-resource fallback looks under `android-aarch64/`,
+a layout AGP never produces. Libs are now extracted (`useLegacyPackaging`),
+so pairing and connecting work. APK size unchanged (~22 MB).
+
 ## 0.22-20260811
 
 **Transport .so slimmed 63%.** The native roam core was 21.6 MB in the APK —
