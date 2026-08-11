@@ -3,6 +3,17 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.26-20260811
+
+**The roam transport actually works now** (core 0.1.3, from the upstream fix).
+Three transport bugs, each hiding the next: the iroh pin drifted from the
+hosts (1.0.2 → 1.0.3); the endpoint was dropped right after connecting, so
+the first read saw "stream closed"; and — the real one — the stream's `read`
+held a non-reentrant mutex across the blocking receive, deadlocking the instant
+the first ACP frame arrived. The app sat at "connected — initializing" forever:
+no session list, no new chats, no prompt replies. Now initialize round-trips
+and the sessions load.
+
 ## 0.25-20260811
 
 **New chats work on roam hosts.** `session/new` sent an empty cwd and goose
