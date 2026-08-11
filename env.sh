@@ -37,5 +37,25 @@ else
   echo "        Install one, or set JAVA_HOME before sourcing this." >&2
 fi
 
-export ANDROID_HOME=$HOME/Android/Sdk
+# ANDROID_HOME is detected, not hardcoded, for the same reason JAVA_HOME is: the host keeps
+# its SDK in ~/build/android-sdk, the container under ~/Android/Sdk. local.properties (sdk.dir)
+# pins the SDK for Gradle either way; this detection is what puts sdkmanager and adb on the
+# PATH from both checkouts. An already-set ANDROID_HOME wins -- someone who set it meant it.
+
+_sdk_ok() { [ -n "$1" ] && [ -d "$1/platform-tools" ] && [ -d "$1/platforms" ]; }
+
+if ! _sdk_ok "${ANDROID_HOME:-}"; then
+  for _cand in "$HOME/build/android-sdk" "$HOME/Android/Sdk" /opt/android-sdk /usr/local/android-sdk; do
+    if _sdk_ok "$_cand"; then ANDROID_HOME="$_cand"; break; fi
+  done
+  unset _cand
+fi
+
+if _sdk_ok "${ANDROID_HOME:-}"; then
+  export ANDROID_HOME
+else
+  echo "env.sh: no Android SDK found (looked in \$ANDROID_HOME, ~/build/android-sdk, ~/Android/Sdk)." >&2
+  echo "        Install one, or set ANDROID_HOME before sourcing this." >&2
+fi
+
 export PATH=$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
