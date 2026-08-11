@@ -272,6 +272,15 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             }
             composable("settings") { SettingsScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("roam") { RoamScreen(cm, nav) }
+            composable("qrscan") {
+                QrScanScreen(
+                    onResult = { card ->
+                        nav.previousBackStackEntry?.savedStateHandle?.set("qr_card", card)
+                        nav.popBackStack()
+                    },
+                    onCancel = { nav.popBackStack() },
+                )
+            }
             composable("extensions") { ExtensionsScreen(cm, nav) }
             composable("instance") { InstanceScreen(cm, nav) }
             composable("providers") { ProvidersScreen(cm, nav) }

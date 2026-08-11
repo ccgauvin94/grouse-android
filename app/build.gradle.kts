@@ -18,8 +18,8 @@ android {
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 19
-        versionName = "0.19-20260811"
+        versionCode = 20
+        versionName = "0.20-20260811"
     }
 
     // Release signing, used ONLY when the four properties below are supplied (CI sets them from
@@ -112,6 +112,12 @@ dependencies {
     // Native iroh roam transport (roam branch): uniffi Kotlin bindings over the
     // fork's goose-roaming, JNA-loaded .so (arm64-v8a). See grouse-roam-core.
     implementation("dev.grouse:roamcore:0.1.0")
+    // QR pairing for roam hosts: CameraX preview + bundled ML Kit barcode
+    // (no Play Services — this app is sideload-only).
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
     // JVM unit tests: parsers and wire framing only — no Android framework, no Robolectric.
     // Defends the ACP contracts that have bitten repeatedly (casing, session_info_update keys,

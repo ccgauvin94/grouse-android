@@ -3280,6 +3280,16 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
     var card by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { cm.loadRoamPeers() }
+    // A scanned card arrives back via the qrscan route's savedStateHandle.
+    LaunchedEffect(nav.currentBackStackEntry) {
+        nav.currentBackStackEntry?.savedStateHandle
+            ?.getStateFlow<String?>("qr_card", null)?.collect { value ->
+                if (value != null) {
+                    card = value
+                    nav.currentBackStackEntry?.savedStateHandle?.set("qr_card", null)
+                }
+            }
+    }
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Roam") },
@@ -3310,11 +3320,16 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(top = 6.dp))
                 }
-                Button(onClick = {
-                    error = if (name.isBlank()) "Give the host a name."
-                            else cm.addRoamPeer(name.trim(), card.trim())
-                    if (error == null) { name = ""; card = "" }
-                }, modifier = Modifier.padding(top = 8.dp)) { Text("Save host") }
+                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = {
+                        nav.navigate("qrscan") { launchSingleTop = true }
+                    }) { Text("Scan QR") }
+                    Button(onClick = {
+                        error = if (name.isBlank()) "Give the host a name."
+                                else cm.addRoamPeer(name.trim(), card.trim())
+                        if (error == null) { name = ""; card = "" }
+                    }) { Text("Save host") }
+                }
             }
             SettingsSection("Hosts") {
                 if (cm.roamPeers.isEmpty())
@@ -3351,4 +3366,89 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
             }
         }
     }
+}
+
+/** Camera QR scan for roam pairing. Decodes a `goose+roam://` connection card —
+ *  the same string the paste field takes — and hands it to [onResult] once. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun QrScanScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
+    val ctx = LocalContext.current
+    var granted by remember {
+        mutableStateOf(androidx.core.content.ContextCompat.checkSelfPermission(
+            ctx, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+    }
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()) { ok -> granted = ok }
+    Scaffold(topBar = {
+        TopAppBar(title = { Text("Scan host card") },
+            navigationIcon = {
+                IconButton(onClick = onCancel) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            })
+    }) { pad ->
+        if (!granted) {
+            Column(Modifier.padding(pad).padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Camera access is needed to scan a host's QR card. " +
+                    "You can also paste the card by hand on the Roam screen.")
+                Button(onClick = { launcher.launch(android.Manifest.permission.CAMERA) }) {
+                    Text("Allow camera")
+                }
+            }
+        } else {
+            CameraQrPreview(onCard = onResult, modifier = Modifier.padding(pad).fillMaxSize())
+        }
+    }
+}
+
+/** CameraX preview + ML Kit QR decode; fires [onCard] once with the raw value. */
+@Composable
+private fun CameraQrPreview(onCard: (String) -> Unit, modifier: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val mainExecutor = androidx.core.content.ContextCompat.getMainExecutor(ctx)
+    val fired = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val previewView = remember { androidx.camera.view.PreviewView(ctx) }
+    DisposableEffect(Unit) {
+        val providerFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(ctx)
+        val bind = Runnable {
+            runCatching {
+                val provider = providerFuture.get()
+                val preview = androidx.camera.core.Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+                val scanner = com.google.mlkit.vision.barcode.BarcodeScanning.getClient(
+                    com.google.mlkit.vision.barcode.BarcodeScannerOptions.Builder()
+                        .setBarcodeFormats(com.google.mlkit.vision.barcode.common.Barcode.FORMAT_QR_CODE)
+                        .build())
+                val analysis = androidx.camera.core.ImageAnalysis.Builder()
+                    .setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                analysis.setAnalyzer(mainExecutor) { imageProxy ->
+                    val media = imageProxy.image
+                    if (media == null) { imageProxy.close(); return@setAnalyzer }
+                    val input = com.google.mlkit.vision.common.InputImage.fromMediaImage(
+                        media, imageProxy.imageInfo.rotationDegrees)
+                    scanner.process(input)
+                        .addOnSuccessListener { barcodes ->
+                            val value = barcodes.firstOrNull()?.rawValue
+                            if (value != null && fired.compareAndSet(false, true)) onCard(value)
+                        }
+                        .addOnCompleteListener { imageProxy.close() }
+                }
+                provider.unbindAll()
+                provider.bindToLifecycle(lifecycleOwner, androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview, analysis)
+            }
+        }
+        providerFuture.addListener(bind, mainExecutor)
+        onDispose {
+            // Release the camera when leaving the screen (the provider is process-scoped).
+            providerFuture.addListener(
+                { runCatching { providerFuture.get().unbindAll() } }, mainExecutor)
+        }
+    }
+    AndroidView(factory = { previewView }, modifier = modifier)
 }

@@ -3,6 +3,14 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.20-20260811
+
+**QR pairing for roam hosts.** The Roam screen's "Scan QR" opens a camera
+scanner (CameraX + bundled ML Kit barcode — no Play Services) that reads the
+host's `goose+roam://` card straight from the screen — no copy-paste. Pasting
+the card by hand still works. Camera is an optional feature: the app still
+sideloads on camera-less devices.
+
 ## 0.19-20260811
 
 **Direct roam pairing (roam branch).** The app can now dial a `goose serve --roam`
