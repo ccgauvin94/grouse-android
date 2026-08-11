@@ -3464,7 +3464,10 @@ private fun CameraQrPreview(onCard: (String) -> Unit, modifier: Modifier = Modif
  *  connect affordance. Opening a session or starting a chat switches the
  *  on-screen session to the peer — the serve connection stays up throughout. */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun RoamDrawer(cm: ConnectionManager, onOpen: () -> Unit, onAddHost: () -> Unit) {
+    var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
+    actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
     LazyColumn(Modifier.fillMaxSize()) {
         item {
             Text("ENDPOINTS", style = MaterialTheme.typography.labelMedium,
@@ -3479,14 +3482,8 @@ fun RoamDrawer(cm: ConnectionManager, onOpen: () -> Unit, onAddHost: () -> Unit)
             item {
                 Row(verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)) {
-                    Column(Modifier.weight(1f)) {
-                        Text(peer.name, style = MaterialTheme.typography.bodyLarge)
-                        Text(if (connected) "connected — " + peer.fingerprint.take(12) + "…"
-                            else peer.fingerprint.take(12) + "…",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (connected) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.outline)
-                    }
+                    Text(peer.name, style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f))
                     if (connected) {
                         TextButton(onClick = { cm.disconnectRoam() }) { Text("Disconnect") }
                     } else {
@@ -3509,9 +3506,10 @@ fun RoamDrawer(cm: ConnectionManager, onOpen: () -> Unit, onAddHost: () -> Unit)
                     }
                 }
                 items(cm.roamSessions, key = { "r:" + it.sessionId }) { s ->
-                    Row(Modifier.fillMaxWidth().clickable {
-                        cm.openSession(s.sessionId, fromRoam = true); onOpen()
-                    }.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Row(Modifier.fillMaxWidth().combinedClickable(
+                        onClick = { cm.openSession(s.sessionId, fromRoam = true); onOpen() },
+                        onLongClick = { actionsFor = s },
+                    ).padding(horizontal = 12.dp, vertical = 8.dp)) {
                         Column {
                             Text(s.title.ifBlank { "Untitled" },
                                 style = MaterialTheme.typography.bodyMedium,

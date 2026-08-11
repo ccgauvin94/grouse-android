@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.FilterChip
@@ -209,6 +208,9 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                                 selected = cm.sidebarMode.value == mode,
                                 onClick = { cm.sidebarMode.value = mode },
                                 label = { Text(label) },
+                                // Split the row evenly so the tabs are wide targets, not
+                                // content-sized pills.
+                                modifier = Modifier.weight(1f),
                             )
                         }
                     }
@@ -267,13 +269,6 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                         icon = { Icon(Icons.Filled.MenuBook, contentDescription = null) },
                         selected = route == "recipes",
                         onClick = { closeDrawer(); nav.navigate("recipes") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
-                    NavigationDrawerItem(
-                        label = { Text("Roam") },
-                        icon = { Icon(Icons.Filled.Public, contentDescription = null) },
-                        selected = route == "roam",
-                        onClick = { closeDrawer(); nav.navigate("roam") { launchSingleTop = true } },
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                     NavigationDrawerItem(
