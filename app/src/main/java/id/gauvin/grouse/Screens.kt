@@ -464,7 +464,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
             // On a federated session the options came from the PEER, but knownModels is the
             // LOCAL provider's live list — merging them offered models the peer doesn't have.
             // The peer's own choices (plus "Custom model…") are the honest set.
-            if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
+            if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value || cm.onRoamSession,
                 cm.configuredProviders,
                 if (ConnectionManager.roamPeer(cm.currentSession.value) != null) emptySet()
                 else cm.knownModels.value,
@@ -3457,4 +3457,87 @@ private fun CameraQrPreview(onCard: (String) -> Unit, modifier: Modifier = Modif
         }
     }
     AndroidView(factory = { previewView }, modifier = modifier)
+}
+
+/** Roam tab of the drawer: saved endpoints as collapsible groups (like projects
+ *  on the Main tab). The CONNECTED endpoint's sessions are listed; others show a
+ *  connect affordance. Opening a session or starting a chat switches the
+ *  on-screen session to the peer — the serve connection stays up throughout. */
+@Composable
+fun RoamDrawer(cm: ConnectionManager, onOpen: () -> Unit, onAddHost: () -> Unit) {
+    LazyColumn(Modifier.fillMaxSize()) {
+        item {
+            Text("ENDPOINTS", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
+        }
+        if (cm.roamPeers.isEmpty()) {
+            item { SettingCaption("No hosts yet — add one from the Roam screen.") }
+        }
+        cm.roamPeers.forEach { peer ->
+            val connected = cm.currentRoamPeer == peer.name
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text(peer.name, style = MaterialTheme.typography.bodyLarge)
+                        Text(if (connected) "connected — " + peer.fingerprint.take(12) + "…"
+                            else peer.fingerprint.take(12) + "…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (connected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.outline)
+                    }
+                    if (connected) {
+                        TextButton(onClick = { cm.disconnectRoam() }) { Text("Disconnect") }
+                    } else {
+                        TextButton(onClick = { cm.connectRoam(peer.name) }) { Text("Connect") }
+                    }
+                }
+            }
+            if (connected) {
+                item {
+                    Text("CHATS", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
+                }
+                item {
+                    Row(Modifier.fillMaxWidth().clickable { cm.newRoamChat(); onOpen() }
+                        .padding(horizontal = 12.dp, vertical = 10.dp)) {
+                        Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(8.dp))
+                        Text("New chat")
+                    }
+                }
+                items(cm.roamSessions, key = { "r:" + it.sessionId }) { s ->
+                    Row(Modifier.fillMaxWidth().clickable {
+                        cm.openSession(s.sessionId, fromRoam = true); onOpen()
+                    }.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        Column {
+                            Text(s.title.ifBlank { "Untitled" },
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (s.snippet.isNotBlank()) {
+                                Text(s.snippet, style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+                if (cm.roamSessions.isEmpty()) {
+                    item { SettingCaption("No sessions on this host yet — start a new chat.") }
+                }
+            } else {
+                item { SettingCaption("Connect to list this host's sessions.") }
+            }
+        }
+        item {
+            Row(Modifier.fillMaxWidth().clickable(onClick = onAddHost)
+                .padding(horizontal = 12.dp, vertical = 10.dp)) {
+                Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Add host")
+            }
+        }
+    }
 }

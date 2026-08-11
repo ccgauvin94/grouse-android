@@ -84,6 +84,18 @@ class ConnectionManager private constructor(context: Context) {
     val online = mutableStateOf(false)   // true between Ready and disconnect — for a UI status pill
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
+    /** The ACTIVE roam peer's sessions (plain ids — the peer IS a first-class goose). */
+    val roamSessions = mutableStateListOf<SessionInfo>()
+    /** Which connection the drawer lists: serve sessions/projects or roam endpoints. */
+    enum class SidebarMode { SERVE, ROAM }
+    val sidebarMode = mutableStateOf(SidebarMode.SERVE)
+
+    /** "New chat" from the Roam tab: creates the session ON THE PEER, and switches
+     *  the on-screen session to it (session switches always change the view). */
+    fun newRoamChat() {
+        activeClientIsRoam = true
+        newSession()
+    }
 
     /** Goose projects, refreshed alongside the session list. A project is a named source with an
      *  id, not a directory -- so filing a chat no longer decides where its tools run, and the
@@ -256,6 +268,20 @@ class ConnectionManager private constructor(context: Context) {
     // ExtInfo so the restore step can round-trip the same object it discovered with.
     private var discovering: ExtInfo? = null
 
+    /** Drop per-session UI state when the session changes: tool/extension sheets,
+     *  the model list and the discovery marker all belong to the session being
+     *  closed and would otherwise linger (tools "stuck" from the previous session)
+     *  until the new session's replies arrive. Called on every session switch. */
+    private fun clearSessionUi() {
+        sessionTools.value = emptyMap()
+        sessionExtensionNames.value = emptyList()
+        sessionExtensionInfos.value = emptyList()
+        detachedPeerExts.value = emptyList()
+        discovering = null
+        knownModels.value = emptySet()
+        liveModelsFetchedFor = null
+    }
+
     /** toolCatalog key. A peer's extension can share a name with a local one while exposing a
      *  different tool set, so peer-sourced entries are namespaced by the owning peer. */
     fun catKey(e: ExtInfo): String =
@@ -396,8 +422,20 @@ class ConnectionManager private constructor(context: Context) {
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
 
     private val main = Handler(Looper.getMainLooper())
-    private var client: AcpClient? = null
-    private var clientGen = 0   // bumped per open(); drops events from superseded clients
+    // Two LIVE connections: the WS host (serve) and one roam peer. `client`
+    // resolves to whichever owns the on-screen session, so every existing call
+    // site routes to the right connection; each keeps its own sessions list and
+    // event stream, and switching views never tears the other down.
+    private var serveClient: AcpClient? = null
+    private var serveGen = 0
+    private var roamClient: AcpClient? = null
+    private var roamGen = 0
+    @Volatile private var activeClientIsRoam = false
+    private var client: AcpClient?
+        get() = if (activeClientIsRoam) roamClient else serveClient
+        set(v) { if (activeClientIsRoam) roamClient = v else serveClient = v }
+    /** Generation of whichever client owns the screen (event guards in onEvent). */
+    private val activeGen: Int get() = if (activeClientIsRoam) roamGen else serveGen
     // MCP-App template cache: "$extension|$uri" -> HTML. Templates are static per server
     // version and shared across tools/messages/sessions, so one fetch serves everything —
     // including transcript replays, which re-emit every historical tool_call.
@@ -407,6 +445,8 @@ class ConnectionManager private constructor(context: Context) {
     private var live = false
     private var connecting = false
     private var lastSessionId: String? = null
+    /** Whether lastSessionId belongs to the roam connection (probe/watchdog routing). */
+    private var lastSessionIsRoam = false
     // True between a ReplayStart wiping `messages` and the following Ready, which re-adds the
     // bubbles of any still-queued prompts (they aren't in the server history the replay rebuilt).
     private var replayWiped = false
@@ -450,6 +490,8 @@ class ConnectionManager private constructor(context: Context) {
     /** Name of the peer this connection is dialed to, or null (WS mode). */
     @Volatile var currentRoamPeer: String? = null
         private set
+    /** True when the on-screen session lives on the roam connection. */
+    val onRoamSession: Boolean get() = activeClientIsRoam
     // Last session opened ON EACH peer, so a reconnect resumes it instead of
     // dropping the user into a sessionless state. Separate from the WS path's
     // store.lastSessionId — a peer's session id means nothing to the local host.
@@ -486,7 +528,8 @@ class ConnectionManager private constructor(context: Context) {
 
     fun disconnectRoam() {
         currentRoamPeer = null
-        client?.close(); client = null
+        roamClient?.close(); roamClient = null
+        activeClientIsRoam = false          // serve takes the screen back if it's alive
         live = false; connecting = false; online.value = false
         status.value = ""
         messages.clear(); currentSession.value = null
@@ -499,7 +542,8 @@ class ConnectionManager private constructor(context: Context) {
     fun connectRoam(name: String, resume: String? = null, createSession: Boolean = false) {
         val peer = roamPeers.firstOrNull { it.name == name } ?: return
         currentRoamPeer = name
-        client?.close()
+        activeClientIsRoam = true
+        roamClient?.close()      // the serve connection stays untouched
         live = false; connecting = true; online.value = false
         busy.value = false; streamingRole = null; compacting.value = false
         turnInFlight = false; activeRunId = null
@@ -507,26 +551,32 @@ class ConnectionManager private constructor(context: Context) {
         resetGen = -1
         pendingOpenCwd = ""   // no local cwd: session/load asks the PEER for the real one
         liveModelsFetchedFor = null
-        messages.clear(); currentSession.value = resume
+        clearSessionUi()
+        messages.clear()
+        currentSession.value = resume
+        // Cold-start nicety, same as open(): paint the peer session's snapshot
+        // (r_ key: a peer session id could collide with a local one).
+        if (resume != null)
+            loadTranscriptCache("r_$resume").takeIf { it.isNotEmpty() }?.let { messages.addAll(it) }
         status.value = "connecting to ${peer.name}…"
-        val gen = ++clientGen
+        val gen = ++roamGen
         Thread({
             val link = try {
                 RoamStreamLink(roamConnect(roamIdentity(), peer.card, "grouse-android"))
             } catch (t: Throwable) {
                 android.util.Log.e("Grouse", "roam dial failed (${peer.name})", t)
                 main.post {
-                    if (gen == clientGen) {
+                    if (gen == roamGen) {
                         status.value = "roam: ${t.message ?: t.javaClass.simpleName}"
-                        connecting = false; currentRoamPeer = null
+                        connecting = false; currentRoamPeer = null; activeClientIsRoam = false
                     }
                 }
                 return@Thread
             }
             main.post {
-                if (gen != clientGen) { link.close(); return@post }
+                if (gen != roamGen) { link.close(); return@post }
                 val c = AcpClient("roam://${peer.name}", "", roam = link) { ev ->
-                    main.post { if (gen == clientGen) onEvent(ev) }
+                    main.post { if (gen == roamGen) onEvent(ev, isRoam = true) }
                 }
                 c.autoNewSession = createSession
                 c.resumeSessionId = resume
@@ -542,13 +592,17 @@ class ConnectionManager private constructor(context: Context) {
         }, "grouse-roam-dial").apply { isDaemon = true; start() }
     }
 
-    /** Reconnect whatever is current: the roam peer (resuming the open session)
-     *  or the WS host. Every reconnect call site routes through here so roam
-     *  mode can't accidentally dial the WS path with a peer session id. */
+    /** Reconnect whichever connection owns the screen: the roam peer (resuming
+     *  the open session) or the WS host. Every reconnect call site routes
+     *  through here so roam mode can't accidentally dial the WS path with a
+     *  peer session id — and vice versa. */
     private fun reconnectToCurrent() {
-        val peer = currentRoamPeer
-        if (peer != null) connectRoam(peer, resume = lastSessionId)
-        else open(resume = lastSessionId ?: store.lastSessionId)
+        if (activeClientIsRoam) {
+            val peer = currentRoamPeer ?: return
+            connectRoam(peer, resume = lastSessionId)
+        } else {
+            open(resume = lastSessionId ?: store.lastSessionId)
+        }
     }
 
     // connectHome() re-enters composition every time the lock screen (or any recreation) swaps
@@ -602,9 +656,9 @@ class ConnectionManager private constructor(context: Context) {
      *  AcpEvent.ReplayStart), which both repopulates after a background process kill and picks up
      *  turns another client (Desktop, deliver.sh) added to this session while we were away. */
     fun ensureConnected() {
-        val peer = currentRoamPeer
-        if (peer != null) {
-            if (live || connecting) return
+        if (activeClientIsRoam) {
+            val peer = currentRoamPeer
+            if (peer == null || live || connecting) return
             connectRoam(peer, resume = lastSessionId)
             return
         }
@@ -629,7 +683,10 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Refresh sessions AND the projects that label them. Kept as one call so the two can never
      *  drift -- a session list newer than the project list renders groups labelled by raw id. */
-    fun refreshSidebar() { client?.listSessions(); client?.listProjects() }
+    fun refreshSidebar() {
+        serveClient?.listSessions(); serveClient?.listProjects()
+        roamClient?.listSessions()
+    }
 
     /** Archive a session: history stays on disk, it just leaves the list. The soft option --
      *  deleteSession is the permanent one (goose ≥1.44; the old "no delete" note is obsolete). */
@@ -683,7 +740,7 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    fun openSession(sessionId: String, knownKind: SessionKind? = null) {
+    fun openSession(sessionId: String, knownKind: SessionKind? = null, fromRoam: Boolean = false) {
         // Cancel any deferred "open the assistant thread" -- the user has since picked a specific
         // session and that choice wins. Without this, a pendingOpenAssistant set while offline (its
         // refreshSidebar() is a no-op with no client) survives until the NEXT Sessions event, which
@@ -691,11 +748,15 @@ class ConnectionManager private constructor(context: Context) {
         // the assistant on top of the session just chosen. The chat visibly switches and the next
         // message lands in the assistant thread.
         pendingOpenAssistant = false
+        clearSessionUi()          // the previous session's tools/extensions/models must not linger
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
-        // Roam: the session lives on the peer — reconnect the roam link resuming it.
-        // (Its cwd is resolved by asking the peer; see connectRoam/resumeCwdKnown.)
-        val peer = currentRoamPeer
-        if (peer != null) { connectRoam(peer, resume = sessionId); return }
+        // Roam: the session lives on the peer — reconnect the roam link resuming it
+        // (its cwd is resolved by asking the peer). The serve connection stays up.
+        if (fromRoam) {
+            val peer = currentRoamPeer ?: return
+            connectRoam(peer, resume = sessionId)
+            return
+        }
         // A caller resuming a session it already has cached (e.g. connectHome's assistant shortcut)
         // can pass knownKind to skip the sessions.value lookup, which may not be populated yet on a
         // cold start; open() falls back to that lookup (then CHAT) when knownKind is null.
@@ -710,11 +771,15 @@ class ConnectionManager private constructor(context: Context) {
         recipeId: String? = null,
     ) {
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
+        clearSessionUi()
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
-        // Roam: a new chat is session/new ON THE PEER (autoNewSession=true) — the
-        // local cwd is meaningless there, and the peer's own config applies.
-        val peer = currentRoamPeer
-        if (peer != null) { pendingRecipeId = recipeId; connectRoam(peer, createSession = true); return }
+        // Roam view: a new chat is session/new ON THE PEER (autoNewSession=true) —
+        // the local cwd is meaningless there, and the peer's own config applies.
+        if (activeClientIsRoam && currentRoamPeer != null) {
+            pendingRecipeId = recipeId
+            connectRoam(currentRoamPeer!!, createSession = true)
+            return
+        }
         pendingRecipeId = recipeId
         open(resume = null, cwd = cwd, kind = kind)
     }
@@ -910,7 +975,7 @@ class ConnectionManager private constructor(context: Context) {
     // (which would grant that chat the privileged auto-approve policy). Both renames run on that
     // one live socket in order, so nothing is lost to a close race. If a different open()
     // supersedes the pending reset, it's abandoned cleanly (see open()).
-    private var resetGen = -1                 // clientGen of the reset-initiated connect
+    private var resetGen = -1                 // serveGen of the reset-initiated connect
     // resetOldId (the thread to rename aside once the fresh one went live) is GONE: reset no
     // longer creates a replacement thread, so there is never an old one to archive.
 
@@ -940,7 +1005,7 @@ class ConnectionManager private constructor(context: Context) {
      *  if non-null, is renamed aside first (reset); null just creates a new assistant thread
      *  (recovery when none exists). Binds to the connection generation this open() creates. */
     private fun beginAssistantThread() {
-        resetGen = clientGen + 1              // the gen newSession()'s open() is about to create
+        resetGen = serveGen + 1              // the gen newSession()'s open() is about to create
         newSession(kind = SessionKind.ASSISTANT)
     }
 
@@ -1101,8 +1166,8 @@ class ConnectionManager private constructor(context: Context) {
             // prove the socket is alive, a reply would queue behind the stream (a huge replay
             // can outrun the window), and a force-reconnect would restart the whole replay.
             if (live && !busy.value && !turnInFlight && !replayActive.value &&
-                !(currentRoamPeer != null && lastSessionId == null)) {
-                (lastSessionId ?: store.lastSessionId)?.let { sid ->
+                lastSessionIsRoam == activeClientIsRoam) {
+                lastSessionId?.let { sid ->
                     val tok = ++probeToken
                     client?.probeSession(sid)
                     main.postDelayed({
@@ -1198,6 +1263,8 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun saveTranscriptCache() {
         val sid = currentSession.value ?: lastSessionId ?: return
+        // A roam session's id could collide with a local one; its snapshot gets the r_ key.
+        val key = if (activeClientIsRoam) "r_$sid" else sid
         // Mid-replay `messages` holds the last fully-shown transcript (pre-replay content or the
         // cold-start paint) — still a valid snapshot, and the only one a process kill during a
         // long load would leave. No replayActive gate: every path keeps messages in step with
@@ -1211,7 +1278,7 @@ class ConnectionManager private constructor(context: Context) {
         runCatching {
             val arr = org.json.JSONArray()
             snap.forEach { m -> arr.put(org.json.JSONObject().put("r", m.role).put("t", m.text)) }
-            transcriptCacheFile(sid).writeText(arr.toString())
+            transcriptCacheFile(key).writeText(arr.toString())
         }
         // The cache is a cold-start nicety, never user data: cap it so a long-lived install
         // doesn't accumulate one file per session ever opened. Best-effort, like the write.
@@ -1234,12 +1301,13 @@ class ConnectionManager private constructor(context: Context) {
         if (resume != null && messages.isEmpty())
             loadTranscriptCache(resume).takeIf { it.isNotEmpty() }?.let { messages.addAll(it) }
         // If a reset/create-assistant is pending but THIS open() isn't the one it scheduled
-        // (clientGen+1 != resetGen), a different navigation superseded it — abandon it so a later
+        // (serveGen+1 != resetGen), a different navigation superseded it — abandon it so a later
         // unrelated Ready can't complete a stale rename.
         if (resetGen >= 0) {
-            if (clientGen + 1 != resetGen) { resetGen = -1 }
+            if (serveGen + 1 != resetGen) { resetGen = -1 }
         }
-        client?.close()
+        activeClientIsRoam = false
+        serveClient?.close()
         live = false; connecting = true; online.value = false
         // A new client can't receive the old client's TurnDone, so clear turn state here.
         // Otherwise a hung/dropped turn leaves busy=true and every new chat + reconnect
@@ -1284,8 +1352,10 @@ class ConnectionManager private constructor(context: Context) {
         // Tag this client's events with a generation; a just-closed client still fires
         // onClosed/onFailure asynchronously and its stale "disconnected" must not flip us offline
         // after the new client is already live.
-        val gen = ++clientGen
-        client = AcpClient(url, store.secretKey) { ev -> main.post { if (gen == clientGen) onEvent(ev) } }.also {
+        val gen = ++serveGen
+        serveClient = AcpClient(url, store.secretKey) { ev ->
+            main.post { if (gen == serveGen) onEvent(ev, isRoam = false) }
+        }.also {
             it.desiredOptions = if (resume == null) saved else emptyMap()
             it.resumeSessionId = resume
             it.resumeCwd = resolvedCwd ?: store.workingDir
@@ -1296,8 +1366,40 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    private fun onEvent(ev: AcpEvent) {
+    private fun onEvent(ev: AcpEvent, isRoam: Boolean) {
+        // A connection's session list always refreshes ITS OWN list, even while the
+        // other connection owns the screen — the drawer shows whichever tab is open.
+        if (ev is AcpEvent.Sessions) {
+            if (isRoam) {
+                roamSessions.clear(); roamSessions.addAll(ev.list)
+            } else {
+                sessions.value = ev.list
+                store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })
+                // Only seed the cache when empty. It used to be written on every session list,
+                // which let an OLD session sharing the title clobber the id of the thread this app
+                // had just created. Newest title match wins, in case stale duplicates linger.
+                if (store.assistantSessionId == null)
+                    sessions.value.filter { it.title == ASSISTANT_TITLE }
+                        .maxByOrNull { it.updatedAt }?.let { store.assistantSessionId = it.sessionId }
+                if (pendingOpenAssistant) {
+                    pendingOpenAssistant = false
+                    val id = assistantSessionId()
+                    // If no assistant thread exists (e.g. an interrupted reset, or a fresh box),
+                    // recreate one instead of silently no-oping so openAssistant() can never dead-end.
+                    if (id != null) openSession(id, knownKind = SessionKind.ASSISTANT) else beginAssistantThread()
+                }
+            }
+            return
+        }
+        // Everything else is on-screen state: only the connection owning the screen may
+        // touch it. The background connection's events (replays, config, tools, prompts)
+        // must not corrupt the visible transcript or the active session's UI.
+        val active = isRoam == activeClientIsRoam
+        if (!active) return
         when (ev) {
+            // Routed to the per-connection list in the preamble above; present only
+            // to keep the sealed-type when exhaustive.
+            is AcpEvent.Sessions -> {}
             // Direct tool replies only occur on utility clients, which have their own handler.
             is AcpEvent.DirectToolResult -> {}
             is AcpEvent.Elicitation -> elicitations.add(ev)
@@ -1478,12 +1580,13 @@ class ConnectionManager private constructor(context: Context) {
                 config.value = ev.options
                 // A federated session's options are the PEER's (session/load passes them
                 // through). Persisting them would overwrite the sticky local defaults with
-                // the peer's model/provider, and fetching "supported models" would ask
-                // the LOCAL provider registry about the peer's provider id. Display only.
-                if (roamPeer(currentSession.value) != null) return
-                // Persist the true current values so re-apply on reconnect can't drift
-                // (e.g. leave a model selected after switching provider).
-                ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
+                // the peer's model/provider — same for a DIRECT roam session: its config
+                // belongs to the peer. (The live model fetch below still runs: for a direct
+                // roam session `client` IS the peer, so its model list is the right one.)
+                if (roamPeer(currentSession.value) == null && !activeClientIsRoam)
+                    // Persist the true current values so re-apply on reconnect can't drift
+                    // (e.g. leave a model selected after switching provider).
+                    ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
                 // Models come from the SERVER, live, and are never persisted. The old design kept
                 // a per-provider set in SharedPreferences that only ever GREW: every slug goose
                 // ever reported stayed forever, so a model retired server-side (Qwen3_1.7B), an
@@ -1513,10 +1616,15 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Ready -> {
                 live = true; connecting = false; online.value = true
                 lastSessionId = ev.sessionId
-                // A roam peer's session id means nothing to the local WS host — keep the
+                // The roam peer's session id means nothing to the local WS host — keep the
                 // WS resume target and each peer's resume target separate.
-                if (currentRoamPeer != null) roamLastSession[currentRoamPeer!!] = ev.sessionId
-                else store.lastSessionId = ev.sessionId
+                if (isRoam) {
+                    roamLastSession[currentRoamPeer!!] = ev.sessionId
+                    lastSessionIsRoam = true
+                } else {
+                    store.lastSessionId = ev.sessionId
+                    lastSessionIsRoam = false
+                }
                 // Ready itself carries no cwd -- record what this open resolved (see open()).
                 // Blank = the server was asked via session/info; the next session/list merge
                 // records the authoritative value instead.
@@ -1555,15 +1663,15 @@ class ConnectionManager private constructor(context: Context) {
                 // the replies; the detached-row cache is per-session and cleared here.
                 detachedPeerExts.value = emptyList()
                 client?.listTools()
-                val genAtReady = clientGen
-                main.postDelayed({ if (genAtReady == clientGen) client?.listTools() }, 2500)
+                val genAtReady = activeGen
+                main.postDelayed({ if (genAtReady == activeGen) client?.listTools() }, 2500)
                 client?.listSessionExtensions()
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Name it so both
                 // the app (title match) and deliver.sh (name-grep) resolve it as the assistant
                 // thread. The old-thread archive rename that used to run here is gone -- reset
                 // clears in place now, so this path only ever fires when no thread existed.
-                if (resetGen == clientGen) {
+                if (resetGen == serveGen) {
                     resetGen = -1
                     client?.renameSession(ev.sessionId, ASSISTANT_TITLE)
                     store.assistantSessionId = ev.sessionId
@@ -1612,32 +1720,6 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Schedules -> schedules.value = ev.list
             is AcpEvent.Recipes -> recipes.value = ev.list
             is AcpEvent.Skills -> skills.value = ev.list
-            is AcpEvent.Sessions -> {
-                sessions.value = ev.list
-                store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })
-                // The fork-repoint block that used to live here is GONE (2026-08-01). It watched
-                // for the cached assistant id turning up under a different title and hopped to
-                // whichever session still bore ASSISTANT_TITLE -- necessary only because the
-                // nightly rotation renamed the thread aside and minted a new one, so every client
-                // had to notice and follow. deliver.sh now COMPACTS in place: the id never
-                // changes, nothing is renamed, and there is nothing to repoint to. Keeping the
-                // logic would mean keeping a recovery path for a failure that can no longer
-                // happen, on a cache that is now stable by construction.
-                //
-                // Only seed the cache when empty. It used to be written on every session list,
-                // which let an OLD session sharing the title clobber the id of the thread this app
-                // had just created. Newest title match wins, in case stale duplicates linger.
-                if (store.assistantSessionId == null)
-                    sessions.value.filter { it.title == ASSISTANT_TITLE }
-                        .maxByOrNull { it.updatedAt }?.let { store.assistantSessionId = it.sessionId }
-                if (pendingOpenAssistant) {
-                    pendingOpenAssistant = false
-                    val id = assistantSessionId()
-                    // If no assistant thread exists (e.g. an interrupted reset, or a fresh box),
-                    // recreate one instead of silently no-oping so openAssistant() can never dead-end.
-                    if (id != null) openSession(id, knownKind = SessionKind.ASSISTANT) else beginAssistantThread()
-                }
-            }
             is AcpEvent.ServerConfig -> {
                 when (ev.key) {
                     "GOOSE_CONTEXT_LIMIT" -> serverContextLimit.value = ev.value

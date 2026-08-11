@@ -3,6 +3,26 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.27-20260811
+
+**Two connections at once: Main and Roam tabs.** The serve connection and a
+roam peer now stay up SIMULTANEOUSLY — connecting to a roam host no longer
+kicks you off your main goose serve. The drawer gains Main/Roam tabs: Main
+lists serve sessions/projects, Roam lists your endpoints (each a collapsible
+group with connect/disconnect, like projects) and the connected host's
+sessions. Opening a session or starting a chat on either tab switches the
+on-screen conversation to that connection; the other stays connected in the
+background.
+
+**Stuck tools fixed.** Per-session tool/extension state is cleared when the
+session changes, so switching back from a roam session no longer leaves the
+peer's tools in the sheet.
+
+**Disappearing provider fixed.** The model picker filtered providers through a
+hardcoded local set ({openai, openrouter}); on a roam session the peer's real
+providers got filtered out. Roam sessions now show the peer's full provider
+list as reported.
+
 ## 0.26-20260811
 
 **The roam transport actually works now** (core 0.1.3, from the upstream fix).

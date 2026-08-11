@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -198,30 +199,56 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                 // so it must reflect renames/archives/new sessions from any client.
                 LaunchedEffect(drawerState.isOpen) { if (drawerState.isOpen) cm.refreshSidebar() }
                 Column(Modifier.fillMaxHeight().padding(vertical = 12.dp)) {
-                    if (cm.assistantEnabled.value) {
-                        NavigationDrawerItem(
-                            label = { Text("Assistant") },
-                            icon = { Icon(Icons.Filled.Psychology, contentDescription = null) },
-                            selected = route == "chat" && cm.onAssistant,
-                            onClick = {
-                                closeDrawer(); cm.openAssistant()
-                                nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
-                            },
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                        )
-                        HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    // Which connection the chats list shows. Tabs only switch the
+                    // SIDEBAR source; the open chat stays until a session is opened.
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(ConnectionManager.SidebarMode.SERVE to "Main",
+                               ConnectionManager.SidebarMode.ROAM to "Roam").forEach { (mode, label) ->
+                            FilterChip(
+                                selected = cm.sidebarMode.value == mode,
+                                onClick = { cm.sidebarMode.value = mode },
+                                label = { Text(label) },
+                            )
+                        }
                     }
-                    // The whole chats world lives in the menu: projects (collapsible) then free
-                    // chats. Tap opens; long-press renames/archives. Scrolls independently so
-                    // Settings stays pinned at the bottom.
-                    Box(Modifier.weight(1f)) {
-                        DrawerChats(cm, onOpen = {
-                            closeDrawer()
-                            nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
-                        }, onOpenProject = { p ->
-                            closeDrawer()
-                            nav.navigate("project/" + Uri.encode(p)) { launchSingleTop = true }
-                        })
+                    if (cm.sidebarMode.value == ConnectionManager.SidebarMode.ROAM) {
+                        // Roam endpoints + their sessions; opening one re-dials the peer.
+                        Box(Modifier.weight(1f)) {
+                            RoamDrawer(cm, onOpen = {
+                                closeDrawer()
+                                nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+                            }, onAddHost = {
+                                closeDrawer()
+                                nav.navigate("roam") { launchSingleTop = true }
+                            })
+                        }
+                    } else {
+                        if (cm.assistantEnabled.value) {
+                            NavigationDrawerItem(
+                                label = { Text("Assistant") },
+                                icon = { Icon(Icons.Filled.Psychology, contentDescription = null) },
+                                selected = route == "chat" && cm.onAssistant,
+                                onClick = {
+                                    closeDrawer(); cm.openAssistant()
+                                    nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
+                                },
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            )
+                            HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                        }
+                        // The whole chats world lives in the menu: projects (collapsible) then free
+                        // chats. Tap opens; long-press renames/archives. Scrolls independently so
+                        // Settings stays pinned at the bottom.
+                        Box(Modifier.weight(1f)) {
+                            DrawerChats(cm, onOpen = {
+                                closeDrawer()
+                                nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+                            }, onOpenProject = { p ->
+                                closeDrawer()
+                                nav.navigate("project/" + Uri.encode(p)) { launchSingleTop = true }
+                            })
+                        }
                     }
                     HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                     // What the agent can be given, and when it runs: skills are the notes it
