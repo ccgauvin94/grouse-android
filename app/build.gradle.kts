@@ -125,7 +125,7 @@ dependencies {
     implementation("com.google.crypto.tink:tink-android:1.16.0")
     // Native iroh roam transport (roam branch): uniffi Kotlin bindings over the
     // fork's goose-roaming, JNA-loaded .so (arm64-v8a). See grouse-roam-core.
-    implementation("dev.grouse:roamcore:0.1.2")
+    implementation("dev.grouse:roamcore:0.1.3")
     // QR pairing for roam hosts: CameraX preview + zxing core (pure Java — the
     // ML Kit barcode engine was ~19 MB of native libbarhopper across 4 ABIs for
     // one QR decode; zxing is ~700 KB with zero natives).
