@@ -3,6 +3,13 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.25-20260811
+
+**New chats work on roam hosts.** `session/new` sent an empty cwd and goose
+rejects non-absolute cwds, so "New chat" silently failed while connected to a
+peer. The web client's convention is `cwd: "/"` — mirrored. Also: a roam
+session is never filed into a local project (the peer owns its project ids).
+
 ## 0.24-20260811
 
 **Connect crash instrumented.** The roam transport built with `panic=abort`,

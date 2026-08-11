@@ -531,6 +531,9 @@ class ConnectionManager private constructor(context: Context) {
                 c.autoNewSession = createSession
                 c.resumeSessionId = resume
                 c.resumeCwdKnown = false          // ask the peer for the session's real cwd
+                // session/new on a roam host: the peer has no default of its own, and goose
+                // REJECTS a non-absolute cwd — the web client's convention (App.tsx) is "/".
+                c.desiredCwd = if (createSession) "/" else ""
                 c.desiredOptions = emptyMap()     // the peer's own config applies
                 c.desiredRecipeId = pendingRecipeId.also { pendingRecipeId = null }
                 client = c
@@ -1523,7 +1526,9 @@ class ConnectionManager private constructor(context: Context) {
                 // session/new takes no projectId, so membership is a second call.
                 pendingProjectFiling?.let { pid ->
                     pendingProjectFiling = null
-                    fileSession(ev.sessionId, pid)
+                    // A roam session lives on the peer; filing it into a LOCAL project id
+                    // would re-file the peer's session against a project it has never seen.
+                    if (currentRoamPeer == null) fileSession(ev.sessionId, pid)
                 }
                 pendingClearOnReady?.let { target ->
                     pendingClearOnReady = null
