@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
@@ -242,6 +243,13 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                     NavigationDrawerItem(
+                        label = { Text("Roam") },
+                        icon = { Icon(Icons.Filled.Public, contentDescription = null) },
+                        selected = route == "roam",
+                        onClick = { closeDrawer(); nav.navigate("roam") { launchSingleTop = true } },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                    NavigationDrawerItem(
                         label = { Text("Settings") },
                         icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
                         selected = route == "settings",
@@ -263,6 +271,7 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                 ProjectScreen(cm, nav, pname)
             }
             composable("settings") { SettingsScreen(cm, nav, onOpenDrawer = ::openDrawer) }
+            composable("roam") { RoamScreen(cm, nav) }
             composable("extensions") { ExtensionsScreen(cm, nav) }
             composable("instance") { InstanceScreen(cm, nav) }
             composable("providers") { ProvidersScreen(cm, nav) }

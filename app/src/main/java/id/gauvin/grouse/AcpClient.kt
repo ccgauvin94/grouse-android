@@ -337,13 +337,20 @@ sealed interface AcpEvent {
 }
 
 /**
- * Thin ACP (Agent Client Protocol) client over a WebSocket.
- * goosed does all the work; this just relays prompts and streams updates.
- * NOTE: onEvent is invoked on OkHttp's WS thread — the caller must marshal to main.
+ * Thin ACP (Agent Client Protocol) client. By default over a WebSocket to
+ * `ws(s)://host:port/acp`; when `roam` is set, frames ride a pre-connected
+ * iroh byte stream instead (same message layer, newline framing — see
+ * RoamFrameCodec), driven by a reader thread.
+ * NOTE: onEvent is invoked on OkHttp's WS thread (or the roam reader thread) —
+ * the caller must marshal to main.
  */
 class AcpClient(
     private val url: String,          // ws://host:port/acp
     private val secretKey: String,
+    // Roam mode: when non-null, connect() drives this byte-stream link instead
+    // of opening a WebSocket. No URL/secret-key handshake — the dial already
+    // happened (roamConnect); the stream is authenticated.
+    private val roam: RoamLink? = null,
     private val onEvent: (AcpEvent) -> Unit,
 ) {
     private val http = Net.builder()      // trust-all TLS for goosed's self-signed cert (wss)
@@ -351,6 +358,8 @@ class AcpClient(
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
     private var ws: WebSocket? = null
+    private var readerThread: Thread? = null
+    @Volatile private var closed = false
     private val nextId = AtomicInteger(1)
     // Touched from both the main thread (outbound rpc) and the OkHttp WS thread (responses).
     private val pending = ConcurrentHashMap<Int, String>()      // request id -> method we sent
@@ -399,11 +408,47 @@ class AcpClient(
     private var replaying = false
 
     fun connect() {
+        if (roam != null) {
+            // The stream is already connected and authenticated: send initialize
+            // immediately, then pump newline-delimited frames from the reader.
+            closed = false
+            onEvent(AcpEvent.Status("connected — initializing"))
+            sendInitialize()
+            readerThread = Thread({
+                val codec = RoamFrameCodec()
+                while (!closed) {
+                    val bytes = roam.read(16_384)
+                    if (bytes.isEmpty() || closed) break
+                    codec.feed(bytes, bytes.size).forEach { handle(it) }
+                }
+                if (!closed) onEvent(AcpEvent.Status("disconnected"))
+            }, "grouse-roam-reader").apply { isDaemon = true; start() }
+            return
+        }
         val req = Request.Builder().url(url).addHeader("X-Secret-Key", secretKey).build()
         ws = http.newWebSocket(req, listener)
     }
 
-    fun close() { ws?.close(1000, "bye"); ws = null }
+    fun close() {
+        closed = true
+        if (roam != null) {
+            // Closing the stream drops the native handle, which unblocks the
+            // reader's pending read (channel close -> error -> EOF).
+            roam.close()
+            readerThread?.interrupt()
+        } else {
+            ws?.close(1000, "bye"); ws = null
+        }
+    }
+
+    /** Send one frame over whichever transport is live. */
+    private fun sendFrame(text: String): Boolean =
+        if (roam != null) roam.send(text) else ws?.send(text) ?: false
+
+    /** Roam mode with no resume target: don't auto-create a session on the peer
+     *  (session/new would litter the host's session list). The user picks one
+     *  from the drawer, which reconnects with resume=<that session>. */
+    var autoNewSession: Boolean = true
 
     /** Ask the agent for its resumable sessions; reply arrives as AcpEvent.Sessions.
      *  `_meta.types` (goose ≥1.42) filters out scheduled sessions server-side; on older builds
@@ -802,18 +847,18 @@ class AcpClient(
         // rewritten for exactly this race; this hook makes the fix available to every call.
         register: ((Int) -> Unit)? = null,
     ): Int {
-        val sock = ws ?: return -1   // no socket: record nothing, so nothing leaks
+        if (roam == null && ws == null) return -1   // no transport: record nothing, so nothing leaks
         val id = nextId.getAndIncrement()
         pending[id] = tag
         register?.invoke(id)
-        sock.send(buildJsonObject {
+        sendFrame(buildJsonObject {
             put("jsonrpc", "2.0"); put("id", id); put("method", method); put("params", params)
         }.toString())
         return id
     }
 
     private fun respond(id: JsonElement, result: JsonObject) {
-        ws?.send(buildJsonObject {
+        sendFrame(buildJsonObject {
             put("jsonrpc", "2.0"); put("id", id); put("result", result)
         }.toString())
     }
@@ -822,44 +867,48 @@ class AcpClient(
      *  result — `{}` is a structurally invalid response for every typed request (e.g.
      *  fs/read_text_file expects `content`) and makes the failure the server's to debug. */
     private fun respondError(id: JsonElement, code: Int, message: String) {
-        ws?.send(buildJsonObject {
+        sendFrame(buildJsonObject {
             put("jsonrpc", "2.0"); put("id", id)
             putJsonObject("error") { put("code", code); put("message", message) }
         }.toString())
     }
 
+    private fun sendInitialize() {
+        rpc("initialize", buildJsonObject {
+            put("protocolVersion", 1)
+            putJsonObject("clientCapabilities") {
+                putJsonObject("fs") { put("readTextFile", false); put("writeTextFile", false) }
+                // Form elicitation: tools can request structured input and we render a real
+                // form (see AcpEvent.Elicitation). Without this goose cancels elicitations
+                // server-side ("client does not support form elicitation").
+                putJsonObject("elicitation") { putJsonObject("form") {} }
+                // Opt into goose's custom notifications (currently: compaction status lines).
+                // Purely additive — the standard usage_update still always fires regardless,
+                // so this can't regress anything already working.
+                putJsonObject("_meta") {
+                    putJsonObject("goose") {
+                        put("customNotifications", true)
+                        // Without this, session/new HARD-FAILS for any recipe that
+                        // declares parameters ("recipe requires parameters but the
+                        // client does not support recipeParameterRequests") — the
+                        // server refuses rather than degrades. The request arrives as
+                        // _goose/unstable/session/recipe/request-params and is rendered
+                        // through the same form UI as elicitations.
+                        put("recipeParameterRequests", true)
+                        // Free label quality: the server enriches tool_call titles for
+                        // clients that declare this (goose 1.45 feature). Read path is
+                        // unchanged — the enrichment arrives in the same `title` field.
+                        put("toolCallLabelEnrichment", true)
+                    }
+                }
+            }
+        })
+    }
+
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             onEvent(AcpEvent.Status("connected — initializing"))
-            rpc("initialize", buildJsonObject {
-                put("protocolVersion", 1)
-                putJsonObject("clientCapabilities") {
-                    putJsonObject("fs") { put("readTextFile", false); put("writeTextFile", false) }
-                    // Form elicitation: tools can request structured input and we render a real
-                    // form (see AcpEvent.Elicitation). Without this goose cancels elicitations
-                    // server-side ("client does not support form elicitation").
-                    putJsonObject("elicitation") { putJsonObject("form") {} }
-                    // Opt into goose's custom notifications (currently: compaction status lines).
-                    // Purely additive — the standard usage_update still always fires regardless,
-                    // so this can't regress anything already working.
-                    putJsonObject("_meta") {
-                        putJsonObject("goose") {
-                            put("customNotifications", true)
-                            // Without this, session/new HARD-FAILS for any recipe that
-                            // declares parameters ("recipe requires parameters but the
-                            // client does not support recipeParameterRequests") — the
-                            // server refuses rather than degrades. The request arrives as
-                            // _goose/unstable/session/recipe/request-params and is rendered
-                            // through the same form UI as elicitations.
-                            put("recipeParameterRequests", true)
-                            // Free label quality: the server enriches tool_call titles for
-                            // clients that declare this (goose 1.45 feature). Read path is
-                            // unchanged — the enrichment arrives in the same `title` field.
-                            put("toolCallLabelEnrichment", true)
-                        }
-                    }
-                }
-            })
+            sendInitialize()
         }
         override fun onMessage(webSocket: WebSocket, text: String) = handle(text)
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -967,7 +1016,8 @@ class AcpClient(
                         put("cwd", resumeCwd)
                         putJsonArray("mcpServers") {}
                     })
-                } else startNewSession()
+                } else if (autoNewSession) startNewSession()
+                else onEvent(AcpEvent.Status("ready — pick a session"))
             }
             "session/new" -> {
                 sessionId = result?.get("sessionId")?.jsonPrimitive?.contentOrNull

@@ -3,6 +3,24 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.19-20260811
+
+**Direct roam pairing (roam branch).** The app can now dial a `goose serve --roam`
+(or `goose roam share`) host straight over iroh — no hub, no federation shim. The
+peer IS a first-class goose: its sessions appear in the drawer, and chats, tools,
+permissions and steer work like local ones. The iroh transport is a native Rust
+core (`grouse-roam-core`, published as an .aar); the app speaks the same ACP
+framing over the authenticated byte stream as goose uses on stdio.
+
+- **Roam screen** (drawer › Roam): this device's public key, paste-a-card to add
+  a host, connect/disconnect per host.
+- Pair once per host: paste its card, then `goose roam peers accept <this key>`
+  on the host. First connect shows the host's session list; picking a session
+  resumes it (its real cwd is asked of the peer — never guessed).
+- Also carries the master fixes merged in: turn-push nudge arming, transcript
+  cache cap + mid-replay snapshots, resume-probe watchdog guard (10s window),
+  live "Loading… N" replay progress.
+
 ## 0.17-20260810
 
 **Transcript snapshot survives a kill during load.** The snapshot was skipped while a

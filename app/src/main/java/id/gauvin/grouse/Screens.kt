@@ -11,6 +11,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.ui.graphics.SolidColor
@@ -3267,3 +3268,87 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
 // something upstream goose answers, and on knowing this one server's layout. Sessions here are
 // filed by goose's own project id and run wherever the configured working directory points.
 
+
+/** Direct iroh pairing (roam branch): this device's identity + saved hosts. A
+ *  host is a `goose serve --roam` (or `roam share`) peer; once connected, its
+ *  sessions appear in the drawer like any other — the peer IS a first-class
+ *  goose, no `roam:` ids, no hub. */
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+fun RoamScreen(cm: ConnectionManager, nav: NavController) {
+    var name by remember { mutableStateOf("") }
+    var card by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) { cm.loadRoamPeers() }
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text("Roam") },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+        )
+    }) { pad ->
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
+            .verticalScroll(rememberScrollState())) {
+            SettingsSection("This device") {
+                SettingCaption("The host you pair with sees this key. Paste the host's card " +
+                    "below, then accept this device on the host (`goose roam peers accept`).")
+                SelectionContainer {
+                    Text(cm.roamPublicKey, style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                }
+            }
+            SettingsSection("Add a host") {
+                OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(card, { card = it }, label = { Text("Connection card") },
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp), minLines = 2)
+                error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 6.dp))
+                }
+                Button(onClick = {
+                    error = if (name.isBlank()) "Give the host a name."
+                            else cm.addRoamPeer(name.trim(), card.trim())
+                    if (error == null) { name = ""; card = "" }
+                }, modifier = Modifier.padding(top = 8.dp)) { Text("Save host") }
+            }
+            SettingsSection("Hosts") {
+                if (cm.roamPeers.isEmpty())
+                    SettingCaption("No hosts yet — paste a connection card from a " +
+                        "`goose serve --roam` or `roam share` host.")
+                cm.roamPeers.forEach { peer ->
+                    val connected = cm.currentRoamPeer == peer.name
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        Column(Modifier.weight(1f)) {
+                            Text(peer.name, style = MaterialTheme.typography.bodyLarge)
+                            Text(peer.fingerprint, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                        if (connected) {
+                            TextButton(onClick = { cm.disconnectRoam() }) { Text("Disconnect") }
+                        } else {
+                            Button(onClick = { cm.connectRoam(peer.name) }) { Text("Connect") }
+                        }
+                        IconButton(onClick = { cm.removeRoamPeer(peer.name) }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "remove ${peer.name}")
+                        }
+                    }
+                }
+                cm.currentRoamPeer?.let { peer ->
+                    SettingCaption("Connected to $peer — open the menu to pick one of its " +
+                        "sessions; remote chats work like local ones.")
+                }
+                if (cm.status.value.isNotBlank()) {
+                    Text(cm.status.value, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(top = 6.dp))
+                }
+            }
+        }
+    }
+}

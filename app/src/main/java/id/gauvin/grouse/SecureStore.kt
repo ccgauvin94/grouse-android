@@ -248,4 +248,22 @@ class SecureStore(context: Context) {
         set(v) = secure.edit().putString("key", v).apply()
 
     fun hasKey(): Boolean = secretKey.isNotBlank()
+
+    // ---- Roam (direct iroh pairing) ----
+    // The iroh secret key is as sensitive as the X-Secret-Key: it IS the
+    // device's identity to every paired host, so it lives in the encrypted
+    // store. Peers' cards are public key material (meant to be shared), so
+    // they sit in plain prefs as name -> ConnectionCard-encode string.
+
+    var roamIdentity: String?
+        get() = secure.getString("roam_identity", null)
+        set(v) { secure.edit().putString("roam_identity", v).apply() }
+
+    var roamPeers: Map<String, String>
+        get() = runCatching {
+            org.json.JSONObject(cfg.getString("roam_peers", "{}") ?: "{}")
+                .let { o -> o.keys().asSequence().associateWith { o.getString(it) } }
+        }.getOrDefault(emptyMap())
+        set(v) = cfg.edit().putString("roam_peers",
+            org.json.JSONObject(v).toString()).apply()
 }

@@ -12,6 +12,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import androidx.compose.runtime.mutableStateOf
+import uniffi.grouse_roam_core.cardFingerprint
+import uniffi.grouse_roam_core.identityGenerate
+import uniffi.grouse_roam_core.identityPublicKey
+import uniffi.grouse_roam_core.roamConnect
 
 /** The three drawer session categories. See ConnectionManager.sessionKind(). */
 enum class SessionKind { ASSISTANT, CHAT, CODE }
@@ -434,6 +438,115 @@ class ConnectionManager private constructor(context: Context) {
     /** Connect using the already-saved host/port/key (post-unlock auto-connect). */
     fun connectSaved() { if (store.hasKey()) open(resume = null) }
 
+    // --- Roam (direct iroh pairing) --------------------------------------------
+    // A peer is a `serve --roam` (or `roam share`) host reached directly over
+    // iroh — no hub, no `roam:` ids: the peer IS a first-class goose. The phone
+    // connects with its own iroh identity (SecureStore) and a pasted card; the
+    // host must have accepted this device's key (`roam peers accept`). One
+    // active roam connection at a time, parallel to the WS host path.
+    data class RoamPeer(val name: String, val card: String, val fingerprint: String)
+
+    val roamPeers = mutableStateListOf<RoamPeer>()
+    /** Name of the peer this connection is dialed to, or null (WS mode). */
+    @Volatile var currentRoamPeer: String? = null
+        private set
+    // Last session opened ON EACH peer, so a reconnect resumes it instead of
+    // dropping the user into a sessionless state. Separate from the WS path's
+    // store.lastSessionId — a peer's session id means nothing to the local host.
+    private val roamLastSession = mutableMapOf<String, String>()
+
+    fun loadRoamPeers() {
+        roamPeers.clear()
+        store.roamPeers.forEach { (n, c) ->
+            roamPeers.add(RoamPeer(n, c, runCatching { cardFingerprint(c) }.getOrDefault("")))
+        }
+    }
+
+    /** The device's iroh secret key, created once and held in SecureStore. */
+    fun roamIdentity(): String = store.roamIdentity
+        ?: identityGenerate().also { store.roamIdentity = it }
+
+    /** Hex public key — what a host sees in `peers list` before accepting. */
+    val roamPublicKey: String
+        get() = runCatching { identityPublicKey(roamIdentity()) }.getOrDefault("")
+
+    /** Add a peer from its card; returns null on success, else the error text. */
+    fun addRoamPeer(name: String, card: String): String? {
+        val fp = try { cardFingerprint(card) } catch (t: Throwable) { return t.message ?: "invalid card" }
+        store.roamPeers = store.roamPeers + (name to card)
+        roamPeers.add(RoamPeer(name, card, fp))
+        return null
+    }
+
+    fun removeRoamPeer(name: String) {
+        store.roamPeers = store.roamPeers - name
+        roamPeers.removeAll { it.name == name }
+        if (currentRoamPeer == name) disconnectRoam()
+    }
+
+    fun disconnectRoam() {
+        currentRoamPeer = null
+        client?.close(); client = null
+        live = false; connecting = false; online.value = false
+        status.value = ""
+        messages.clear(); currentSession.value = null
+    }
+
+    /** Dial a peer and bind the ACP session layer over the roam stream. `resume`
+     *  is the peer-side session to load (last session on that peer, or the one
+     *  the user just picked); null on first connect leaves the app sessionless
+     *  until the user picks — session/new would litter the host's session list. */
+    fun connectRoam(name: String, resume: String? = null, createSession: Boolean = false) {
+        val peer = roamPeers.firstOrNull { it.name == name } ?: return
+        currentRoamPeer = name
+        client?.close()
+        live = false; connecting = true; online.value = false
+        busy.value = false; streamingRole = null; compacting.value = false
+        turnInFlight = false; activeRunId = null
+        replayWiped = false; replayActive.value = false
+        resetGen = -1
+        pendingOpenCwd = ""   // no local cwd: session/load asks the PEER for the real one
+        liveModelsFetchedFor = null
+        messages.clear(); currentSession.value = resume
+        status.value = "connecting to ${peer.name}…"
+        val gen = ++clientGen
+        Thread({
+            val link = try {
+                RoamStreamLink(roamConnect(roamIdentity(), peer.card, "grouse-android"))
+            } catch (t: Throwable) {
+                main.post {
+                    if (gen == clientGen) {
+                        status.value = "roam: ${t.message ?: "connect failed"}"
+                        connecting = false; currentRoamPeer = null
+                    }
+                }
+                return@Thread
+            }
+            main.post {
+                if (gen != clientGen) { link.close(); return@post }
+                val c = AcpClient("roam://${peer.name}", "", roam = link) { ev ->
+                    main.post { if (gen == clientGen) onEvent(ev) }
+                }
+                c.autoNewSession = createSession
+                c.resumeSessionId = resume
+                c.resumeCwdKnown = false          // ask the peer for the session's real cwd
+                c.desiredOptions = emptyMap()     // the peer's own config applies
+                c.desiredRecipeId = pendingRecipeId.also { pendingRecipeId = null }
+                client = c
+                c.connect()
+            }
+        }, "grouse-roam-dial").apply { isDaemon = true; start() }
+    }
+
+    /** Reconnect whatever is current: the roam peer (resuming the open session)
+     *  or the WS host. Every reconnect call site routes through here so roam
+     *  mode can't accidentally dial the WS path with a peer session id. */
+    private fun reconnectToCurrent() {
+        val peer = currentRoamPeer
+        if (peer != null) connectRoam(peer, resume = lastSessionId)
+        else open(resume = lastSessionId ?: store.lastSessionId)
+    }
+
     // connectHome() re-enters composition every time the lock screen (or any recreation) swaps
     // AppRoot back in; only the FIRST call per process should land on the Assistant. Later calls
     // resume whatever session was open instead.
@@ -485,6 +598,12 @@ class ConnectionManager private constructor(context: Context) {
      *  AcpEvent.ReplayStart), which both repopulates after a background process kill and picks up
      *  turns another client (Desktop, deliver.sh) added to this session while we were away. */
     fun ensureConnected() {
+        val peer = currentRoamPeer
+        if (peer != null) {
+            if (live || connecting) return
+            connectRoam(peer, resume = lastSessionId)
+            return
+        }
         if (!store.hasKey() || live || connecting) return
         open(resume = lastSessionId)
     }
@@ -500,7 +619,7 @@ class ConnectionManager private constructor(context: Context) {
         resyncTicks--
         // The user started something new (or left) — their action wins; stop quietly.
         if (busy.value || turnInFlight || !appForeground) return
-        lastSessionId?.let { open(resume = it) }
+        lastSessionId?.let { reconnectToCurrent() }
         if (resyncTicks > 0) main.postDelayed(::turnResyncTick, 8_000)
     }
 
@@ -569,6 +688,10 @@ class ConnectionManager private constructor(context: Context) {
         // message lands in the assistant thread.
         pendingOpenAssistant = false
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
+        // Roam: the session lives on the peer — reconnect the roam link resuming it.
+        // (Its cwd is resolved by asking the peer; see connectRoam/resumeCwdKnown.)
+        val peer = currentRoamPeer
+        if (peer != null) { connectRoam(peer, resume = sessionId); return }
         // A caller resuming a session it already has cached (e.g. connectHome's assistant shortcut)
         // can pass knownKind to skip the sessions.value lookup, which may not be populated yet on a
         // cold start; open() falls back to that lookup (then CHAT) when knownKind is null.
@@ -584,6 +707,10 @@ class ConnectionManager private constructor(context: Context) {
     ) {
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
+        // Roam: a new chat is session/new ON THE PEER (autoNewSession=true) — the
+        // local cwd is meaningless there, and the peer's own config applies.
+        val peer = currentRoamPeer
+        if (peer != null) { pendingRecipeId = recipeId; connectRoam(peer, createSession = true); return }
         pendingRecipeId = recipeId
         open(resume = null, cwd = cwd, kind = kind)
     }
@@ -945,7 +1072,7 @@ class ConnectionManager private constructor(context: Context) {
             // transcript (including this just-added bubble); Ready re-adds the queued bubbles on
             // top of the rebuilt history -- see the ReplayStart/Ready handlers.
             enqueue(PendingSend(text, images))
-            if (!connecting) open(resume = lastSessionId ?: store.lastSessionId)
+            if (!connecting) reconnectToCurrent()
         }
     }
 
@@ -969,14 +1096,15 @@ class ConnectionManager private constructor(context: Context) {
             // No probe (and no watchdog) while a replay is streaming: the chunks themselves
             // prove the socket is alive, a reply would queue behind the stream (a huge replay
             // can outrun the window), and a force-reconnect would restart the whole replay.
-            if (live && !busy.value && !turnInFlight && !replayActive.value) {
+            if (live && !busy.value && !turnInFlight && !replayActive.value &&
+                !(currentRoamPeer != null && lastSessionId == null)) {
                 (lastSessionId ?: store.lastSessionId)?.let { sid ->
                     val tok = ++probeToken
                     client?.probeSession(sid)
                     main.postDelayed({
                         if (tok == probeToken && appForeground && !turnInFlight && !replayActive.value) {
                             live = false
-                            open(resume = sid)
+                            reconnectToCurrent()
                         }
                     }, 10_000)
                 }
@@ -1037,7 +1165,7 @@ class ConnectionManager private constructor(context: Context) {
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
         clearQueue()           // Stop means stop: don't let queued prompts fire after a cancel
-        if (store.hasKey()) open(resume = lastSessionId ?: store.lastSessionId)
+        if (store.hasKey() || currentRoamPeer != null) reconnectToCurrent()
     }
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
@@ -1171,6 +1299,12 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Elicitation -> elicitations.add(ev)
             is AcpEvent.Status -> {
                 status.value = ev.text
+                if (ev.text == "ready — pick a session") {
+                    // Roam connected with no session bound (first connect to a peer):
+                    // the host accepted this device, the drawer lists its sessions,
+                    // the user picks one — opening it resumes over the same link.
+                    live = true; connecting = false; online.value = true
+                }
                 if (ev.text == "disconnected") {
                     if (turnInFlight) droppedMidTurn = true   // see turnResyncTick
                     live = false; connecting = false; online.value = false
@@ -1248,10 +1382,10 @@ class ConnectionManager private constructor(context: Context) {
                 // Keep only the baseline refresh; the replay's Ready supersedes any verdict.
                 if (!replayActive.value) when {
                     // The probe itself failed: session gone or socket dead — reconnect.
-                    ev.messageCount < 0 -> if (!turnInFlight) { open(resume = ev.sessionId) }
+                    ev.messageCount < 0 -> if (!turnInFlight) { reconnectToCurrent() }
                     // Baseline exists and moved: another client changed the session; replay.
                     syncStamp != null && syncStamp != (ev.updatedAt to ev.messageCount) ->
-                        if (!busy.value && !turnInFlight) open(resume = ev.sessionId)
+                        if (!busy.value && !turnInFlight) reconnectToCurrent()
                     // else: nothing changed — the 2-second alt-tab costs one info call.
                 }
                 syncStamp = ev.updatedAt to ev.messageCount
@@ -1374,7 +1508,11 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Ready -> {
                 live = true; connecting = false; online.value = true
-                lastSessionId = ev.sessionId; store.lastSessionId = ev.sessionId
+                lastSessionId = ev.sessionId
+                // A roam peer's session id means nothing to the local WS host — keep the
+                // WS resume target and each peer's resume target separate.
+                if (currentRoamPeer != null) roamLastSession[currentRoamPeer!!] = ev.sessionId
+                else store.lastSessionId = ev.sessionId
                 // Ready itself carries no cwd -- record what this open resolved (see open()).
                 // Blank = the server was asked via session/info; the next session/list merge
                 // records the authoritative value instead.

@@ -18,8 +18,8 @@ android {
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 18
-        versionName = "0.18-20260810"
+        versionCode = 19
+        versionName = "0.19-20260811"
     }
 
     // Release signing, used ONLY when the four properties below are supplied (CI sets them from
@@ -109,6 +109,9 @@ dependencies {
         exclude(group = "com.google.crypto.tink", module = "tink")
     }
     implementation("com.google.crypto.tink:tink-android:1.16.0")
+    // Native iroh roam transport (roam branch): uniffi Kotlin bindings over the
+    // fork's goose-roaming, JNA-loaded .so (arm64-v8a). See grouse-roam-core.
+    implementation("dev.grouse:roamcore:0.1.0")
 
     // JVM unit tests: parsers and wire framing only — no Android framework, no Robolectric.
     // Defends the ACP contracts that have bitten repeatedly (casing, session_info_update keys,
