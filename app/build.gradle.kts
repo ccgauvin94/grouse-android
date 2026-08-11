@@ -22,8 +22,8 @@ android {
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 23
-        versionName = "0.23-20260811"
+        versionCode = 24
+        versionName = "0.24-20260811"
     }
 
     // Release signing, used ONLY when the four properties below are supplied (CI sets them from
@@ -125,7 +125,7 @@ dependencies {
     implementation("com.google.crypto.tink:tink-android:1.16.0")
     // Native iroh roam transport (roam branch): uniffi Kotlin bindings over the
     // fork's goose-roaming, JNA-loaded .so (arm64-v8a). See grouse-roam-core.
-    implementation("dev.grouse:roamcore:0.1.1")
+    implementation("dev.grouse:roamcore:0.1.2")
     // QR pairing for roam hosts: CameraX preview + zxing core (pure Java — the
     // ML Kit barcode engine was ~19 MB of native libbarhopper across 4 ABIs for
     // one QR decode; zxing is ~700 KB with zero natives).

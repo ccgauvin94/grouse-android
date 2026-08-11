@@ -514,9 +514,10 @@ class ConnectionManager private constructor(context: Context) {
             val link = try {
                 RoamStreamLink(roamConnect(roamIdentity(), peer.card, "grouse-android"))
             } catch (t: Throwable) {
+                android.util.Log.e("Grouse", "roam dial failed (${peer.name})", t)
                 main.post {
                     if (gen == clientGen) {
-                        status.value = "roam: ${t.message ?: "connect failed"}"
+                        status.value = "roam: ${t.message ?: t.javaClass.simpleName}"
                         connecting = false; currentRoamPeer = null
                     }
                 }

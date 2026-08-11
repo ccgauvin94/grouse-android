@@ -3,6 +3,14 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.24-20260811
+
+**Connect crash instrumented.** The roam transport built with `panic=abort`,
+so any Rust panic in the dial path killed the whole app with no message.
+Panics now unwind to a catchable error — a failed connect shows "roam: …"
+instead of crashing, and the full stack is logged. If it still hard-crashes
+after this, the logcat will point at the faulting frame.
+
 ## 0.23-20260811
 
 **Roam native transport loads at last.** Every uniffi call died with an opaque
