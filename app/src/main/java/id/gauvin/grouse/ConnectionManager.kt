@@ -412,6 +412,10 @@ class ConnectionManager private constructor(context: Context) {
     // pins unconditionally; the tick fires one final snap when the rebuild completes.
     val replayActive = mutableStateOf(false)
     val replayDoneTick = mutableStateOf(0)
+    // Replayed source messages counted so far — feeds the "Loading… N" title while a big
+    // history streams in. Without it a long replay sat on a static "Connecting…" and looked
+    // hung; the count proves it is advancing.
+    val replayProgress = mutableStateOf(0)
     // Replays rebuild into this buffer instead of mutating `messages`; Ready swaps it in only
     // when the content actually differs. The common background-reconnect replay is identical,
     // so the visible list is never touched and the scroll position survives by construction —
@@ -502,7 +506,7 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Refresh sessions AND the projects that label them. Kept as one call so the two can never
      *  drift -- a session list newer than the project list renders groups labelled by raw id. */
-    fun listSessions() { client?.listSessions(); client?.listProjects() }
+    fun refreshSidebar() { client?.listSessions(); client?.listProjects() }
 
     /** Archive a session: history stays on disk, it just leaves the list. The soft option --
      *  deleteSession is the permanent one (goose ≥1.44; the old "no delete" note is obsolete). */
@@ -559,8 +563,8 @@ class ConnectionManager private constructor(context: Context) {
     fun openSession(sessionId: String, knownKind: SessionKind? = null) {
         // Cancel any deferred "open the assistant thread" -- the user has since picked a specific
         // session and that choice wins. Without this, a pendingOpenAssistant set while offline (its
-        // listSessions() is a no-op with no client) survives until the NEXT Sessions event, which
-        // arrives from the listSessions() in this very open()'s Ready handler -- and then reopens
+        // refreshSidebar() is a no-op with no client) survives until the NEXT Sessions event, which
+        // arrives from the refreshSidebar() in this very open()'s Ready handler -- and then reopens
         // the assistant on top of the session just chosen. The chat visibly switches and the next
         // message lands in the assistant thread.
         pendingOpenAssistant = false
@@ -763,8 +767,8 @@ class ConnectionManager private constructor(context: Context) {
         val id = assistantSessionId()
         if (id != null) { openSession(id, knownKind = SessionKind.ASSISTANT); return }
         // No id yet: defer until a session list arrives -- but only if one can actually arrive.
-        // With no client, listSessions() does nothing and the flag would sit armed indefinitely.
-        if (client != null) { pendingOpenAssistant = true; listSessions() }
+        // With no client, refreshSidebar() does nothing and the flag would sit armed indefinitely.
+        if (client != null) { pendingOpenAssistant = true; refreshSidebar() }
         else beginAssistantThread()
     }
 
@@ -921,6 +925,7 @@ class ConnectionManager private constructor(context: Context) {
         // the Ready handler flushes.
         if (live && client?.ready == true && !turnInFlight) {
             turnInFlight = true
+            lastSessionId?.let { store.pendingPushSessionId = it }
             client?.sendPrompt(text, images, expect = currentSession.value)
         } else if (live && client?.ready == true && activeRunId != null && images.isEmpty()) {
             // A turn is running AND we know its run id: STEER — inject into the live turn
@@ -958,19 +963,22 @@ class ConnectionManager private constructor(context: Context) {
             // Now: one cheap session/info probe. Three outcomes:
             //   reply, nothing changed  -> do nothing (the overwhelmingly common case)
             //   reply, updatedAt/count moved -> another client touched the session; replay
-            //   no reply in 2.5s        -> socket died while frozen and OkHttp hasn't
+            //   no reply in 10s         -> socket died while frozen and OkHttp hasn't
             //                              noticed (`live` is stale) — force a reconnect,
             //                              which ensureConnected can't do (it trusts `live`).
-            if (live && !busy.value && !turnInFlight) {
+            // No probe (and no watchdog) while a replay is streaming: the chunks themselves
+            // prove the socket is alive, a reply would queue behind the stream (a huge replay
+            // can outrun the window), and a force-reconnect would restart the whole replay.
+            if (live && !busy.value && !turnInFlight && !replayActive.value) {
                 (lastSessionId ?: store.lastSessionId)?.let { sid ->
                     val tok = ++probeToken
                     client?.probeSession(sid)
                     main.postDelayed({
-                        if (tok == probeToken && appForeground && !turnInFlight) {
+                        if (tok == probeToken && appForeground && !turnInFlight && !replayActive.value) {
                             live = false
                             open(resume = sid)
                         }
-                    }, 2_500)
+                    }, 10_000)
                 }
             }
             // Re-ask the server for its model list every time we come back. It was previously
@@ -1058,7 +1066,11 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun saveTranscriptCache() {
         val sid = currentSession.value ?: lastSessionId ?: return
-        if (replayActive.value) return   // mid-replay: `messages` is the OLD transcript
+        // Mid-replay `messages` holds the last fully-shown transcript (pre-replay content or the
+        // cold-start paint) — still a valid snapshot, and the only one a process kill during a
+        // long load would leave. No replayActive gate: every path keeps messages in step with
+        // currentSession (openSession clears before painting; newSession nulls both), and an
+        // empty list is caught below. The next background after Ready overwrites this.
         // Text bubbles only: tool cards, MCP-app views and usage stats don't survive a replay
         // either, so caching them would just make the swap-in visibly churn.
         val snap = messages.filter { (it.role == "user" || it.role == "assistant") && it.text.isNotBlank() }
@@ -1069,6 +1081,9 @@ class ConnectionManager private constructor(context: Context) {
             snap.forEach { m -> arr.put(org.json.JSONObject().put("r", m.role).put("t", m.text)) }
             transcriptCacheFile(sid).writeText(arr.toString())
         }
+        // The cache is a cold-start nicety, never user data: cap it so a long-lived install
+        // doesn't accumulate one file per session ever opened. Best-effort, like the write.
+        pruneTranscriptCache(java.io.File(appContext.filesDir, "transcripts"), keep = 20)
     }
 
     private fun loadTranscriptCache(sid: String): List<ChatMessage> = runCatching {
@@ -1105,6 +1120,7 @@ class ConnectionManager private constructor(context: Context) {
         busy.value = false; streamingRole = null; compacting.value = false
             // The superseded client will never report TurnDone here, so free the wire.
             turnInFlight = false
+        activeRunId = null   // a stale run id belongs to the superseded session; steer would target the wrong run
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         replayWiped = false
         replayActive.value = false
@@ -1226,7 +1242,11 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Probe -> {
                 probeToken++   // cancels the pending dead-socket timeout
-                when {
+                // While a replay streams, the socket is demonstrably alive and the rebuild is
+                // already bringing the fresh content — acting on the verdict here would just
+                // open() and RESTART the replay (same bug the watchdog guard above fixes).
+                // Keep only the baseline refresh; the replay's Ready supersedes any verdict.
+                if (!replayActive.value) when {
                     // The probe itself failed: session gone or socket dead — reconnect.
                     ev.messageCount < 0 -> if (!turnInFlight) { open(resume = ev.sessionId) }
                     // Baseline exists and moved: another client changed the session; replay.
@@ -1271,6 +1291,10 @@ class ConnectionManager private constructor(context: Context) {
                 turnInFlight = false
                 activeRunId = null   // the run this id named is over; steering it would fail
                 syncStamp = null     // our own turn changed the server state; re-baseline on next probe
+                // We got the authoritative completion straight from our own socket -- stop waiting
+                // on the Stop-hook push for this turn so a later turn from another client in the
+                // same (possibly shared) session doesn't spuriously match the stale flag.
+                store.pendingPushSessionId = null
                 // Drain one queued prompt, if any: send it and STAY busy, so the UI never flickers
                 // idle between a queue and its turn.
                 val queued = dequeue()
@@ -1280,6 +1304,7 @@ class ConnectionManager private constructor(context: Context) {
                     // Send the queued prompt now that the wire is free. Service stays up (we are
                     // still busy), so backgrounding between the two turns is safe.
                     turnInFlight = true
+                    lastSessionId?.let { store.pendingPushSessionId = it }
                     client?.sendPrompt(queued.text, queued.images, expect = currentSession.value)
                 } else if (!store.persistentConnection) stopService()
             }
@@ -1289,6 +1314,7 @@ class ConnectionManager private constructor(context: Context) {
                 // so rebuild from scratch — into the side buffer; `messages` stays visible and
                 // untouched until Ready decides whether anything actually changed.
                 replayBuffer.clear()
+                replayProgress.value = 0
                 streamingRole = null
                 replayWiped = true
                 replayActive.value = true
@@ -1296,13 +1322,20 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.AgentChunk -> {
                 // Replay boundary: a NEW messageId means a new source message — break the
                 // bubble instead of gluing (consecutive assistant messages, e.g. a briefing
-                // relay followed by an appended digest, used to merge into one).
-                if (ev.messageId != null && ev.messageId != streamMsgId) streamingRole = null
+                // relay followed by an appended digest, used to merge into one). The same
+                // boundary counts a replayed message for the Loading progress.
+                if (ev.messageId != null && ev.messageId != streamMsgId) {
+                    streamingRole = null
+                    if (replayActive.value) replayProgress.value++
+                }
                 if (ev.messageId != null) streamMsgId = ev.messageId
                 appendStream("assistant", ev.text)
             }
             is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
-            is AcpEvent.UserChunk -> { t().add(ChatMessage("user", ev.text)); streamingRole = null }
+            is AcpEvent.UserChunk -> {
+                t().add(ChatMessage("user", ev.text)); streamingRole = null
+                if (replayActive.value) replayProgress.value++   // one UserChunk per replayed user message
+            }
             is AcpEvent.Config -> if (ev.options.isNotEmpty()) {
                 config.value = ev.options
                 // A federated session's options are the PEER's (session/load passes them
@@ -1425,6 +1458,7 @@ class ConnectionManager private constructor(context: Context) {
                 // misattributes each reply, the exact failure the queue exists to prevent. It also
                 // left turnInFlight false, so the next send() would fire a concurrent prompt too.
                 dequeue()?.let { p ->
+                    store.pendingPushSessionId = ev.sessionId
                     turnInFlight = true
                     busy.value = true
                     client?.sendPrompt(p.text, p.images, expect = currentSession.value)
@@ -1545,4 +1579,13 @@ class ConnectionManager private constructor(context: Context) {
                 instance ?: ConnectionManager(context.applicationContext).also { instance = it }
             }
     }
+}
+
+/** Keep the cold-start transcript cache bounded: delete the oldest files beyond `keep`.
+ *  Best-effort (a failed delete is not data loss) and a no-op on a missing/unreadable dir.
+ *  Top-level internal so the JVM unit tests can exercise it. */
+internal fun pruneTranscriptCache(dir: java.io.File, keep: Int = 20) {
+    val files = dir.listFiles() ?: return          // missing/unreadable dir: no-op
+    if (files.size <= keep) return
+    files.sortedBy { it.lastModified() }.dropLast(keep).forEach { runCatching { it.delete() } }
 }

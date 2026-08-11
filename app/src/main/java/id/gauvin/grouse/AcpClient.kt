@@ -181,7 +181,7 @@ data class ExtInfo(
  *  error surfaced anywhere -- which looks exactly like "my tool changes do nothing".
  *
  *  builtin and platform pass through: they are already variants the add method knows. */
-private fun toExtensionDto(raw: JsonObject): JsonObject {
+internal fun toExtensionDto(raw: JsonObject): JsonObject {
     val type = raw["type"]?.jsonPrimitive?.contentOrNull ?: return raw
     if (type == "builtin" || type == "platform" || type == "mcp") return raw
     val name = raw["name"]?.jsonPrimitive?.contentOrNull ?: return raw
@@ -216,6 +216,13 @@ private fun toExtensionDto(raw: JsonObject): JsonObject {
 }
 
 private const val SKILLS_TAG = "_goose/unstable/sources/list#skill"
+
+/** session/update tags that mutate the on-screen transcript. Any other tag carries its own
+ *  session id in the event and is wanted no matter which session it names. */
+private val TRANSCRIPT_TAGS = setOf(
+    "user_message_chunk", "agent_message_chunk", "agent_thought_chunk",
+    "tool_call", "tool_call_update", "usage_update",
+)
 
 sealed interface AcpEvent {
     data class Status(val text: String) : AcpEvent
@@ -865,7 +872,7 @@ class AcpClient(
         }
     }
 
-    private fun handle(text: String) {
+    internal fun handle(text: String) {
         val obj = try { json.parseToJsonElement(text).jsonObject } catch (e: Exception) {
             onEvent(AcpEvent.Error("bad json: ${e.message}")); return
         }
@@ -1128,7 +1135,7 @@ class AcpClient(
         }
     })
 
-    private fun parseConfig(result: JsonObject?): List<ConfigOption> {
+    internal fun parseConfig(result: JsonObject?): List<ConfigOption> {
         val arr = result?.get("configOptions") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1149,7 +1156,7 @@ class AcpClient(
 
     /** sources/list returns SourceEntry objects; a project's slug is its file stem, which is
      *  what session.projectId holds. `name` is the human label and may differ. */
-    private fun parseProjects(result: JsonObject?): List<ProjectInfo> {
+    internal fun parseProjects(result: JsonObject?): List<ProjectInfo> {
         val arr = result?.get("sources") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1169,7 +1176,7 @@ class AcpClient(
         }.sortedBy { it.name.lowercase() }
     }
 
-    private fun parseSkills(result: JsonObject?): List<SkillInfo> {
+    internal fun parseSkills(result: JsonObject?): List<SkillInfo> {
         val arr = result?.get("sources") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1184,7 +1191,7 @@ class AcpClient(
         }.sortedBy { it.name.lowercase() }
     }
 
-    private fun parseSchedules(result: JsonObject?): List<ScheduleInfo> {
+    internal fun parseSchedules(result: JsonObject?): List<ScheduleInfo> {
         val arr = result?.get("jobs") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1200,7 +1207,7 @@ class AcpClient(
         }.sortedBy { it.id.lowercase() }
     }
 
-    private fun parseRecipes(result: JsonObject?): List<RecipeInfo> {
+    internal fun parseRecipes(result: JsonObject?): List<RecipeInfo> {
         val arr = result?.get("recipes") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val e = el as? JsonObject ?: return@mapNotNull null
@@ -1240,7 +1247,7 @@ class AcpClient(
         }.sortedBy { it.title.lowercase() }
     }
 
-    private fun parseSessions(result: JsonObject?): List<SessionInfo> {
+    internal fun parseSessions(result: JsonObject?): List<SessionInfo> {
         val arr = result?.get("sessions") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1269,7 +1276,7 @@ class AcpClient(
     }
 
     /** Parse the config/extensions/list reply: {extensions:[{extension:{name,type,description}, enabled, configKey}]}. */
-    private fun parseExtensions(result: JsonObject?): List<ExtInfo> {
+    internal fun parseExtensions(result: JsonObject?): List<ExtInfo> {
         val arr = result?.get("extensions") as? JsonArray ?: return emptyList()
         return arr.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -1323,6 +1330,11 @@ class AcpClient(
             // timeToFirstTokenMs, cost — camelCase on the wire). Distinct from the standard ACP
             // usage_update (context-window used/size) already handled in standardUpdate().
             "message_usage" -> {
+                // Per-message stats belong to the bound session's turn; a broadcast for another
+                // session would stamp wrong numbers onto this chat's last reply.
+                val bound = sessionId ?: resumeSessionId
+                val sid = params?.get("sessionId")?.jsonPrimitive?.contentOrNull
+                if (bound != null && sid != null && sid != bound) return
                 val usage = update["usage"] as? JsonObject ?: return
                 val outTok = usage["outputTokens"]?.jsonPrimitive?.intOrNull ?: return
                 val elapsed = usage["elapsedMs"]?.jsonPrimitive?.longOrNull ?: return
@@ -1337,6 +1349,18 @@ class AcpClient(
     private fun standardUpdate(params: JsonObject?) {
         val update = params?.get("update") as? JsonObject ?: return
         val tag = update["sessionUpdate"]?.jsonPrimitive?.contentOrNull
+        // goose broadcasts session/update for OTHER sessions onto the same socket (turns this
+        // client started elsewhere, active-run lifecycles). The transcript-mutating tags must
+        // only render when they belong to the session THIS transport is bound to — otherwise a
+        // response to a chat you left streams into whichever chat is on screen. Metadata tags
+        // (session_info_update, mode/config/commands) carry their own session id and are wanted
+        // regardless of which session they name, so they pass. During the pre-bind replay
+        // window (sessionId null) resumeSessionId is the session being loaded.
+        if (tag in TRANSCRIPT_TAGS) {
+            val bound = sessionId ?: resumeSessionId
+            val sid = params?.get("sessionId")?.jsonPrimitive?.contentOrNull
+            if (bound != null && sid != null && sid != bound) return
+        }
         // Replays are never suppressed: every reconnect rebuilds the transcript from the server's
         // history (see AcpEvent.ReplayStart). Suppression used to guard a socket blip against
         // duplicate bubbles, but it couldn't tell "what I already show" from "turns another client

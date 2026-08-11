@@ -1,5 +1,10 @@
 # Grouse
 
+![build](https://github.com/ccgauvin94/grouse-android/actions/workflows/ci.yml/badge.svg)
+![tests](https://github.com/ccgauvin94/grouse-android/actions/workflows/test.yml/badge.svg)
+![license](https://img.shields.io/github/license/ccgauvin94/grouse-android)
+![release](https://img.shields.io/github/v/release/ccgauvin94/grouse-android)
+
 A native Android client for a self-hosted [goose](https://github.com/block/goose), spoken to
 over ACP.
 
@@ -46,8 +51,8 @@ endpoint can run commands as the user running goose. A VPN or overlay network is
 default. If it must be on the internet, put real authentication in front of it — the secret key
 alone is one shared credential.
 
-For TLS, `goose serve` also takes `--tls --tls-cert-path … --tls-key-path …`. With a
-self-signed certificate the app pins the fingerprint on first connect.
+For TLS, `goose serve` also takes `--tls --tls-cert-path … --tls-key-path …`. The app
+accepts the self-signed certificate (tailnet-only + secret-key auth; see `Net.kt`).
 
 ## Building
 

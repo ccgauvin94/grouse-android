@@ -16,6 +16,26 @@ import org.unifiedpush.android.connector.data.PushEndpoint
 import org.unifiedpush.android.connector.data.PushMessage
 import java.util.concurrent.Executors
 
+/** Parse a push envelope {type,session,text}; plain text (no type) is a briefing. Malformed
+ *  JSON falls through to the raw text as a briefing. Top-level internal so the JVM unit tests
+ *  can exercise it without instantiating the Android service. */
+internal fun parsePush(raw: String): Triple<String?, String?, String> = try {
+    val o = Json.parseToJsonElement(raw).jsonObject
+    Triple(
+        o["type"]?.jsonPrimitive?.contentOrNull,
+        o["session"]?.jsonPrimitive?.contentOrNull,
+        o["text"]?.jsonPrimitive?.contentOrNull ?: raw,
+    )
+} catch (e: Exception) {
+    Triple(null, null, raw)
+}
+
+/** True when a finished-turn push should become a notification: the app is backgrounded, the
+ *  envelope names a session, and it is the session this device armed (sent a turn and is still
+ *  waiting on completion). Top-level internal so the JVM unit tests can exercise it. */
+internal fun shouldShowTurnNudge(pushedSessionId: String?, pendingSessionId: String?, isForeground: Boolean): Boolean =
+    !isForeground && pushedSessionId != null && pushedSessionId == pendingSessionId
+
 /**
  * UnifiedPush wiring. The distributor (e.g. NextPush, backed by the uppush app on the user's
  * Nextcloud) holds the one battery-friendly connection; the server POSTs to the endpoint URL to
@@ -55,10 +75,10 @@ class GoosePushService : PushService() {
             // Finished-turn nudge (fires for every goose turn, Desktop too -- the server can't tell
             // clients apart). Only show it for a turn THIS device actually sent and is still waiting
             // on, and not while you're already watching (foreground). Tap deep-links to that session.
-            if (cm.isForeground) return
-            if (session == null || session != cm.store.pendingPushSessionId) return
-            cm.store.pendingPushSessionId = null
-            Notifier(this).postReply(text, session)
+            if (shouldShowTurnNudge(session, cm.store.pendingPushSessionId, cm.isForeground)) {
+                cm.store.pendingPushSessionId = null
+                Notifier(this).postReply(text, session)
+            }
         } else {
             // Briefing/proactive: ALWAYS record for the Assistant status/dialog — even when
             // foreground, or a briefing that lands while you're in the app is lost and the dialog
@@ -67,17 +87,6 @@ class GoosePushService : PushService() {
             SecureStore(this).apply { lastBriefingAt = System.currentTimeMillis(); lastBriefingText = text }
             if (!cm.isForeground) Notifier(this).postProactive(text, session)
         }
-    }
-
-    private fun parsePush(raw: String): Triple<String?, String?, String> = try {
-        val o = Json.parseToJsonElement(raw).jsonObject
-        Triple(
-            o["type"]?.jsonPrimitive?.contentOrNull,
-            o["session"]?.jsonPrimitive?.contentOrNull,
-            o["text"]?.jsonPrimitive?.contentOrNull ?: raw,
-        )
-    } catch (e: Exception) {
-        Triple(null, null, raw)
     }
 
     override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) {
