@@ -13,13 +13,17 @@ android {
         applicationId = "id.gauvin.grouse"
         minSdk = 26
         targetSdk = 34
+        // The only native code is the arm64-v8a roam transport (grouse-roam-core
+        // .so + its transitive natives); building the other ABIs just carries
+        // dead weight in the single sideloaded APK.
+        ndk { abiFilters += listOf("arm64-v8a") }
         // MUST be bumped on every sideloaded build. It sat at 1 through many rebuilds, and a
         // same-versionCode install is a reinstall Android may silently skip or refuse -- the
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 20
-        versionName = "0.20-20260811"
+        versionCode = 21
+        versionName = "0.21-20260811"
     }
 
     // Release signing, used ONLY when the four properties below are supplied (CI sets them from
@@ -112,12 +116,13 @@ dependencies {
     // Native iroh roam transport (roam branch): uniffi Kotlin bindings over the
     // fork's goose-roaming, JNA-loaded .so (arm64-v8a). See grouse-roam-core.
     implementation("dev.grouse:roamcore:0.1.0")
-    // QR pairing for roam hosts: CameraX preview + bundled ML Kit barcode
-    // (no Play Services — this app is sideload-only).
+    // QR pairing for roam hosts: CameraX preview + zxing core (pure Java — the
+    // ML Kit barcode engine was ~19 MB of native libbarhopper across 4 ABIs for
+    // one QR decode; zxing is ~700 KB with zero natives).
     implementation("androidx.camera:camera-camera2:1.3.4")
     implementation("androidx.camera:camera-lifecycle:1.3.4")
     implementation("androidx.camera:camera-view:1.3.4")
-    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("com.google.zxing:core:3.5.3")
 
     // JVM unit tests: parsers and wire framing only — no Android framework, no Robolectric.
     // Defends the ACP contracts that have bitten repeatedly (casing, session_info_update keys,

@@ -3419,24 +3419,30 @@ private fun CameraQrPreview(onCard: (String) -> Unit, modifier: Modifier = Modif
                 val preview = androidx.camera.core.Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
-                val scanner = com.google.mlkit.vision.barcode.BarcodeScanning.getClient(
-                    com.google.mlkit.vision.barcode.BarcodeScannerOptions.Builder()
-                        .setBarcodeFormats(com.google.mlkit.vision.barcode.common.Barcode.FORMAT_QR_CODE)
-                        .build())
                 val analysis = androidx.camera.core.ImageAnalysis.Builder()
                     .setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                 analysis.setAnalyzer(mainExecutor) { imageProxy ->
                     val media = imageProxy.image
                     if (media == null) { imageProxy.close(); return@setAnalyzer }
-                    val input = com.google.mlkit.vision.common.InputImage.fromMediaImage(
-                        media, imageProxy.imageInfo.rotationDegrees)
-                    scanner.process(input)
-                        .addOnSuccessListener { barcodes ->
-                            val value = barcodes.firstOrNull()?.rawValue
-                            if (value != null && fired.compareAndSet(false, true)) onCard(value)
-                        }
-                        .addOnCompleteListener { imageProxy.close() }
+                    try {
+                        // The Y (luminance) plane is all zxing needs; QR codes
+                        // decode at any rotation, so sensor orientation is irrelevant.
+                        val buffer = media.planes[0].buffer
+                        val data = ByteArray(buffer.remaining())
+                        buffer.get(data)
+                        val source = com.google.zxing.PlanarYUVLuminanceSource(
+                            data, imageProxy.width, imageProxy.height,
+                            0, 0, imageProxy.width, imageProxy.height, false)
+                        val result = try {
+                            com.google.zxing.qrcode.QRCodeReader().decode(
+                                com.google.zxing.BinaryBitmap(
+                                    com.google.zxing.common.HybridBinarizer(source)))
+                        } catch (_: Exception) { null }
+                        if (result != null && fired.compareAndSet(false, true)) onCard(result.text)
+                    } finally {
+                        imageProxy.close()
+                    }
                 }
                 provider.unbindAll()
                 provider.bindToLifecycle(lifecycleOwner, androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA,

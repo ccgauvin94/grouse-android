@@ -3,6 +3,14 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.21-20260811
+
+**APK back to sane size.** 0.20 ballooned to 58 MB: the ML Kit barcode engine
+ships a ~19 MB native library across four ABIs for one QR decode. The scanner
+now uses zxing (pure Java, ~700 KB, no natives), and the APK builds arm64-v8a
+only — the sole native code is the roam transport, which was already arm64-only.
+Back to ~36 MB.
+
 ## 0.20-20260811
 
 **QR pairing for roam hosts.** The Roam screen's "Scan QR" opens a camera
