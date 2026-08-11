@@ -3,6 +3,13 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.22-20260811
+
+**Transport .so slimmed 63%.** The native roam core was 21.6 MB in the APK —
+built with cargo's default release profile. A size profile (opt-level z + LTO +
+strip + abort-on-panic) takes the .so to 7.9 MB with the FFI exports intact,
+and the APK is now ~22 MB. The QR scanner's camera preview stays.
+
 ## 0.21-20260811
 
 **APK back to sane size.** 0.20 ballooned to 58 MB: the ML Kit barcode engine
