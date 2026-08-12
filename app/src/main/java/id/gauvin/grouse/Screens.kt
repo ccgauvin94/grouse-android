@@ -3468,7 +3468,7 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
                     SettingCaption("No hosts yet — paste a connection card from a " +
                         "`goose serve --roam` or `roam share` host.")
                 cm.roamPeers.forEach { peer ->
-                    val connected = cm.currentRoamPeer == peer.name
+                    val connected = cm.isRoamPeerConnected(peer.name)
                     Row(verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                         Column(Modifier.weight(1f)) {
@@ -3477,7 +3477,7 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
                                 color = MaterialTheme.colorScheme.outline)
                         }
                         if (connected) {
-                            TextButton(onClick = { cm.disconnectRoam() }) { Text("Disconnect") }
+                            TextButton(onClick = { cm.disconnectRoam(peer.name) }) { Text("Disconnect") }
                         } else if (cm.roamConnecting == peer.name) {
                             CircularProgressIndicator(Modifier.size(18.dp),
                                 strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
@@ -3491,7 +3491,8 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
                 }
                 cm.currentRoamPeer?.let { peer ->
                     SettingCaption("Connected to $peer — open the menu to pick one of its " +
-                        "sessions; remote chats work like local ones.")
+                        "sessions; remote chats work like local ones. Other connected hosts " +
+                        "keep running in the background.")
                 }
                 if (cm.status.value.isNotBlank()) {
                     Text(cm.status.value, style = MaterialTheme.typography.bodySmall,
@@ -3613,14 +3614,20 @@ fun RoamDrawer(cm: ConnectionManager, onOpen: () -> Unit, onAddHost: () -> Unit)
             item { SettingCaption("No hosts yet — add one from the Roam screen.") }
         }
         cm.roamPeers.forEach { peer ->
-            val connected = cm.currentRoamPeer == peer.name
+            val live = cm.isRoamPeerConnected(peer.name)
+            val active = cm.currentRoamPeer == peer.name
+            val peerSessions = cm.roamSessionsByPeer[peer.name].orEmpty()
             item {
                 Row(verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)) {
-                    Text(peer.name, style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.weight(1f))
-                    if (connected) {
-                        TextButton(onClick = { cm.disconnectRoam() }) { Text("Disconnect") }
+                    Column(Modifier.weight(1f)) {
+                        Text(peer.name, style = MaterialTheme.typography.bodyLarge)
+                        if (live && !active)
+                            Text("connected — tap a chat to switch", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline)
+                    }
+                    if (live) {
+                        TextButton(onClick = { cm.disconnectRoam(peer.name) }) { Text("Disconnect") }
                     } else if (cm.roamConnecting == peer.name) {
                         CircularProgressIndicator(Modifier.size(16.dp),
                             strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
@@ -3629,9 +3636,10 @@ fun RoamDrawer(cm: ConnectionManager, onOpen: () -> Unit, onAddHost: () -> Unit)
                     }
                 }
             }
-            if (connected) {
+            if (live) {
                 item {
-                    Text("CHATS", style = MaterialTheme.typography.labelMedium,
+                    Text(if (active) "CHATS" else "CHATS — ${peer.name}",
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
                 }
@@ -3643,9 +3651,9 @@ fun RoamDrawer(cm: ConnectionManager, onOpen: () -> Unit, onAddHost: () -> Unit)
                         Text("New chat")
                     }
                 }
-                items(cm.roamSessions, key = { "r:" + it.sessionId }) { s ->
+                items(peerSessions, key = { "r:" + peer.name + it.sessionId }) { s ->
                     Row(Modifier.fillMaxWidth().combinedClickable(
-                        onClick = { cm.openSession(s.sessionId, fromRoam = true); onOpen() },
+                        onClick = { cm.openSession(s.sessionId, roamPeer = peer.name); onOpen() },
                         onLongClick = { actionsFor = s },
                     ).padding(horizontal = 12.dp, vertical = 8.dp)) {
                         Column {
@@ -3660,7 +3668,7 @@ fun RoamDrawer(cm: ConnectionManager, onOpen: () -> Unit, onAddHost: () -> Unit)
                         }
                     }
                 }
-                if (cm.roamSessions.isEmpty()) {
+                if (peerSessions.isEmpty()) {
                     item { SettingCaption("No sessions on this host yet — start a new chat.") }
                 }
             } else {

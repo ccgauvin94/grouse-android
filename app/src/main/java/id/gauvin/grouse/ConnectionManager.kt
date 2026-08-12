@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -92,6 +93,9 @@ class ConnectionManager private constructor(context: Context) {
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
     /** The ACTIVE roam peer's sessions (plain ids — the peer IS a first-class goose). */
     val roamSessions = mutableStateListOf<SessionInfo>()
+    /** Every connected peer's session list, so the drawer can show any endpoint's
+     *  sessions without making it the active screen. Replaced wholesale per reply. */
+    val roamSessionsByPeer = mutableStateMapOf<String, List<SessionInfo>>()
     /** Which connection the drawer lists: serve sessions/projects or roam endpoints. */
     enum class SidebarMode { SERVE, ROAM }
     val sidebarMode = mutableStateOf(SidebarMode.SERVE)
@@ -512,14 +516,17 @@ class ConnectionManager private constructor(context: Context) {
     // event stream, and switching views never tears the other down.
     private var serveClient: AcpClient? = null
     private var serveGen = 0
-    private var roamClient: AcpClient? = null
-    private var roamGen = 0
+    // One LIVE roam connection PER ENDPOINT, so several peers can stay connected at
+    // once; `currentRoamPeer` picks which one owns the screen and switching between
+    // them costs nothing (only opening a session re-dials that peer). The serve
+    // connection is separate and untouched.
+    private val roamClients = mutableMapOf<String, AcpClient>()
+    private val roamGens = mutableMapOf<String, Int>()
     @Volatile private var activeClientIsRoam = false
-    private var client: AcpClient?
-        get() = if (activeClientIsRoam) roamClient else serveClient
-        set(v) { if (activeClientIsRoam) roamClient = v else serveClient = v }
+    private val client: AcpClient?
+        get() = if (activeClientIsRoam) roamClients[currentRoamPeer] else serveClient
     /** Generation of whichever client owns the screen (event guards in onEvent). */
-    private val activeGen: Int get() = if (activeClientIsRoam) roamGen else serveGen
+    private val activeGen: Int get() = if (activeClientIsRoam) roamGens[currentRoamPeer] ?: 0 else serveGen
     // MCP-App template cache: "$extension|$uri" -> HTML. Templates are static per server
     // version and shared across tools/messages/sessions, so one fetch serves everything —
     // including transcript replays, which re-emit every historical tool_call.
@@ -630,30 +637,50 @@ class ConnectionManager private constructor(context: Context) {
     fun removeRoamPeer(name: String) {
         store.roamPeers = store.roamPeers - name
         roamPeers.removeAll { it.name == name }
-        if (currentRoamPeer == name) disconnectRoam()
+        if (currentRoamPeer == name) disconnectRoam(name)
     }
 
-    fun disconnectRoam() {
-        currentRoamPeer = null
-        roamClient?.close(); roamClient = null
-        activeClientIsRoam = false          // serve takes the screen back if it's alive
-        live = false; connecting = false; online.value = false
+    fun disconnectRoam(name: String) {
+        roamClients.remove(name)?.close()
+        roamGens.remove(name)
         roamConnecting = null
-        status.value = ""
-        messages.clear(); currentSession.value = null
+        if (currentRoamPeer == name) {
+            currentRoamPeer = null
+            activeClientIsRoam = false          // serve takes the screen back if it's alive
+            live = false; connecting = false; online.value = false
+            status.value = ""
+            messages.clear(); currentSession.value = null
+        }
     }
 
-    /** Dial a peer and bind the ACP session layer over the roam stream. `resume`
-     *  is the peer-side session to load (last session on that peer, or the one
-     *  the user just picked); null on first connect leaves the app sessionless
+    /** True when a peer's connection is live (active or backgrounded). */
+    fun isRoamPeerConnected(name: String): Boolean = roamClients.containsKey(name)
+
+    /** Bring a peer to the screen. If its connection is already live and no session
+     *  switch is asked for, this only ACTIVATES it (no dial) — several peers can stay
+     *  connected at once and switching between them is free. `resume` loads a specific
+     *  peer-side session (last session on that peer, or the one the user just picked),
+     *  which re-dials that peer; null on first connect leaves the app sessionless
      *  until the user picks — session/new would litter the host's session list. */
     fun connectRoam(name: String, resume: String? = null, createSession: Boolean = false) {
         val peer = roamPeers.firstOrNull { it.name == name } ?: return
-        currentRoamPeer = name
         store.lastRoamPeer = name
+        // Already connected and nothing to switch to: just bring it to the screen.
+        if (roamClients[name] != null && resume == null && !createSession) {
+            currentRoamPeer = name
+            activeClientIsRoam = true
+            clearSessionUi()
+            messages.clear()
+            currentSession.value = null
+            if (roamSessionsByPeer[name].isNullOrEmpty()) client?.listSessions()
+            status.value = "connected to ${peer.name}"
+            live = true; connecting = false; online.value = true
+            return
+        }
+        currentRoamPeer = name
         roamConnecting = name
         activeClientIsRoam = true
-        roamClient?.close()      // the serve connection stays untouched
+        roamClients[name]?.close()   // re-dialing this peer; other peers stay up
         live = false; connecting = true; online.value = false
         busy.value = false; streamingRole = null; compacting.value = false
         turnInFlight = false; activeRunId = null
@@ -665,17 +692,19 @@ class ConnectionManager private constructor(context: Context) {
         messages.clear()
         currentSession.value = resume
         // Cold-start nicety, same as open(): paint the peer session's snapshot
-        // (r_ key: a peer session id could collide with a local one).
+        // (r_<peer>_ key: session ids can collide across peers and with local ones).
         if (resume != null)
-            loadTranscriptCache("r_$resume").takeIf { it.isNotEmpty() }?.let { messages.addAll(it) }
+            loadTranscriptCache("r_${name}_$resume").takeIf { it.isNotEmpty() }
+                ?.let { messages.addAll(it) }
         status.value = "connecting to ${peer.name}…"
-        val gen = ++roamGen
+        roamGens[name] = (roamGens[name] ?: 0) + 1
+        val gen = roamGens[name]!!
         // The FFI dial (roamConnect) has NO timeout of its own — an unreachable host blocks it
         // forever, which left "Test connection" spinning indefinitely. Cancel the watchdog on
         // success; on expiry it bumps the generation (discarding a late dial) and clears state.
         val dialTimeout = Runnable {
-            if (gen == roamGen) {
-                roamGen++
+            if (gen == roamGens[name]) {
+                roamGens[name] = gen + 1
                 status.value = "roam: dial timed out (${peer.name} unreachable?)"
                 connecting = false; roamConnecting = null
                 currentRoamPeer = null; activeClientIsRoam = false
@@ -687,7 +716,7 @@ class ConnectionManager private constructor(context: Context) {
             } catch (t: Throwable) {
                 android.util.Log.e("Grouse", "roam dial failed (${peer.name})", t)
                 main.post {
-                    if (gen == roamGen) {
+                    if (gen == roamGens[name]) {
                         status.value = "roam: ${t.message ?: t.javaClass.simpleName}"
                         connecting = false; roamConnecting = null
                         currentRoamPeer = null; activeClientIsRoam = false
@@ -696,11 +725,11 @@ class ConnectionManager private constructor(context: Context) {
                 return@Thread
             }
             main.post {
-                if (gen != roamGen) { link.close(); return@post }
+                if (gen != roamGens[name]) { link.close(); return@post }
                 main.removeCallbacks(dialTimeout)   // the dial succeeded; the watchdog is moot
                 roamConnecting = null               // unstick every connect button
                 val c = AcpClient("roam://${peer.name}", "", roam = link) { ev ->
-                    main.post { if (gen == roamGen) onEvent(ev, isRoam = true) }
+                    main.post { if (gen == roamGens[name]) onEvent(ev, peerName = name) }
                 }
                 c.autoNewSession = createSession
                 c.resumeSessionId = resume
@@ -710,7 +739,7 @@ class ConnectionManager private constructor(context: Context) {
                 c.desiredCwd = if (createSession) "/" else ""
                 c.desiredOptions = emptyMap()     // the peer's own config applies
                 c.desiredRecipeId = pendingRecipeId.also { pendingRecipeId = null }
-                client = c
+                roamClients[name] = c
                 c.connect()
             }
         }, "grouse-roam-dial").apply { isDaemon = true; start() }
@@ -847,7 +876,7 @@ class ConnectionManager private constructor(context: Context) {
      *  drift -- a session list newer than the project list renders groups labelled by raw id. */
     fun refreshSidebar() {
         serveClient?.listSessions(); serveClient?.listProjects()
-        roamClient?.listSessions()
+        roamClients.values.forEach { it.listSessions() }
     }
 
     /** Archive a session: history stays on disk, it just leaves the list. The soft option --
@@ -902,7 +931,7 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    fun openSession(sessionId: String, knownKind: SessionKind? = null, fromRoam: Boolean = false) {
+    fun openSession(sessionId: String, knownKind: SessionKind? = null, roamPeer: String? = null) {
         // Cancel any deferred "open the assistant thread" -- the user has since picked a specific
         // session and that choice wins. Without this, a pendingOpenAssistant set while offline (its
         // refreshSidebar() is a no-op with no client) survives until the NEXT Sessions event, which
@@ -913,11 +942,11 @@ class ConnectionManager private constructor(context: Context) {
         clearSessionUi()          // the previous session's tools/extensions/models must not linger
         clearSummaryState()       // a session switch leaves any ticker stale
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
-        // Roam: the session lives on the peer — reconnect the roam link resuming it
-        // (its cwd is resolved by asking the peer). The serve connection stays up.
-        if (fromRoam) {
-            val peer = currentRoamPeer ?: return
-            connectRoam(peer, resume = sessionId)
+        // Roam: the session lives on THAT peer — reconnect its link resuming it (its cwd is
+        // resolved by asking the peer). Session ids are plain and can collide across peers, so
+        // the DRAWER passes the endpoint name. The serve connection stays up.
+        if (roamPeer != null) {
+            connectRoam(roamPeer, resume = sessionId)
             return
         }
         // A caller resuming a session it already has cached (e.g. connectHome's assistant shortcut)
@@ -1486,8 +1515,9 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun saveTranscriptCache() {
         val sid = currentSession.value ?: lastSessionId ?: return
-        // A roam session's id could collide with a local one; its snapshot gets the r_ key.
-        val key = if (activeClientIsRoam) "r_$sid" else sid
+        // A roam session's id could collide with a local one or across peers;
+        // its snapshot gets the r_<peer>_ key.
+        val key = if (activeClientIsRoam && currentRoamPeer != null) "r_${currentRoamPeer}_$sid" else sid
         // Mid-replay `messages` holds the last fully-shown transcript (pre-replay content or the
         // cold-start paint) — still a valid snapshot, and the only one a process kill during a
         // long load would leave. No replayActive gate: every path keeps messages in step with
@@ -1577,7 +1607,7 @@ class ConnectionManager private constructor(context: Context) {
         // after the new client is already live.
         val gen = ++serveGen
         serveClient = AcpClient(url, store.secretKey) { ev ->
-            main.post { if (gen == serveGen) onEvent(ev, isRoam = false) }
+            main.post { if (gen == serveGen) onEvent(ev, peerName = null) }
         }.also {
             it.desiredOptions = if (resume == null) saved else emptyMap()
             it.resumeSessionId = resume
@@ -1589,12 +1619,15 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    private fun onEvent(ev: AcpEvent, isRoam: Boolean) {
+    private fun onEvent(ev: AcpEvent, peerName: String?) {
         // A connection's session list always refreshes ITS OWN list, even while the
         // other connection owns the screen — the drawer shows whichever tab is open.
         if (ev is AcpEvent.Sessions) {
-            if (isRoam) {
-                roamSessions.clear(); roamSessions.addAll(ev.list)
+            if (peerName != null) {
+                roamSessionsByPeer[peerName] = ev.list
+                if (peerName == currentRoamPeer) {
+                    roamSessions.clear(); roamSessions.addAll(ev.list)
+                }
             } else {
                 sessions.value = ev.list
                 store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })
@@ -1621,7 +1654,9 @@ class ConnectionManager private constructor(context: Context) {
         // projects, providers) are the exception: Settings screens read them even while a
         // roam connection owns the chat — and their requests are serveClient-routed, so a
         // roam client never emits them anyway.
-        val active = isRoam == activeClientIsRoam
+        val active = if (peerName != null)
+            peerName == currentRoamPeer && activeClientIsRoam
+        else !activeClientIsRoam
         if (!active && ev !is AcpEvent.ServerConfig && ev !is AcpEvent.Extensions &&
             ev !is AcpEvent.Schedules && ev !is AcpEvent.Recipes && ev !is AcpEvent.Skills &&
             ev !is AcpEvent.Projects && ev !is AcpEvent.AvailableExtensions &&
@@ -1903,8 +1938,8 @@ class ConnectionManager private constructor(context: Context) {
                 lastSessionId = ev.sessionId
                 // The roam peer's session id means nothing to the local WS host — keep the
                 // WS resume target and each peer's resume target separate.
-                if (isRoam) {
-                    roamLastSession[currentRoamPeer!!] = ev.sessionId
+                if (peerName != null) {
+                    roamLastSession[peerName] = ev.sessionId
                     lastSessionIsRoam = true
                     roamConnecting = null   // safety net; the dial path already cleared it
                 } else {
@@ -1952,7 +1987,7 @@ class ConnectionManager private constructor(context: Context) {
                 val genAtReady = activeGen
                 main.postDelayed({ if (genAtReady == activeGen) client?.listTools() }, 2500)
                 client?.listSessionExtensions()
-                if (!isRoam) loadServerProviders()
+                if (peerName == null) loadServerProviders()
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Name it so both
                 // the app (title match) and deliver.sh (name-grep) resolve it as the assistant

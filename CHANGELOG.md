@@ -286,6 +286,17 @@ Master became a goose/ACP-only client for this release — the server-specific p
 (speech, directory browsing, cwd switching) moved to a private downstream. What ships here
 talks to any `goose serve`.
 
+## 0.39-20260812
+
+**Multiple roam endpoints at once.** Each saved host now keeps its OWN live
+connection — connect A, connect B, and both stay up; the drawer's Roam tab
+shows each connected endpoint's sessions, and tapping a chat on the other host
+just switches to it (no re-dial, the connection was already there). Opening a
+specific session still re-dials that host, exactly like switching chats on
+serve. Disconnecting one host leaves the others and the serve connection
+untouched. Transcript snapshots are keyed per host so same-named session ids
+can't collide across them.
+
 ## 0.38-20260812
 
 **Roam dial fixes — connecting works again.**
