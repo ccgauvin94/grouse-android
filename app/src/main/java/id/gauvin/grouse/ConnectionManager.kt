@@ -779,7 +779,8 @@ class ConnectionManager private constructor(context: Context) {
      *  replays: the server history is rebuilt into the transcript on every session/load (see
      *  AcpEvent.ReplayStart), which both repopulates after a background process kill and picks up
      *  turns another client (Desktop, deliver.sh) added to this session while we were away. */
-    fun ensureConnected() {        if (activeClientIsRoam) {
+    fun ensureConnected() {
+        if (activeClientIsRoam) {
             val peer = currentRoamPeer
             if (peer == null || live || connecting) return
             connectRoam(peer, resume = lastSessionId)
@@ -1632,9 +1633,19 @@ class ConnectionManager private constructor(context: Context) {
                     activeRunId == null && !turnInFlight && !busy.value && !replayActive.value) {
                     val now = android.os.SystemClock.elapsedRealtime()
                     val prev = lastExtAdvance
+                    lastExtAdvance = ev.updatedAt to now
                     if (prev != null && prev.first != ev.updatedAt && now - prev.second < 10_000)
                         busyElsewhere.value = true
-                    else lastExtAdvance = ev.updatedAt to now
+                    // Self-expire: the other client can finish while our follow replay catches up,
+                    // and nothing else would clear the banner. The token is this advance's
+                    // timestamp — only the LATEST advance's clear may fire, so continuous activity
+                    // keeps the banner up and a 15s quiet spell drops it.
+                    main.postDelayed({
+                        if (lastExtAdvance?.second == now) {
+                            busyElsewhere.value = false
+                            lastExtAdvance = null
+                        }
+                    }, 15_000)
                 }
                 // Live title/updatedAt sync (auto-naming after the first turn, renames from any
                 // client) — previously only visible after a full session re-list.

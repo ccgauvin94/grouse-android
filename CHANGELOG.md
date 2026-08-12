@@ -3,6 +3,15 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.32-20260811
+
+**L0 guard polish.** The "Running in another goose" banner now self-expires: if
+the other client's activity stops (including when the follow replay catches up
+to an already-finished turn), the banner clears itself after 15s of quiet
+instead of sticking on an idle session. And "Clear conversation…" now warns
+explicitly when the session is running in another goose — clearing would
+interrupt that run.
+
 ## 0.31-20260811
 
 **"Running in another goose" guard (L0).** When the session on screen keeps

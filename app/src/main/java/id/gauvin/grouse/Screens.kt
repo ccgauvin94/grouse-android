@@ -1212,7 +1212,10 @@ private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: 
             onDismissRequest = onDone,
             title = { Text("Clear conversation?") },
             text = { Text("Deletes the message history server-side (no model turn, unlike /clear). " +
-                "The session stays; other clients see it empty too.") },
+                "The session stays; other clients see it empty too." +
+                if (cm.busyElsewhere.value)
+                    " This session is running in another goose — clearing will interrupt that run."
+                else "") },
             confirmButton = { TextButton(onClick = {
                 cm.clearConversation(s.sessionId); onDone()
             }) { Text("Clear") } },
