@@ -60,6 +60,12 @@ class ConnectionManager private constructor(context: Context) {
     private val notifier = Notifier(context)
     private var appForeground = true
     private var serviceRunning = false
+    // Timestamp (elapsedRealtime) of the last stream event we actually received. Used on resume:
+    // if a turn was in flight when we backgrounded and no chunk has arrived since, the socket
+    // died silently (live is stale-true, busy/turnInFlight are stuck) — force a reconnect so the
+    // finished turn replays in, rather than leaving a frozen chat with no way to tell state.
+    private var lastStreamAt = 0L
+    private fun markStreamActivity() { lastStreamAt = android.os.SystemClock.elapsedRealtime() }
     // Sends that must wait for (re)connect — a queue, not one slot, so a second reply while
     // still connecting can't clobber the first. The user bubble is added when queued (in send()).
     private data class PendingSend(val text: String, val images: List<ImageBlock>)
@@ -811,14 +817,16 @@ class ConnectionManager private constructor(context: Context) {
     // replacement socket and the chat looks frozen mid-tool-calls. Best available recovery:
     // after reconnecting, replay the session a few times so the finished turn shows up.
     private var droppedMidTurn = false
-    private var resyncTicks = 0
+    // Countdown of the dropped-mid-turn resync loop; snapshot state so the top bar can show
+    // "finishing…" while we're re-replaying to catch a turn that's still running server-side.
+    val resyncTicks = mutableStateOf(0)
     private fun turnResyncTick() {
-        if (resyncTicks <= 0) return
-        resyncTicks--
+        if (resyncTicks.value <= 0) return
+        resyncTicks.value--
         // The user started something new (or left) — their action wins; stop quietly.
         if (busy.value || turnInFlight || !appForeground) return
         lastSessionId?.let { reconnectToCurrent() }
-        if (resyncTicks > 0) main.postDelayed(::turnResyncTick, 8_000)
+        if (resyncTicks.value > 0) main.postDelayed(::turnResyncTick, 8_000)
     }
 
     /** Refresh sessions AND the projects that label them. Kept as one call so the two can never
@@ -1321,6 +1329,7 @@ class ConnectionManager private constructor(context: Context) {
         // the Ready handler flushes.
         if (live && client?.ready == true && !turnInFlight) {
             turnInFlight = true
+            markStreamActivity()   // baseline: we just sent — the turn is freshly live
             busyElsewhere.value = false; lastExtAdvance = null   // we're running it now
             lastSessionId?.let { store.pendingPushSessionId = it }
             client?.sendPrompt(text, images, expect = currentSession.value)
@@ -1354,6 +1363,24 @@ class ConnectionManager private constructor(context: Context) {
         if (fg) {
             notifier.cancelAlert()
             ensureConnected()
+            // A turn was streaming when we lost focus and the socket died SILENTLY (the OS kills
+            // it in the background without OkHttp noticing): `live` stays true, busy/turnInFlight
+            // stay true, and both ensureConnected (trusts `live`) and armFollowProbe (bails on
+            // turnInFlight) no-op — the chat freezes mid-turn with no recovery and no way to tell.
+            // If no chunk has arrived in a while, the stream is gone; force a reconnect, which
+            // clears the stuck state and replays the finished turn. A 1-2s background is unaffected
+            // (chunks keep arriving, so the threshold never trips).
+            if (turnInFlight && android.os.SystemClock.elapsedRealtime() - lastStreamAt > 10_000) {
+                // The turn may STILL be running server-side — goosed streams it only to the
+                // connection that prompted it, so this new socket won't receive the live stream.
+                // Arm the same recovery a DETECTED disconnect uses (droppedMidTurn -> resync
+                // loop): the first reconnect replays whatever's committed so far, and the loop
+                // re-replays a few times to pull in the rest once it finishes. If the turn is
+                // already done, the first replay shows it and the extra ticks are harmless
+                // (idempotent replay).
+                droppedMidTurn = true
+                reconnectToCurrent()
+            }
             // This block used to REOPEN THE SESSION UNCONDITIONALLY on every foreground —
             // a 2-second alt-tab paid a full session/load replay of the whole transcript,
             // which is exactly the "whole app reconnects every time I look away" complaint.
@@ -1646,6 +1673,7 @@ class ConnectionManager private constructor(context: Context) {
                 }
                 streamingRole = null
                 noteSummaryActivity("running ${ev.title}")
+                markStreamActivity()
             }
             is AcpEvent.AppResource -> {
                 appFetchInFlight.remove(ev.key)
@@ -1674,6 +1702,7 @@ class ConnectionManager private constructor(context: Context) {
                 }
                 if (!ev.live && ev.output.isNotBlank())
                     noteSummaryActivity("${ev.output.trim().lineSequence().first().take(60)}")
+                markStreamActivity()
             }
             is AcpEvent.ActiveRun -> {
                 // Only trust run ids for the session on screen — a notification for another
@@ -1818,8 +1847,9 @@ class ConnectionManager private constructor(context: Context) {
                 }
                 if (ev.messageId != null) streamMsgId = ev.messageId
                 appendStream("assistant", ev.text)
+                markStreamActivity()
             }
-            is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
+            is AcpEvent.ThoughtChunk -> { appendStream("thought", ev.text); markStreamActivity() }
             is AcpEvent.UserChunk -> {
                 t().add(ChatMessage("user", ev.text)); streamingRole = null
                 if (replayActive.value) replayProgress.value++   // one UserChunk per replayed user message
@@ -1896,7 +1926,7 @@ class ConnectionManager private constructor(context: Context) {
                 if (droppedMidTurn) {
                     // The turn we lost is still finishing server-side; poll it back into view.
                     droppedMidTurn = false
-                    resyncTicks = 3
+                    resyncTicks.value = 3
                     main.postDelayed(::turnResyncTick, 8_000)
                 }
                 currentSession.value = ev.sessionId

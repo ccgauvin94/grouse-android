@@ -378,6 +378,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                 cm.onAssistant && busy -> "Assistant · working…"
                                 cm.onAssistant -> "Assistant"
                                 online && busy -> "Grouse · working…"
+                                cm.resyncTicks.value > 0 -> "Grouse · finishing…"
                                 online -> "Grouse"
                                 cm.status.value.contains("connect", true) ||
                                     cm.status.value.contains("load", true) -> "Connecting…"

@@ -3,6 +3,17 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.36-20260812
+
+**Streaming now resumes after the app loses focus — and says so.**
+
+- On return to the foreground, if a turn was in flight but no chunk arrived in
+  >10s, the app detects the silent socket death, reconnects, and re-replays a few
+  times to pull in the turn (whether it finished in the background or is still
+  running). A 1-2s background is unaffected — chunks keep flowing.
+- The top bar shows **"Grouse · finishing…"** while that catch-up is in progress,
+  instead of falsely looking idle.
+
 ## 0.35-20260812
 
 **Tools sheet fixed for roam chats — and remoteness detection overhauled.**
