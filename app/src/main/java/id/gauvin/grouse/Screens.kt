@@ -261,10 +261,13 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // Opening/switching a session: snap to the bottom (index 0). reverseLayout keeps it pinned
     // as history replays in.
     LaunchedEffect(cm.currentSession.value) { listState.scrollToItem(0) }
-    // A replay swapped in a genuinely different transcript: go to the bottom. Identical
-    // rebuilds never touch `messages`, so the reading position survives untouched and this
-    // never fires for them.
-    LaunchedEffect(cm.replayDoneTick.value) { listState.scrollToItem(0) }
+    // A replay swapped in a genuinely different transcript: go to the bottom — but ONLY if the
+    // user is already at the bottom. Identical rebuilds never touch `messages`, so the reading
+    // position survives untouched and this never fires for them; and a reconnect replay must
+    // never yank a user who scrolled up back down (same atBottom guard as the stream effect
+    // above). A roam session can re-replay periodically while idle (probe/resync catch-up), so
+    // without this guard scrolling up is undone a few seconds later.
+    LaunchedEffect(cm.replayDoneTick.value) { if (atBottom) listState.scrollToItem(0) }
     // Reconnect (resuming the session) when we return to the foreground.
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
@@ -1139,6 +1142,10 @@ private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: 
                     TextButton(onClick = { mode = "delete" }) {
                         Text("Delete…", color = MaterialTheme.colorScheme.error)
                     }
+                    HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                    TextButton(onClick = { mode = "clear" }) { Text("Clear conversation…") }
+                    TextButton(onClick = { mode = "diagnostics"; cm.fetchDiagnostics() }) { Text("Diagnostics…") }
+                    TextButton(onClick = { mode = "prompt" }) { Text("System prompt…") }
                 }
             },
             confirmButton = {},
@@ -1201,6 +1208,51 @@ private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: 
             }) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
         )
+        "clear" -> AlertDialog(
+            onDismissRequest = onDone,
+            title = { Text("Clear conversation?") },
+            text = { Text("Deletes the message history server-side (no model turn, unlike /clear). " +
+                "The session stays; other clients see it empty too.") },
+            confirmButton = { TextButton(onClick = {
+                cm.clearConversation(s.sessionId); onDone()
+            }) { Text("Clear") } },
+            dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
+        )
+        "diagnostics" -> AlertDialog(
+            onDismissRequest = { cm.diagnosticsReport.value = null; onDone() },
+            title = { Text("Diagnostics") },
+            text = {
+                val report = cm.diagnosticsReport.value
+                if (report == null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Fetching…", style = MaterialTheme.typography.bodySmall)
+                    }
+                } else {
+                    Text(report, style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState()))
+                }
+            },
+            confirmButton = { TextButton(enabled = cm.diagnosticsReport.value != null, onClick = {
+                cm.diagnosticsReport.value = null; onDone()
+            }) { Text("Close") } },
+            dismissButton = { TextButton(onClick = { cm.diagnosticsReport.value = null; onDone() }) { Text("Cancel") } },
+        )
+        "prompt" -> {
+            var draft by remember(s.sessionId) { mutableStateOf("") }
+            AlertDialog(
+                onDismissRequest = onDone,
+                title = { Text("System prompt") },
+                text = { OutlinedTextField(draft, { draft = it },
+                    placeholder = { Text("Append to Additional Instructions (blank clears)") },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp)) },
+                confirmButton = { TextButton(onClick = {
+                    cm.setSystemPrompt(draft); onDone()
+                }) { Text("Save") } },
+                dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
+            )
+        }
     }
 }
 
@@ -1803,6 +1855,31 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
                     Text("Couldn't load extensions — make sure you're connected.",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(16.dp))
+                }
+                // Installable catalog (extensions/available) — distinct from the configured list
+                // above; tapping Browse fetches it, and each row installs via config/extensions/add.
+                item {
+                    TextButton(onClick = { cm.loadAvailableExtensions() },
+                        modifier = Modifier.padding(horizontal = 16.dp)) {
+                        Text("Browse available extensions")
+                    }
+                }
+                if (cm.availableExts.isNotEmpty()) item {
+                    Text("Available", style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(16.dp))
+                }
+                items(cm.availableExts) { e ->
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(e.name, style = MaterialTheme.typography.bodyLarge)
+                            if (e.description.isNotBlank())
+                                Text(e.description, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline, maxLines = 2)
+                        }
+                        TextButton(enabled = !cm.extensionsBusy.value,
+                            onClick = { cm.addAvailableExtension(e) }) { Text("Add") }
+                    }
                 }
             }
         }

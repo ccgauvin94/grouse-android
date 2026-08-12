@@ -310,6 +310,13 @@ sealed interface AcpEvent {
     data class CompactionStatus(val message: String) : AcpEvent
     /** Reply to a config read: the requested key and its string value (empty if unset). */
     data class ServerConfig(val key: String, val value: String) : AcpEvent
+    /** _goose/unstable/diagnostics/get reply: the diagnostic bundle as JSON text. */
+    data class Diagnostics(val report: String) : AcpEvent
+    /** _goose/unstable/extensions/available reply: the installable extension catalog. */
+    data class AvailableExtensions(val list: List<ExtInfo>) : AcpEvent
+    /** _goose/unstable/session/conversation/truncate reply (empty body): the session's history
+     *  was trimmed server-side; the local transcript is now stale. */
+    data class Truncated(val sessionId: String) : AcpEvent
     /** Live model list for one provider (reply to listSupportedModels) -- for an OpenAI-compatible
      *  backend like LocalAI this hits its /v1/models endpoint server-side, so it reflects whatever
      *  models are actually loadable right now, not just the goose-bundled "featured" set. */
@@ -612,6 +619,29 @@ class AcpClient(
      *  Replaces goosed's old GET /config/extensions — that REST endpoint is gone from
      *  `goose serve`; extension config is now an ACP method over this same socket. */
     fun listExtensions() = rpc("_goose/unstable/config/extensions/list", buildJsonObject {})
+
+    /** The INSTALLABLE extension catalog (reply: AcpEvent.AvailableExtensions). Distinct from
+     *  config/extensions/list, which only returns what is already configured. */
+    fun listAvailableExtensions() = rpc("_goose/unstable/extensions/available", buildJsonObject {})
+
+    /** Trim a session's history server-side without a model turn. `fromTimestamp` is epoch-ms;
+     *  every message at or after it is deleted (0 = clear the whole conversation). */
+    fun truncateSession(sessionId: String, fromTimestamp: Long = 0L) =
+        rpc("_goose/unstable/session/conversation/truncate", buildJsonObject {
+            put("sessionId", sessionId); put("truncateFrom", fromTimestamp)
+        })
+
+    /** Append `text` to a session's "Additional Instructions" (empty text clears). */
+    fun setSystemPrompt(sessionId: String, text: String) =
+        rpc("_goose/unstable/session/system-prompt/set", buildJsonObject {
+            put("sessionId", sessionId); put("mode", "append"); put("text", text)
+        })
+
+    /** Bundle diagnostics for a session (reply: AcpEvent.Diagnostics). */
+    fun requestDiagnostics(sessionId: String) =
+        rpc("_goose/unstable/diagnostics/get", buildJsonObject {
+            put("sessionId", sessionId); put("level", "full")
+        })
 
     /** Enable/disable a configured extension (affects new sessions); refreshes the list on reply. */
     fun setExtensionEnabled(configKey: String, enabled: Boolean) =
@@ -1117,6 +1147,13 @@ class AcpClient(
             "_goose/unstable/session/export" ->
                 result?.get("data")?.jsonPrimitive?.contentOrNull
                     ?.let { onEvent(AcpEvent.SessionExport(it)) }
+            "_goose/unstable/diagnostics/get" ->
+                onEvent(AcpEvent.Diagnostics(result?.get("report")?.toString() ?: "{}"))
+            "_goose/unstable/extensions/available" ->
+                onEvent(AcpEvent.AvailableExtensions(parseExtensions(result)))
+            "_goose/unstable/session/conversation/truncate" ->
+                sessionId?.let { onEvent(AcpEvent.Truncated(it)) }
+            "_goose/unstable/session/system-prompt/set" -> {}   // empty reply; nothing to reflect
             "_goose/unstable/tools/call" -> {
                 val texts = (result?.get("content") as? JsonArray).orEmpty().mapNotNull {
                     (it as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull

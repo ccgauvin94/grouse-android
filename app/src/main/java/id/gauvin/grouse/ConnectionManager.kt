@@ -264,6 +264,11 @@ class ConnectionManager private constructor(context: Context) {
     private var liveModelsFetchedFor: String? = null
     val extensions = mutableStateOf<List<ExtInfo>>(emptyList())
     val extensionsBusy = mutableStateOf(false)
+    // The installable extension catalog (extensions/available) — powers "Browse available" in the
+    // Extensions screen; distinct from `extensions` (what is already configured).
+    val availableExts = mutableStateListOf<ExtInfo>()
+    // The diagnostic bundle for the current session (diagnostics/get); non-null opens the dialog.
+    val diagnosticsReport = mutableStateOf<String?>(null)
     // Names of the CURRENT session's enabled extensions — drives the in-chat "N tools" indicator
     // and its management sheet. Refreshed on every session open (Ready); optimistically updated by
     // toggleSessionExtension since add/remove replies are empty (no server re-list to react to).
@@ -415,6 +420,42 @@ class ConnectionManager private constructor(context: Context) {
         val c = client ?: return
         extensionsBusy.value = true
         c.setExtensionEnabled(e.configKey, enabled)
+    }
+
+    /** Clear a session's whole history server-side — the precise API instead of the /clear prompt
+     *  (which burns a model round-trip and can fail mid-turn). The Truncated reply clears the
+     *  local transcript. */
+    fun clearConversation(sessionId: String) {
+        client?.truncateSession(sessionId)
+    }
+
+    /** Fetch the diagnostic bundle for the current session; the Diagnostics reply opens a dialog. */
+    fun fetchDiagnostics() {
+        val sid = currentSession.value ?: lastSessionId ?: return
+        diagnosticsReport.value = null
+        client?.requestDiagnostics(sid)
+    }
+
+    /** Append text to the current session's Additional Instructions (empty clears). */
+    fun setSystemPrompt(text: String) {
+        val sid = currentSession.value ?: lastSessionId ?: return
+        client?.setSystemPrompt(sid, text.trim())
+    }
+
+    /** Load the installable extension catalog (idempotent while populated). */
+    fun loadAvailableExtensions() {
+        if (availableExts.isNotEmpty()) return
+        client?.listAvailableExtensions()
+    }
+
+    /** Install a catalog extension. The listing's shape differs from what config/extensions/add
+     *  accepts, so the client translates it (see toExtensionDto) — the same trap that bites
+     *  session/extensions/add. The reply refreshes the configured list. */
+    fun addAvailableExtension(e: ExtInfo) {
+        val c = client ?: return
+        extensionsBusy.value = true
+        c.addExtensionConfig(e.raw, true)
+        availableExts.remove(e)   // optimistic: it is now configured (or about to be)
     }
 
     /** Enable/disable one extension for just THIS session (session-scoped API — never touches
@@ -713,12 +754,32 @@ class ConnectionManager private constructor(context: Context) {
         return h to p
     }
 
+    /** Follow-mode probe: while idle and foregrounded, ask session/info and reconnect (replay)
+     *  if the server state moved. This is the client's equivalent of the roaming web's 6s
+     *  updatedAt poll — ACP streams a turn only to the connection that prompted it, so a session
+     *  driven by another client (desktop, deliver.sh, another device) would otherwise sit frozen
+     *  after OUR turn ends. Arms only when idle (no turn, no replay); a probe reply that shows no
+     *  change costs one cheap info call. */
+    private fun armFollowProbe() {
+        if (!live || busy.value || turnInFlight || replayActive.value || !appForeground) return
+        if (lastSessionIsRoam != activeClientIsRoam) return
+        lastSessionId?.let { sid ->
+            val tok = ++probeToken
+            client?.probeSession(sid)
+            main.postDelayed({
+                if (tok == probeToken && appForeground && !turnInFlight && !replayActive.value) {
+                    live = false
+                    reconnectToCurrent()
+                }
+            }, 10_000)
+        }
+    }
+
     /** Reconnect silently after Android drops the socket in the background. The resume always
      *  replays: the server history is rebuilt into the transcript on every session/load (see
      *  AcpEvent.ReplayStart), which both repopulates after a background process kill and picks up
      *  turns another client (Desktop, deliver.sh) added to this session while we were away. */
-    fun ensureConnected() {
-        if (activeClientIsRoam) {
+    fun ensureConnected() {        if (activeClientIsRoam) {
             val peer = currentRoamPeer
             if (peer == null || live || connecting) return
             connectRoam(peer, resume = lastSessionId)
@@ -1228,19 +1289,7 @@ class ConnectionManager private constructor(context: Context) {
             // No probe (and no watchdog) while a replay is streaming: the chunks themselves
             // prove the socket is alive, a reply would queue behind the stream (a huge replay
             // can outrun the window), and a force-reconnect would restart the whole replay.
-            if (live && !busy.value && !turnInFlight && !replayActive.value &&
-                lastSessionIsRoam == activeClientIsRoam) {
-                lastSessionId?.let { sid ->
-                    val tok = ++probeToken
-                    client?.probeSession(sid)
-                    main.postDelayed({
-                        if (tok == probeToken && appForeground && !turnInFlight && !replayActive.value) {
-                            live = false
-                            reconnectToCurrent()
-                        }
-                    }, 10_000)
-                }
-            }
+            armFollowProbe()
             // Re-ask the server for its model list every time we come back. It was previously
             // fetched ONCE per provider per connection (guarded by liveModelsFetchedFor, which
             // only resets in open()), so a long-lived socket never noticed the set changing --
@@ -1564,6 +1613,17 @@ class ConnectionManager private constructor(context: Context) {
                 syncStamp = ev.updatedAt to ev.messageCount
             }
             is AcpEvent.SessionExport -> exportData.value = ev.data
+            is AcpEvent.Diagnostics -> diagnosticsReport.value = ev.report
+            is AcpEvent.AvailableExtensions -> {
+                availableExts.clear(); availableExts.addAll(ev.list)
+            }
+            is AcpEvent.Truncated -> {
+                if (ev.sessionId == currentSession.value) {
+                    messages.clear()
+                    replayDoneTick.value++
+                }
+                refreshSidebar()
+            }
             is AcpEvent.SessionInfoChanged -> {
                 // L0 guard: "keeps advancing" = two distinct updatedAt advances within 10s while
                 // OUR connection is idle. A single advance is usually the tail of our own turn
@@ -1626,6 +1686,11 @@ class ConnectionManager private constructor(context: Context) {
                     lastSessionId?.let { store.pendingPushSessionId = it }
                     client?.sendPrompt(queued.text, queued.images, expect = currentSession.value)
                 } else if (!store.persistentConnection) stopService()
+                // Our turn is done and nothing is queued: another client may have driven this
+                // session while we were busy (ACP streams only to the connection that prompted).
+                // Re-arm the follow probe so a reply from elsewhere appears without a manual
+                // leave-and-return (see armFollowProbe).
+                if (queued == null) armFollowProbe()
             }
             is AcpEvent.ReplayStart -> {
                 // A session/load replay is about to stream: the server transcript is ground truth
