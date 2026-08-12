@@ -473,9 +473,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
             }
         )
         // Roam sessions live on a peer, not this server — say which, small and unobtrusive,
-        // so a federated chat is never mistaken for a local one at a glance.
-        val peerName = ConnectionManager.roamPeer(cm.currentSession.value)
-        if (peerName != null) {
+        // so a federated chat is never mistaken for a local one at a glance. (Connection-based,
+        // like the Tools tab: session ids never carry the "roam:" prefix roamPeer() expects.)
+        val peerName = cm.currentRoamPeer
+        if (cm.onRoamSession && peerName != null) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 2.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.Public, contentDescription = null,
@@ -826,7 +827,13 @@ private fun ChatSettingsSheet(cm: ConnectionManager, tab: String, onTab: (String
     // Re-list the session's tools and extensions every time the sheet opens. Ready's two polls
     // (0s/2.5s) can both miss a slow-attaching MCP extension, after which nothing else refreshed —
     // the sheet then showed the previous session's state until a manual toggle forced a round trip.
-    LaunchedEffect(Unit) { cm.refreshSessionSheet() }
+    LaunchedEffect(Unit) {
+        cm.refreshSessionSheet()
+        // The Tools tab for a LOCAL session renders the configured list; refreshSessionSheet
+        // doesn't load it (that's the Extensions screen's job), so prime it here — otherwise
+        // the tab shows "loading…" until the user happens to visit Settings first.
+        if (cm.extensions.value.isEmpty()) cm.loadExtensions()
+    }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
             TabRow(selectedTabIndex = if (tab == "model") 1 else 0) {
@@ -853,12 +860,16 @@ private fun ToolsTab(cm: ConnectionManager) {
     // (plus any detached this session, so they can be re-enabled). The peer's global
     // catalog isn't queryable — config/extensions/list has no session id to route on —
     // so extensions not attached to the remote session simply don't appear.
-    val remotePeer = ConnectionManager.roamPeer(cm.currentSession.value)
-    val rows = if (remotePeer != null)
+    // Remoteness comes from the CONNECTION (onRoamSession/currentRoamPeer), not the
+    // session id: ids never carry the "roam:" prefix roamPeer() would need, so a
+    // prefix-based check misread every roam chat as local.
+    val isRemote = cm.onRoamSession
+    val peerName = cm.currentRoamPeer
+    val rows = if (isRemote)
         (cm.sessionExtensionInfos.value + cm.detachedPeerExts.value).sortedBy { it.name }
     else cm.extensions.value
-    if (remotePeer != null) {
-        Text("This chat lives on $remotePeer — changes apply there, and only " +
+    if (isRemote && peerName != null) {
+        Text("This chat lives on $peerName — changes apply there, and only " +
             "extensions already in the chat are listed.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.outline)

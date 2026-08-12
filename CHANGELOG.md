@@ -3,6 +3,19 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.35-20260812
+
+**Tools sheet fixed for roam chats — and remoteness detection overhauled.**
+
+- Tools tab in the chat settings sheet again loads the extension list (the merged
+  sheet had dropped the priming call, so it could sit on "loading…").
+- Roam-session detection now works end to end: `roamPeer()` falls back to the
+  active connection (peer name of the on-screen roam session) because session ids
+  never carry the "roam:" prefix the old check required. This fixes the Tools tab
+  showing the LOCAL server's extensions for a roam chat, the top-bar hostname
+  strip, the remote-session chip, "Lives on &lt;peer&gt;", and the Model tab's
+  known-models guard for federated sessions.
+
 ## 0.34-20260811
 
 **Top bar rework + live activity summary (dev).**

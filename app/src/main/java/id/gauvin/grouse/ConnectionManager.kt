@@ -2044,10 +2044,18 @@ class ConnectionManager private constructor(context: Context) {
         /** A session living on a roam peer arrives as `roam:<peer>:<remote id>` (the goose
          *  fork's ACP federation). Local ids never carry the prefix, so it doubles as the
          *  client-side "this session is remote" signal. Returns the peer nickname, or null
-         *  for a local session. */
-        fun roamPeer(sessionId: String?): String? =
+         *  for a local session.
+         *
+         *  Fallback for the ids that DON'T carry the prefix (they never actually do today —
+         *  no code constructs one): when the id is the active roam session, the connected
+         *  peer name is the answer. Keeps every call site honest whether the id is
+         *  prefixed or raw. */
+        fun roamPeer(sessionId: String?): String? {
             sessionId?.takeIf { it.startsWith("roam:") }
-                ?.removePrefix("roam:")?.substringBefore(':')?.ifBlank { null }
+                ?.removePrefix("roam:")?.substringBefore(':')?.ifBlank { null }?.let { return it }
+            val cm = instance ?: return null
+            return if (cm.onRoamSession && sessionId == cm.lastSessionId) cm.currentRoamPeer else null
+        }
 
         @Volatile private var instance: ConnectionManager? = null
         fun get(context: Context): ConnectionManager =

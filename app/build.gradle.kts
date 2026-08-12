@@ -22,8 +22,8 @@ android {
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 34
-        versionName = "0.34-20260811"
+        versionCode = 35
+        versionName = "0.35-20260812"
     }
 
     // Release signing, used ONLY when the four properties below are supplied (CI sets them from
