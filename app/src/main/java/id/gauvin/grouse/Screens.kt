@@ -2959,7 +2959,7 @@ private fun ModelRow(
     onProvider: (String) -> Unit,
     model: String,
     onModel: (String) -> Unit,
-    providers: List<String> = listOf("openai", "openrouter", "openrouter_custom"),
+    providers: List<AcpEvent.ProviderInfo> = emptyList(),
     modelChoices: List<String> = emptyList(),
     incompatible: String? = null,
     showModel: Boolean = true,
@@ -2984,9 +2984,11 @@ private fun ModelRow(
                 DropdownMenu(expanded = pOpen, onDismissRequest = { pOpen = false }) {
                     providers.forEach { pv ->
                         DropdownMenuItem(
-                            text = { Text(if (pv == "openai") "openai (local)" else pv) },
-                            onClick = { onProvider(pv); pOpen = false })
+                            text = { Text(pv.name) },
+                            onClick = { onProvider(pv.id); pOpen = false })
                     }
+                    if (providers.isEmpty())
+                        DropdownMenuItem(text = { Text("(no providers loaded)") }, onClick = { pOpen = false })
                 }
             }
             var mOpen by remember { mutableStateOf(false) }
@@ -3113,8 +3115,11 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
     // this device calling LocalAI directly (goose has no TTS, and its dictation transcribes for
     // goose's own UI rather than returning text to a client).
     LaunchedEffect(cm.online.value) {
-        if (cm.online.value) cm.readServerConfig(
-            "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOSE_FAST_MODEL", "VISION_MODEL", "VISION_PROVIDER")
+        if (cm.online.value) {
+            cm.loadServerProviders()
+            cm.readServerConfig(
+                "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOSE_FAST_MODEL", "VISION_MODEL", "VISION_PROVIDER")
+        }
     }
     fun cfg(k: String) = cm.serverConfig[k].orEmpty()
     Scaffold(topBar = {
@@ -3140,6 +3145,7 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 onProvider = { cm.setServerConfig("GOOSE_PROVIDER", it) },
                 model = cfg("GOOSE_MODEL"),
                 onModel = { cm.setServerConfig("GOOSE_MODEL", it) },
+                providers = cm.serverProviders.value,
                 modelChoices = cm.knownModels.value.toList(),
             )
 
@@ -3155,6 +3161,7 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 onProvider = { cm.setServerConfig("GOOSE_PROVIDER", it) },
                 model = cfg("GOOSE_FAST_MODEL"),
                 onModel = { cm.setServerConfig("GOOSE_FAST_MODEL", it) },
+                providers = cm.serverProviders.value,
                 modelChoices = cm.knownModels.value.toList(),
             )
 
@@ -3171,6 +3178,7 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 onProvider = { cm.setServerConfig("VISION_PROVIDER", it) },
                 model = cfg("VISION_MODEL"),
                 onModel = { cm.setServerConfig("VISION_MODEL", it) },
+                providers = cm.serverProviders.value,
             )
 
             SettingsSection("Catalog") {

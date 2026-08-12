@@ -126,24 +126,24 @@ class ConnectionManager private constructor(context: Context) {
         recipes.value.firstOrNull { it.filePath.isNotEmpty() && it.filePath == job.source }
 
     fun refreshSchedules() {
-        client?.listSchedules()
-        client?.listRecipes()
+        serveClient?.listSchedules()
+        serveClient?.listRecipes()
     }
 
-    fun setSchedulePaused(id: String, paused: Boolean) { client?.pauseSchedule(id, paused) }
+    fun setSchedulePaused(id: String, paused: Boolean) { serveClient?.pauseSchedule(id, paused) }
 
-    fun runScheduleNow(id: String) { client?.runScheduleNow(id) }
+    fun runScheduleNow(id: String) { serveClient?.runScheduleNow(id) }
 
-    fun deleteSchedule(id: String) { client?.deleteSchedule(id) }
+    fun deleteSchedule(id: String) { serveClient?.deleteSchedule(id) }
 
-    fun setScheduleCron(id: String, cron: String) { client?.updateScheduleCron(id, cron) }
+    fun setScheduleCron(id: String, cron: String) { serveClient?.updateScheduleCron(id, cron) }
 
-    fun setRecipeCron(recipeId: String, cron: String?) { client?.scheduleRecipe(recipeId, cron) }
+    fun setRecipeCron(recipeId: String, cron: String?) { serveClient?.scheduleRecipe(recipeId, cron) }
 
-    fun deleteRecipe(recipeId: String) { client?.deleteRecipe(recipeId) }
+    fun deleteRecipe(recipeId: String) { serveClient?.deleteRecipe(recipeId) }
 
     /** Save an edited recipe. The caller hands back a full DTO derived from RecipeInfo.raw. */
-    fun saveRecipe(recipeId: String, dto: JsonObject) { client?.saveRecipe(recipeId, dto) }
+    fun saveRecipe(recipeId: String, dto: JsonObject) { serveClient?.saveRecipe(recipeId, dto) }
 
     /** Replace one top-level string field, dropping it when blank. */
     fun recipeWith(r: RecipeInfo, field: String, value: String): JsonObject =
@@ -166,13 +166,13 @@ class ConnectionManager private constructor(context: Context) {
      *  demand -- they change rarely and there is no notification when they do. */
     val skills = mutableStateOf<List<SkillInfo>>(emptyList())
 
-    fun refreshSkills() { client?.listSkills() }
+    fun refreshSkills() { serveClient?.listSkills() }
 
     fun saveSkill(s: SkillInfo, content: String) {
-        client?.updateSkill(s.path, s.name, s.description, content)
+        serveClient?.updateSkill(s.path, s.name, s.description, content)
     }
 
-    fun deleteSkill(path: String) { client?.deleteSkill(path) }
+    fun deleteSkill(path: String) { serveClient?.deleteSkill(path) }
 
     fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
         val byName = projects.value.associate { it.id to it.name }
@@ -186,7 +186,7 @@ class ConnectionManager private constructor(context: Context) {
             }
     }
 
-    fun refreshProjects() { client?.listProjects() }
+    fun refreshProjects() { serveClient?.listProjects() }
 
     /** Start a chat already filed under [projectId].
      *
@@ -207,7 +207,7 @@ class ConnectionManager private constructor(context: Context) {
     /** Set while a new-chat-in-project is in flight; consumed when Ready delivers the id. */
     private var pendingProjectFiling: String? = null
     fun fileSession(sessionId: String, projectId: String?) {
-        client?.assignSessionProject(sessionId, projectId)
+        serveClient?.assignSessionProject(sessionId, projectId)
         sessions.value = sessions.value.map {
             if (it.sessionId == sessionId) it.copy(projectId = projectId) else it
         }
@@ -363,7 +363,7 @@ class ConnectionManager private constructor(context: Context) {
     fun refreshTools() { discovering = null; client?.listTools() }
 
     /** Everything the in-chat tool sheet displays, refreshed together on open. */
-    fun refreshSessionSheet() { refreshTools(); client?.listSessionExtensions() }
+    fun refreshSessionSheet() { refreshTools(); loadServerProviders(); client?.listSessionExtensions() }
 
     /** Discover an extension's FULL tool set. goose only reports ALLOWED tools, so the only way to
      *  see what an allowlist is hiding is to briefly run the extension unfiltered: re-add it
@@ -445,7 +445,7 @@ class ConnectionManager private constructor(context: Context) {
     /** Load the installable extension catalog (idempotent while populated). */
     fun loadAvailableExtensions() {
         if (availableExts.isNotEmpty()) return
-        client?.listAvailableExtensions()
+        serveClient?.listAvailableExtensions()
     }
 
     /** Install a catalog extension. The listing's shape differs from what config/extensions/add
@@ -477,8 +477,18 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     // Providers actually set up on this goose (config.yaml `providers:` with configured:true).
-    // Unconfigured catalog entries are hidden unless showAllProviders is on.
-    val configuredProviders = setOf("openai", "openrouter")
+    // Unconfigured catalog entries are hidden unless showAllProviders is on. This used to be a
+    // hardcoded {openai, openrouter} guess; the server's inventory (providers/list) now supplies
+    // both the full list and the configured subset. The hardcoded pair is only the pre-fetch
+    // default, so the chat panel isn't empty for the first instant.
+    val serverProviders = mutableStateOf<List<AcpEvent.ProviderInfo>>(emptyList())
+    var configuredProviders = setOf("openai", "openrouter")
+
+    /** The server's provider inventory (all + configured flags) — the pickers' source of truth. */
+    fun loadServerProviders() {
+        if (serverProviders.value.isNotEmpty()) return
+        serveClient?.listProviders()
+    }
 
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
@@ -828,7 +838,7 @@ class ConnectionManager private constructor(context: Context) {
      *  so the server's senders always POST to the current token. This is what makes a reinstall /
      *  endpoint-rotation self-heal instead of silently pushing at a dead token. Best-effort. */
     fun publishPushEndpoint(url: String) {
-        if (url.isNotBlank()) client?.upsertConfig("GROUSE_PUSH_ENDPOINT", url)
+        if (url.isNotBlank()) serveClient?.upsertConfig("GROUSE_PUSH_ENDPOINT", url)
     }
 
     /** Answer a pending elicitation form and drop it from the queue. */
@@ -1018,7 +1028,7 @@ class ConnectionManager private constructor(context: Context) {
             else -> null
         }
         if (bad != null) { onResult(bad); return }
-        client?.createProject(name)
+        serveClient?.createProject(name)
         // The reply dispatch re-lists projects; report success now so the dialog can close.
         onResult(null)
     }
@@ -1055,7 +1065,7 @@ class ConnectionManager private constructor(context: Context) {
             ?: run { onResult("No such project."); return }
         val affected = sessions.value.filter { it.projectId == proj.id }
         affected.forEach { fileSession(it.sessionId, null) }
-        client?.deleteProject(proj.path)
+        serveClient?.deleteProject(proj.path)
         projects.value = projects.value.filterNot { it.id == proj.id }   // optimistic; reply re-lists
         onResult(
             if (affected.isEmpty()) "Project deleted."
@@ -1165,22 +1175,22 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** Read + write server-side goose config (the deliver.sh schedule keys live there). */
-    fun readServerConfig(vararg keys: String) { keys.forEach { client?.readConfig(it) } }
+    fun readServerConfig(vararg keys: String) { keys.forEach { serveClient?.readConfig(it) } }
     fun writeServerConfig(key: String, value: String) {
-        client?.upsertConfig(key, value)
+        serveClient?.upsertConfig(key, value)
         serverConfig[key] = value   // optimistic
     }
 
     /** Read the app-editable global goose settings so Settings can show current values. */
     fun loadServerConfig() {
-        client?.readConfig("GOOSE_CONTEXT_LIMIT")
-        client?.readConfig("GOOSE_FAST_MODEL")
+        serveClient?.readConfig("GOOSE_CONTEXT_LIMIT")
+        serveClient?.readConfig("GOOSE_FAST_MODEL")
     }
 
     /** Upsert a global goose setting (takes effect for NEW sessions/tasks), then re-read to confirm. */
     fun setServerConfig(key: String, value: String) {
-        client?.upsertConfig(key, value)
-        client?.readConfig(key)
+        serveClient?.upsertConfig(key, value)
+        serveClient?.readConfig(key)
     }
 
     fun setOption(configId: String, value: String) {
@@ -1507,8 +1517,15 @@ class ConnectionManager private constructor(context: Context) {
         // Everything else is on-screen state: only the connection owning the screen may
         // touch it. The background connection's events (replays, config, tools, prompts)
         // must not corrupt the visible transcript or the active session's UI.
+        // Serve-global replies (server config, extensions, schedules, recipes, skills,
+        // projects, providers) are the exception: Settings screens read them even while a
+        // roam connection owns the chat — and their requests are serveClient-routed, so a
+        // roam client never emits them anyway.
         val active = isRoam == activeClientIsRoam
-        if (!active) return
+        if (!active && ev !is AcpEvent.ServerConfig && ev !is AcpEvent.Extensions &&
+            ev !is AcpEvent.Schedules && ev !is AcpEvent.Recipes && ev !is AcpEvent.Skills &&
+            ev !is AcpEvent.Projects && ev !is AcpEvent.AvailableExtensions &&
+            ev !is AcpEvent.Providers) return
         when (ev) {
             // Routed to the per-connection list in the preamble above; present only
             // to keep the sealed-type when exhaustive.
@@ -1617,6 +1634,12 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.Diagnostics -> diagnosticsReport.value = ev.report
             is AcpEvent.AvailableExtensions -> {
                 availableExts.clear(); availableExts.addAll(ev.list)
+            }
+            is AcpEvent.Providers -> {
+                serverProviders.value = ev.list
+                // The configured set is now server truth, not the old hardcoded
+                // {openai, openrouter} guess (which hid a peer's real providers).
+                configuredProviders = ev.list.filter { it.configured }.map { it.id }.toSet()
             }
             is AcpEvent.Truncated -> {
                 if (ev.sessionId == currentSession.value) {
@@ -1821,6 +1844,7 @@ class ConnectionManager private constructor(context: Context) {
                 val genAtReady = activeGen
                 main.postDelayed({ if (genAtReady == activeGen) client?.listTools() }, 2500)
                 client?.listSessionExtensions()
+                if (!isRoam) loadServerProviders()
                 // Finishing an assistant reset/create: only when THIS Ready is the reset's own
                 // fresh session (its connection generation matches resetGen). Name it so both
                 // the app (title match) and deliver.sh (name-grep) resolve it as the assistant

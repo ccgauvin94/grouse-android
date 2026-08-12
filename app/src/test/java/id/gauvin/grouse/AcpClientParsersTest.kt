@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -252,5 +253,35 @@ class AcpClientParsersTest {
         assertTrue(skills[0].writable)
         assertEquals(false, skills[0].global)
         assertEquals("# Skill", skills[0].content)
+    }
+    @Test
+    fun `parseProviders reads the inventory with configured flags`() {
+        val json = kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"entries":[
+                {"providerId":"openai","providerName":"OpenAI","configured":true,"defaultModel":"gpt-5"},
+                {"providerId":"localai","providerName":"LocalAI","configured":true,"defaultModel":"qwen"},
+                {"providerId":"gemini","providerName":"Gemini","configured":false,"defaultModel":""}
+            ]}"""
+        ) as kotlinx.serialization.json.JsonObject
+        val providers = AcpClient("ws://x", "k") {}.parseProviders(json)
+        assertEquals(3, providers.size)
+        assertEquals("openai", providers[0].id)
+        assertTrue(providers[0].configured)
+        assertEquals("LocalAI", providers[1].name)
+        assertFalse(providers[2].configured)
+        assertEquals("", providers[2].defaultModel)
+    }
+
+    @Test
+    fun `parseProviders handles empty and malformed results`() {
+        val c = AcpClient("ws://x", "k") {}
+        assertEquals(0, c.parseProviders(null).size)
+        assertEquals(0, c.parseProviders(
+            kotlinx.serialization.json.Json.parseToJsonElement("{}") as kotlinx.serialization.json.JsonObject).size)
+        // An entry without providerId is dropped, not fatal.
+        val json = kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"entries":[{"providerName":"NoId"}]}"""
+        ) as kotlinx.serialization.json.JsonObject
+        assertEquals(0, c.parseProviders(json).size)
     }
 }

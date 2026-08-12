@@ -3,6 +3,21 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.33-20260811
+
+**Providers screen works again — and shows your real providers.** Two bugs:
+
+- Server-global settings (Providers, Instance, Extensions, Schedules, Recipes,
+  Skills, Projects, the push endpoint) were routed through the ACTIVE
+  connection — with a roam peer connected they read/wrote the PEER's config,
+  so the toggles did nothing visible. They now always target the main serve
+  host, and their replies update the screens even while a roam connection owns
+  the chat.
+- The provider pickers listed a hardcoded {openai, openrouter,
+  openrouter_custom}; they now come from the server's actual provider inventory
+  (`_goose/unstable/providers/list`) with real display names, and the chat
+  panel's "configured providers" filter is server-derived instead of guessed.
+
 ## 0.32-20260811
 
 **L0 guard polish.** The "Running in another goose" banner now self-expires: if

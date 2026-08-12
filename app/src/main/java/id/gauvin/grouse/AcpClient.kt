@@ -314,9 +314,18 @@ sealed interface AcpEvent {
     data class Diagnostics(val report: String) : AcpEvent
     /** _goose/unstable/extensions/available reply: the installable extension catalog. */
     data class AvailableExtensions(val list: List<ExtInfo>) : AcpEvent
+    /** _goose/unstable/providers/list reply: the server's provider inventory. */
+    data class Providers(val list: List<ProviderInfo>) : AcpEvent
     /** _goose/unstable/session/conversation/truncate reply (empty body): the session's history
      *  was trimmed server-side; the local transcript is now stale. */
     data class Truncated(val sessionId: String) : AcpEvent
+    /** _goose/unstable/providers/list entry — what goose's provider inventory knows. */
+    data class ProviderInfo(
+        val id: String,          // config.yaml key (e.g. "openai", "localai")
+        val name: String,        // display name
+        val configured: Boolean, // set up in config.yaml (provider inventory "configured")
+        val defaultModel: String,
+    )
     /** Live model list for one provider (reply to listSupportedModels) -- for an OpenAI-compatible
      *  backend like LocalAI this hits its /v1/models endpoint server-side, so it reflects whatever
      *  models are actually loadable right now, not just the goose-bundled "featured" set. */
@@ -746,6 +755,12 @@ class AcpClient(
             put("providerId", providerId)
         })
 
+    /** The server's provider inventory (configured + catalog). Empty providerIds = all. */
+    fun listProviders() =
+        rpc("_goose/unstable/providers/list", buildJsonObject {
+            putJsonArray("providerIds") {}
+        })
+
     /** Rename a session (sets its title). Used by the assistant-thread reset: the old thread is
      *  renamed aside and a fresh one is renamed to "goose-assistant". Server replies empty. */
     fun renameSession(targetSessionId: String, title: String) =
@@ -1141,6 +1156,7 @@ class AcpClient(
                     .mapNotNull { it.jsonPrimitive.contentOrNull }
                 onEvent(AcpEvent.SupportedModels(providerId, models))
             }
+            "_goose/unstable/providers/list" -> onEvent(AcpEvent.Providers(parseProviders(result)))
             // Rename returns empty; re-list so every consumer sees the new title.
             "_goose/unstable/session/rename" -> listSessions()
             "_goose/unstable/session/steer" -> {}   // the steered message streams back as chunks
@@ -1332,6 +1348,20 @@ class AcpClient(
                 raw = r,
             )
         }.sortedBy { it.title.lowercase() }
+    }
+
+    internal fun parseProviders(result: JsonObject?): List<AcpEvent.ProviderInfo> {
+        val arr = result?.get("entries") as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val id = o["providerId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            AcpEvent.ProviderInfo(
+                id = id,
+                name = o["providerName"]?.jsonPrimitive?.contentOrNull ?: id,
+                configured = o["configured"]?.jsonPrimitive?.booleanOrNull ?: false,
+                defaultModel = o["defaultModel"]?.jsonPrimitive?.contentOrNull ?: "",
+            )
+        }
     }
 
     internal fun parseSessions(result: JsonObject?): List<SessionInfo> {
