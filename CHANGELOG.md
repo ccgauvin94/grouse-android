@@ -3,6 +3,17 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.31-20260811
+
+**"Running in another goose" guard (L0).** When the session on screen keeps
+advancing while this device's connection has no active run, another client —
+Desktop, the CLI, a second phone — is working it. Sending would start a second
+concurrent loop against the same session (interleaved history, double tool
+execution, no error on either side). The composer now shows "Running in another
+goose — sending may conflict"; the first send tap arms a confirm, the second
+sends anyway. The guard re-arms after your own turns and clears on session
+switch. Same heuristic the roam web client ships.
+
 ## 0.30-20260811
 
 **Streaming survives replay.** Session replays now preserve visible live/partial turn content instead of replacing it with an older server snapshot. This prevents replies from appearing late, disappearing, and only returning after switching chats.

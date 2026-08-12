@@ -232,6 +232,12 @@ class ConnectionManager private constructor(context: Context) {
     // The current session's running turn id (from session_info_update's activeRunId _meta).
     // Non-null while a run is live == steering is possible; cleared on TurnDone.
     private var activeRunId: String? = null
+    // L0 "active elsewhere" guard (set in SessionInfoChanged): the on-screen session is being
+    // run by ANOTHER goose (desktop/CLI) when its updatedAt keeps advancing while our connection
+    // holds no active run. The composer then warns and requires a confirm, so a prompt cannot
+    // silently start a second concurrent loop against the same session row.
+    val busyElsewhere = mutableStateOf(false)
+    private var lastExtAdvance: Pair<String, Long>? = null   // (updatedAt, elapsedRealtime)
     // Resume-probe correlation: bumped per probe AND per reply, so a stale timeout can't
     // fire after its probe was answered. syncStamp is the last known (updatedAt, count) —
     // null means "no baseline", which a probe records without triggering a replay.
@@ -294,6 +300,7 @@ class ConnectionManager private constructor(context: Context) {
         discovering = null
         knownModels.value = emptySet()
         liveModelsFetchedFor = null
+        busyElsewhere.value = false; lastExtAdvance = null   // the guard is per-session
     }
 
     /** toolCatalog key. A peer's extension can share a name with a local one while exposing a
@@ -1176,6 +1183,7 @@ class ConnectionManager private constructor(context: Context) {
         // the Ready handler flushes.
         if (live && client?.ready == true && !turnInFlight) {
             turnInFlight = true
+            busyElsewhere.value = false; lastExtAdvance = null   // we're running it now
             lastSessionId?.let { store.pendingPushSessionId = it }
             client?.sendPrompt(text, images, expect = currentSession.value)
         } else if (live && client?.ready == true && activeRunId != null && images.isEmpty()) {
@@ -1534,7 +1542,10 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.ActiveRun -> {
                 // Only trust run ids for the session on screen — a notification for another
                 // session must not arm steering against the wrong run.
-                if (ev.sessionId == currentSession.value) activeRunId = ev.runId
+                if (ev.sessionId == currentSession.value) {
+                    activeRunId = ev.runId
+                    busyElsewhere.value = false; lastExtAdvance = null   // we own the run now
+                }
             }
             is AcpEvent.Probe -> {
                 probeToken++   // cancels the pending dead-socket timeout
@@ -1554,6 +1565,17 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.SessionExport -> exportData.value = ev.data
             is AcpEvent.SessionInfoChanged -> {
+                // L0 guard: "keeps advancing" = two distinct updatedAt advances within 10s while
+                // OUR connection is idle. A single advance is usually the tail of our own turn
+                // settling (TurnDone clears run state before the final write lands server-side).
+                if (ev.sessionId == currentSession.value && ev.updatedAt != null &&
+                    activeRunId == null && !turnInFlight && !busy.value && !replayActive.value) {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val prev = lastExtAdvance
+                    if (prev != null && prev.first != ev.updatedAt && now - prev.second < 10_000)
+                        busyElsewhere.value = true
+                    else lastExtAdvance = ev.updatedAt to now
+                }
                 // Live title/updatedAt sync (auto-naming after the first turn, renames from any
                 // client) — previously only visible after a full session re-list.
                 sessions.value = sessions.value.map {
@@ -1587,6 +1609,7 @@ class ConnectionManager private constructor(context: Context) {
                 turnInFlight = false
                 activeRunId = null   // the run this id named is over; steering it would fail
                 syncStamp = null     // our own turn changed the server state; re-baseline on next probe
+                busyElsewhere.value = false; lastExtAdvance = null   // our turn ended; re-arm the guard
                 // We got the authoritative completion straight from our own socket -- stop waiting
                 // on the Stop-hook push for this turn so a later turn from another client in the
                 // same (possibly shared) session doesn't spuriously match the stale flag.

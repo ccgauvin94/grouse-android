@@ -220,6 +220,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
 
     val currentModel = cm.config.value.firstOrNull { it.id == "model" }?.currentValue ?: ""
     var showVisionWarn by remember { mutableStateOf(false) }
+    // L0 guard: the on-screen session is running in another goose. The first send
+    // tap arms "send anyway"; the second sends. Reset whenever the warning clears.
+    var confirmBusyElsewhere by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     // "At bottom" = the last item is visible; drives autoscroll + the jump-to-bottom button.
     // With reverseLayout the bottom is index 0; we're at the bottom when it's fully shown.
@@ -235,6 +238,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     }
     fun doSend() {
         if (input.isBlank() && attachments.isEmpty()) return
+        // L0 guard: the session is running in another goose — don't silently start a second
+        // concurrent loop against the same session row. First tap arms "send anyway".
+        if (cm.busyElsewhere.value && !confirmBusyElsewhere) { confirmBusyElsewhere = true; return }
+        confirmBusyElsewhere = false
         // Sending images to a non-vision model (esp. LocalAI without mmproj) hangs the session.
         // The heuristic is a name-substring guess and gets it wrong (it missed Qwen3.6-35B-A3B,
         // which reads images fine); the user's own past answer for this exact model overrides it.
@@ -573,6 +580,22 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
             ) {
                 Column(Modifier.padding(start = 18.dp, end = 10.dp, top = 14.dp, bottom = 8.dp)) {
+                    // L0 guard banner: another goose (desktop/CLI) is actively writing this
+                    // session — a prompt would start a second concurrent loop. Tap send once
+                    // to arm the confirm, again to send anyway.
+                    if (cm.busyElsewhere.value) {
+                        Surface(color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                            Text(
+                                if (confirmBusyElsewhere) "Running in another goose — tap send again to send anyway"
+                                else "Running in another goose — sending may conflict",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            )
+                        }
+                    } else if (confirmBusyElsewhere) confirmBusyElsewhere = false
                     // BasicTextField, not TextField: Material's own container/padding/indicator
                     // would draw a second surface inside this one. Here the Surface IS the field.
                     Box(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
