@@ -3,6 +3,22 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.29-20260811
+
+**Roam comes back up on launch.** The host you last connected to auto-connects at
+startup (background thread, after serve is up), so its sessions are ready in the
+Roam tab with no tap. Nothing saved → no-op; another dial already in flight → skip.
+
+**Test a host before you trust it.** The Add-a-host button is now "Test connection":
+it saves the card and immediately dials the host so you know it actually works.
+Connect/disconnect load spinners show while a dial is in flight, on the host rows
+(Roam screen + drawer) and in the button itself.
+
+**Roam streaming survives a background-return.** A reply that was streaming when
+you switched apps now picks up on return instead of pinning the chat at the point
+it stopped: the app detects the quiet link and re-syncs, clearing the stuck
+"thinking" state and replaying the transcript so the finished turn appears.
+
 ## 0.28-20260811
 
 **New chat in Main always goes to the local host.** A "New chat" started from the
