@@ -3,6 +3,12 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.30-20260811
+
+**Streaming survives replay.** Session replays now preserve visible live/partial turn content instead of replacing it with an older server snapshot. This prevents replies from appearing late, disappearing, and only returning after switching chats.
+
+The foreground reconnect workaround from 0.29 was removed because forcing a replay while a turn is still streaming caused more churn.
+
 ## 0.29-20260811
 
 **Roam comes back up on launch.** The host you last connected to auto-connects at
