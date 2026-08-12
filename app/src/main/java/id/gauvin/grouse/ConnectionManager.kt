@@ -97,6 +97,17 @@ class ConnectionManager private constructor(context: Context) {
         newSession()
     }
 
+    /** "New chat" from the Main tab: a new chat must go to the local WS host, never to a
+     *  lingering roam connection. newSession() routes by activeClientIsRoam, which stays true
+     *  after a roam chat even once the user has switched back to the Main tab (tabs only change
+     *  the sidebar source, not the connection) — so it must be forced to serve here, exactly
+     *  as newRoamChat() forces it to roam. Without this, "New chat" in Main silently mints a
+     *  session on the peer instead of the host. */
+    fun newServeChat() {
+        activeClientIsRoam = false
+        newSession()
+    }
+
     /** Goose projects, refreshed alongside the session list. A project is a named source with an
      *  id, not a directory -- so filing a chat no longer decides where its tools run, and the
      *  same project is one entry from every client instead of one per cwd spelling. */
@@ -185,6 +196,9 @@ class ConnectionManager private constructor(context: Context) {
      *  session/new has no projectId parameter. */
     fun newChatInProject(projectId: String, cwd: String? = null) {
         pendingProjectFiling = projectId
+        // Projects are filed against the LOCAL host only (assignSessionProject), so a chat
+        // started from a project must go to serve even if a roam connection lingers.
+        activeClientIsRoam = false
         // A rooted project passes the directory the chat should work in; an ordinary one does
         // not, and its chats run at the default cwd exactly as before.
         newSession(cwd = cwd ?: store.workingDir, kind = SessionKind.CHAT)

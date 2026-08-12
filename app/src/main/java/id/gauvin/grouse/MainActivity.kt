@@ -165,7 +165,9 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
     LaunchedEffect(cm.pendingNewChat.value) {
         if (cm.pendingNewChat.value && cm.configured) {
             cm.pendingNewChat.value = false
-            cm.newSession()
+            // Route by the visible tab, not the lingering roam connection, so the tile creates
+            // the kind of chat the user is actually looking at.
+            if (cm.sidebarMode.value == ConnectionManager.SidebarMode.ROAM) cm.newRoamChat() else cm.newServeChat()
             nav.navigate("chat") { popUpTo("chat") { inclusive = true } }
         }
     }

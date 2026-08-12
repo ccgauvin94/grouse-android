@@ -3,6 +3,17 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.28-20260811
+
+**New chat in Main always goes to the local host.** A "New chat" started from the
+Main (SERVE) tab now creates the session on your goose serve, never on a roam
+peer. Previously, once you'd opened a roam chat and switched back to the Main
+tab, the drawer's "New chat" silently routed to whichever peer was last connected
+(tabs switch the sidebar source only, not the connection) — so a chat you meant
+for the host appeared in Roam. Projects-cafe and the tile/shortcut new-chat route
+the same way now: projects are filed against the host, and the tile follows the
+tab you're looking at.
+
 ## 0.27-20260811
 
 **Two connections at once: Main and Roam tabs.** The serve connection and a

@@ -1039,7 +1039,7 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
         }
-        item { addRow("New chat", indent = false) { cm.newSession(); onOpen() } }
+        item { addRow("New chat", indent = false) { cm.newServeChat(); onOpen() } }
         items(freeChats, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = false) }
         // Federated sessions get their own section, one collapsible group per roam peer —
         // out of the daily local flow but one tap away. Groups only render for peers that
