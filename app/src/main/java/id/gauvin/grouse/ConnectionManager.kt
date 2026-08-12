@@ -255,6 +255,10 @@ class ConnectionManager private constructor(context: Context) {
     // images — and base64 payloads stay out of the saved-state Bundle (TransactionTooLarge).
     val draftAttachments = mutableStateListOf<ImageBlock>()
     val dynamicColor = mutableStateOf(store.dynamicColor)
+    val liveSummary = mutableStateOf(store.liveSummary)
+    val fastModel = mutableStateOf(store.fastModel)
+    // The live one-line ticker from the summarizer session; null hides it.
+    val liveSummaryText = mutableStateOf<String?>(null)
     val showAllProviders = mutableStateOf(store.showAllProviders)
     // Live model list for the CURRENT provider, from the server, in memory only -- never
     // persisted. See the AcpEvent.Config/SupportedModels handlers for why.
@@ -491,7 +495,9 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
-    fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
+
+    fun setLiveSummary(v: Boolean) { store.liveSummary = v; liveSummary.value = v }
+    fun setFastModel(v: String) { store.fastModel = v; fastModel.value = v }    fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
 
     private val main = Handler(Looper.getMainLooper())
     // Two LIVE connections: the WS host (serve) and one roam peer. `client`
@@ -883,6 +889,7 @@ class ConnectionManager private constructor(context: Context) {
         // message lands in the assistant thread.
         pendingOpenAssistant = false
         clearSessionUi()          // the previous session's tools/extensions/models must not linger
+        clearSummaryState()       // a session switch leaves any ticker stale
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
         // Roam: the session lives on the peer — reconnect the roam link resuming it
         // (its cwd is resolved by asking the peer). The serve connection stays up.
@@ -995,8 +1002,67 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    private fun cleanProjectName(raw: String): String? {
-        val name = raw.trim().trim('/').removePrefix("projects/")
+    // ---- Live activity summary (developer option) -------------------------------
+    // A dedicated fast-model session that, while a turn is in flight, turns the tool events
+    // this client already observes into a one-line "what is it doing now" ticker. Tool NAMES
+    // and status only — never arguments, so secrets in args can't reach the summarizer.
+    private val summaryBuf = mutableListOf<String>()
+    private var summaryClient: AcpClient? = null
+    private var summaryDue = false
+    private var summaryInFlight = false
+
+    private fun liveSummaryOn() = store.liveSummary && store.fastModel.isNotBlank()
+
+    private fun noteSummaryActivity(line: String) {
+        if (!liveSummaryOn() || !turnInFlight) return
+        summaryBuf += line
+        if (summaryBuf.size > 6) summaryBuf.removeAt(0)
+        if (!summaryDue) { summaryDue = true; main.postDelayed(::fireSummary, 2_000) }
+    }
+
+    private fun fireSummary() {
+        summaryDue = false
+        if (!liveSummaryOn() || !turnInFlight || summaryBuf.isEmpty() || summaryInFlight) return
+        var c = summaryClient
+        if (c == null || !c.ready) {
+            if (c != null) return   // a dial is in progress; Ready will re-fire
+            val url = "wss://${store.host}:${store.port}/acp"
+            c = AcpClient(url, store.secretKey) { ev -> main.post { onSummaryEvent(ev) } }
+            c.desiredCwd = store.workingDir
+            c.desiredOptions = mapOf("model" to store.fastModel)
+            summaryClient = c
+            c.connect()
+            return
+        }
+        summaryInFlight = true
+        val lines = summaryBuf.joinToString(" | ")
+        summaryBuf.clear()
+        c.sendPrompt("In one short sentence (under 12 words), what is the agent doing right now? Activity: $lines")
+    }
+
+    private fun onSummaryEvent(ev: AcpEvent) {
+        when (ev) {
+            is AcpEvent.AgentChunk -> summaryAccum += ev.text
+            is AcpEvent.TurnDone -> {
+                summaryInFlight = false
+                val t = summaryAccum.trim()
+                summaryAccum = ""
+                if (t.isNotEmpty()) liveSummaryText.value = t
+            }
+            is AcpEvent.Error -> { summaryInFlight = false; summaryAccum = "" }
+            is AcpEvent.Ready -> fireSummary()
+            else -> {}
+        }
+    }
+
+    private fun clearSummaryState() {
+        liveSummaryText.value = null
+        summaryBuf.clear(); summaryAccum = ""; summaryInFlight = false; summaryDue = false
+    }
+
+    private var summaryAccum = ""
+
+    private fun cleanProjectName(raw: String): String? {        val name = raw.trim().trim('/').removePrefix("projects/")
             .removePrefix("workspace/").trim('/')
         if (name.isEmpty() || name.contains("..") || name.contains('/') ||
             name.any { it.isWhitespace() } || name.contains('\'') || name.contains('"')) return null
@@ -1579,6 +1645,7 @@ class ConnectionManager private constructor(context: Context) {
                         toolCallId = ev.toolCallId, status = "in_progress"))
                 }
                 streamingRole = null
+                noteSummaryActivity("running ${ev.title}")
             }
             is AcpEvent.AppResource -> {
                 appFetchInFlight.remove(ev.key)
@@ -1605,6 +1672,8 @@ class ConnectionManager private constructor(context: Context) {
                         },
                     )
                 }
+                if (!ev.live && ev.output.isNotBlank())
+                    noteSummaryActivity("${ev.output.trim().lineSequence().first().take(60)}")
             }
             is AcpEvent.ActiveRun -> {
                 // Only trust run ids for the session on screen — a notification for another
@@ -1701,6 +1770,7 @@ class ConnectionManager private constructor(context: Context) {
             is AcpEvent.TurnDone -> {
                 streamingRole = null; compacting.value = false
                 turnInFlight = false
+                clearSummaryState()   // our turn ended — the live "what's it doing" ticker is moot
                 activeRunId = null   // the run this id named is over; steering it would fail
                 syncStamp = null     // our own turn changed the server state; re-baseline on next probe
                 busyElsewhere.value = false; lastExtAdvance = null   // our turn ended; re-arm the guard

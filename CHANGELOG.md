@@ -3,6 +3,20 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.34-20260811
+
+**Top bar rework + live activity summary (dev).**
+
+- Mode removed from the model picker app-wide (chat input pill, settings list).
+- Model & tools pickers merged into one bottom sheet with Tools/Model tabs; the
+  tool-count pill is gone — the Tune icon is the single entry point.
+- Context moved to a colored fill-ring gauge in the top bar (green/amber/red by
+  usage); tapping it shows used/max and the Compact button.
+- Roam sessions show their hostname in a small translucent line under the top bar.
+- Developer options: opt-in **live activity summary** — a fast-model session
+  summarizes what the agent is doing into a one-line ticker while a turn runs
+  (blank fast-model name forces it off).
+
 ## 0.33-20260811
 
 **Providers screen works again — and shows your real providers.** Two bugs:

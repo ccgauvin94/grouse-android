@@ -120,6 +120,20 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("describe_images", false)
         set(v) = cfg.edit().putBoolean("describe_images", v).apply()
 
+    /** Live activity summary via a fast model — DEVELOPER option, default OFF. When on, a
+     *  dedicated fast-model session summarizes what the agent is doing (tool names/status,
+     *  never arguments) into a one-line ticker under the chat's top bar. */
+    var liveSummary: Boolean
+        get() = cfg.getBoolean("live_summary", false)
+        set(v) = cfg.edit().putBoolean("live_summary", v).apply()
+
+    /** Model name for live summaries. BLANK FORCES THE FEATURE OFF even when liveSummary is
+     *  on — the summarizer has nothing to run without a fast model. Must exist on the server's
+     *  default provider. */
+    var fastModel: String
+        get() = cfg.getString("fast_model", "") ?: ""
+        set(v) = cfg.edit().putString("fast_model", v).apply()
+
 
     /** Absolute directory new sessions are created in. goose validates that session/new's cwd
      *  is absolute and refuses anything else, and it has no notion of a per-user default, so
