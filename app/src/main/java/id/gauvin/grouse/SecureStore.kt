@@ -266,4 +266,9 @@ class SecureStore(context: Context) {
         }.getOrDefault(emptyMap())
         set(v) = cfg.edit().putString("roam_peers",
             org.json.JSONObject(v).toString()).apply()
+
+    /** Name of the last roam peer connected, so startup can resume that host. */
+    var lastRoamPeer: String?
+        get() = cfg.getString("last_roam_peer", null)
+        set(v) = cfg.edit().putString("last_roam_peer", v).apply()
 }

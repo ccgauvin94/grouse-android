@@ -159,8 +159,9 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
 
     val nav = rememberNavController()
     // Fresh start lands on the Assistant thread; re-entry after the lock screen (or any
-    // recreation) only reconnects to whatever session was already open.
-    LaunchedEffect(Unit) { cm.connectHome() }
+    // recreation) only reconnects to whatever session was already open. Roam's last host
+    // comes back up alongside it.
+    LaunchedEffect(Unit) { cm.connectHome(); cm.autoConnectRoam() }
     // "New chat" from a shortcut/tile: start fresh and land on the chat screen.
     LaunchedEffect(cm.pendingNewChat.value) {
         if (cm.pendingNewChat.value && cm.configured) {

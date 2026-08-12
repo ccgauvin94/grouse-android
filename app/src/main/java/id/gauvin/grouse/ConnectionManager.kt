@@ -504,6 +504,9 @@ class ConnectionManager private constructor(context: Context) {
     /** Name of the peer this connection is dialed to, or null (WS mode). */
     @Volatile var currentRoamPeer: String? = null
         private set
+    /** Peer currently being dialed (spinner on its row); null when idle. */
+    @Volatile var roamConnecting: String? = null
+        private set
     /** True when the on-screen session lives on the roam connection. */
     val onRoamSession: Boolean get() = activeClientIsRoam
     // Last session opened ON EACH peer, so a reconnect resumes it instead of
@@ -545,6 +548,7 @@ class ConnectionManager private constructor(context: Context) {
         roamClient?.close(); roamClient = null
         activeClientIsRoam = false          // serve takes the screen back if it's alive
         live = false; connecting = false; online.value = false
+        roamConnecting = null
         status.value = ""
         messages.clear(); currentSession.value = null
     }
@@ -556,6 +560,8 @@ class ConnectionManager private constructor(context: Context) {
     fun connectRoam(name: String, resume: String? = null, createSession: Boolean = false) {
         val peer = roamPeers.firstOrNull { it.name == name } ?: return
         currentRoamPeer = name
+        store.lastRoamPeer = name
+        roamConnecting = name
         activeClientIsRoam = true
         roamClient?.close()      // the serve connection stays untouched
         live = false; connecting = true; online.value = false
@@ -582,7 +588,8 @@ class ConnectionManager private constructor(context: Context) {
                 main.post {
                     if (gen == roamGen) {
                         status.value = "roam: ${t.message ?: t.javaClass.simpleName}"
-                        connecting = false; currentRoamPeer = null; activeClientIsRoam = false
+                        connecting = false; roamConnecting = null
+                        currentRoamPeer = null; activeClientIsRoam = false
                     }
                 }
                 return@Thread
@@ -636,6 +643,20 @@ class ConnectionManager private constructor(context: Context) {
         val a = store.assistantSessionId
         if (a != null) openSession(a, knownKind = SessionKind.ASSISTANT)
         else { pendingOpenAssistant = true; open(resume = null) }
+    }
+
+    /** Startup: reconnect whichever roam peer was last connected (if any) so a saved host
+     *  comes back up without a manual tap. Runs once alongside the serve connect, on the
+     *  background thread the dial needs. No-op when none is saved or it's already live. */
+    fun autoConnectRoam() {
+        val name = store.lastRoamPeer ?: return
+        if (name !in store.roamPeers) return
+        if (live || roamConnecting != null) return
+        loadRoamPeers()   // populate roamPeers so connectRoam's lookup finds the card
+        Thread({
+            Thread.sleep(500)   // let the serve connect get going first; both can hold a link
+            main.post { if (!live && roamConnecting == null && currentRoamPeer == null) connectRoam(name, resume = null) }
+        }, "grouse-roam-autoconnect").apply { isDaemon = true; start() }
     }
 
     /** Save new credentials and connect fresh (from the Connect screen). */
@@ -1424,6 +1445,7 @@ class ConnectionManager private constructor(context: Context) {
                     // the host accepted this device, the drawer lists its sessions,
                     // the user picks one — opening it resumes over the same link.
                     live = true; connecting = false; online.value = true
+                    roamConnecting = null
                 }
                 if (ev.text == "disconnected") {
                     if (turnInFlight) droppedMidTurn = true   // see turnResyncTick

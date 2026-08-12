@@ -3327,8 +3327,22 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
                     Button(onClick = {
                         error = if (name.isBlank()) "Give the host a name."
                                 else cm.addRoamPeer(name.trim(), card.trim())
-                        if (error == null) { name = ""; card = "" }
-                    }) { Text("Save host") }
+                        if (error == null) {
+                            // Newly added host: immediately try to reach it so you know the
+                            // card actually works, rather than saving blindly. The button's spinner
+                            // shows while the dial is in flight.
+                            val added = name.trim()
+                            name = ""; card = ""
+                            cm.connectRoam(added)
+                        }
+                    }, enabled = cm.roamConnecting == null) {
+                        if (cm.roamConnecting != null) {
+                            CircularProgressIndicator(Modifier.size(16.dp),
+                                strokeWidth = 2.dp, color = LocalContentColor.current)
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text("Test connection")
+                    }
                 }
             }
             SettingsSection("Hosts") {
@@ -3346,6 +3360,9 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
                         }
                         if (connected) {
                             TextButton(onClick = { cm.disconnectRoam() }) { Text("Disconnect") }
+                        } else if (cm.roamConnecting == peer.name) {
+                            CircularProgressIndicator(Modifier.size(18.dp),
+                                strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
                         } else {
                             Button(onClick = { cm.connectRoam(peer.name) }) { Text("Connect") }
                         }
@@ -3486,6 +3503,9 @@ fun RoamDrawer(cm: ConnectionManager, onOpen: () -> Unit, onAddHost: () -> Unit)
                         modifier = Modifier.weight(1f))
                     if (connected) {
                         TextButton(onClick = { cm.disconnectRoam() }) { Text("Disconnect") }
+                    } else if (cm.roamConnecting == peer.name) {
+                        CircularProgressIndicator(Modifier.size(16.dp),
+                            strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
                     } else {
                         TextButton(onClick = { cm.connectRoam(peer.name) }) { Text("Connect") }
                     }
