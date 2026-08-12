@@ -59,6 +59,9 @@ class ConnectionManager private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val notifier = Notifier(context)
     private var appForeground = true
+    /** A roam turn was streaming when the app went to background — its remainder may be lost
+     *  when the link silently dies (see setForeground). */
+    private var streamLostOnBackground = false
     private var serviceRunning = false
     // Sends that must wait for (re)connect — a queue, not one slot, so a second reply while
     // still connecting can't clobber the first. The user bubble is added when queued (in send()).
@@ -1184,10 +1187,26 @@ class ConnectionManager private constructor(context: Context) {
     fun sendWhenReady(text: String) = send(text)
 
     fun setForeground(fg: Boolean) {
+        if (!fg && (turnInFlight || busy.value) && activeClientIsRoam) streamLostOnBackground = true
         appForeground = fg
         if (fg) {
             notifier.cancelAlert()
             ensureConnected()
+            // If a roam turn was streaming when we went away, the resumed link cannot continue it
+            // (goosed streams a turn only to the connection that prompted it), and the quiet link
+            // dies without an immediate "disconnected", so neither the watchdog (gated on
+            // !turnInFlight) nor the dropped-mid-turn resync (armed by a disconnect) ever fires —
+            // the chat is pinned at the replay point with turnInFlight/busy stuck. Force the
+            // resync now: reconnectToCurrent() clears the stuck turn state and re-replays the
+            // transcript, bringing the finished turn (and the remainder it streamed) into view.
+            if (streamLostOnBackground) {
+                streamLostOnBackground = false
+                // Only reconnect if we're still stuck (the turn may legitimately have finished
+                // server-side and prior foreground probe already resolved it).
+                if ((turnInFlight || busy.value) && !replayActive.value && live) {
+                    reconnectToCurrent()
+                }
+            }
             // This block used to REOPEN THE SESSION UNCONDITIONALLY on every foreground —
             // a 2-second alt-tab paid a full session/load replay of the whole transcript,
             // which is exactly the "whole app reconnects every time I look away" complaint.
