@@ -285,3 +285,15 @@ to publish if it came out debug-signed, and attaches the SHA-256.
 Master became a goose/ACP-only client for this release — the server-specific pieces
 (speech, directory browsing, cwd switching) moved to a private downstream. What ships here
 talks to any `goose serve`.
+
+## 0.38-20260812
+
+**Roam dial fixes — connecting works again.**
+
+- `roamConnecting` was never cleared on a successful dial (only on failure and
+  the sessionless path), so every Connect button stayed disabled after the first
+  connect and auto-connect bailed on the stuck flag. It now clears the moment
+  the link is handed over (plus a safety net at Ready).
+- The 12s dial watchdog killed SUCCESSFUL connections too: nothing invalidated
+  it, so at t=12s it tore down a live link. It's now cancelled when the dial
+  lands and only fires for genuinely stuck dials.

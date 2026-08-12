@@ -670,6 +670,17 @@ class ConnectionManager private constructor(context: Context) {
             loadTranscriptCache("r_$resume").takeIf { it.isNotEmpty() }?.let { messages.addAll(it) }
         status.value = "connecting to ${peer.name}…"
         val gen = ++roamGen
+        // The FFI dial (roamConnect) has NO timeout of its own — an unreachable host blocks it
+        // forever, which left "Test connection" spinning indefinitely. Cancel the watchdog on
+        // success; on expiry it bumps the generation (discarding a late dial) and clears state.
+        val dialTimeout = Runnable {
+            if (gen == roamGen) {
+                roamGen++
+                status.value = "roam: dial timed out (${peer.name} unreachable?)"
+                connecting = false; roamConnecting = null
+                currentRoamPeer = null; activeClientIsRoam = false
+            }
+        }
         Thread({
             val link = try {
                 RoamStreamLink(roamConnect(roamIdentity(), peer.card, "grouse-android"))
@@ -686,6 +697,8 @@ class ConnectionManager private constructor(context: Context) {
             }
             main.post {
                 if (gen != roamGen) { link.close(); return@post }
+                main.removeCallbacks(dialTimeout)   // the dial succeeded; the watchdog is moot
+                roamConnecting = null               // unstick every connect button
                 val c = AcpClient("roam://${peer.name}", "", roam = link) { ev ->
                     main.post { if (gen == roamGen) onEvent(ev, isRoam = true) }
                 }
@@ -701,18 +714,7 @@ class ConnectionManager private constructor(context: Context) {
                 c.connect()
             }
         }, "grouse-roam-dial").apply { isDaemon = true; start() }
-        // The FFI dial (roamConnect) has NO timeout of its own — an unreachable host blocks it
-        // forever, which left "Test connection" spinning indefinitely (roamConnecting never
-        // cleared). Bump the generation so the stuck dial's late success is discarded, then
-        // clear the connecting state as a timeout.
-        main.postDelayed({
-            if (gen == roamGen) {
-                roamGen++
-                status.value = "roam: dial timed out (${peer.name} unreachable?)"
-                connecting = false; roamConnecting = null
-                currentRoamPeer = null; activeClientIsRoam = false
-            }
-        }, 12_000)
+        main.postDelayed(dialTimeout, 12_000)
     }
 
     /** Reconnect whichever connection owns the screen: the roam peer (resuming
@@ -1904,6 +1906,7 @@ class ConnectionManager private constructor(context: Context) {
                 if (isRoam) {
                     roamLastSession[currentRoamPeer!!] = ev.sessionId
                     lastSessionIsRoam = true
+                    roamConnecting = null   // safety net; the dial path already cleared it
                 } else {
                     store.lastSessionId = ev.sessionId
                     lastSessionIsRoam = false
