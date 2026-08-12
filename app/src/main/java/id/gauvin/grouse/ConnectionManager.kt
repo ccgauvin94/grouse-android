@@ -701,6 +701,18 @@ class ConnectionManager private constructor(context: Context) {
                 c.connect()
             }
         }, "grouse-roam-dial").apply { isDaemon = true; start() }
+        // The FFI dial (roamConnect) has NO timeout of its own — an unreachable host blocks it
+        // forever, which left "Test connection" spinning indefinitely (roamConnecting never
+        // cleared). Bump the generation so the stuck dial's late success is discarded, then
+        // clear the connecting state as a timeout.
+        main.postDelayed({
+            if (gen == roamGen) {
+                roamGen++
+                status.value = "roam: dial timed out (${peer.name} unreachable?)"
+                connecting = false; roamConnecting = null
+                currentRoamPeer = null; activeClientIsRoam = false
+            }
+        }, 12_000)
     }
 
     /** Reconnect whichever connection owns the screen: the roam peer (resuming
@@ -1090,8 +1102,14 @@ class ConnectionManager private constructor(context: Context) {
      *  ASCII, digits and hyphens, no leading/trailing hyphen, <=64 chars -- and returns a raw
      *  -32602 for anything else. "Cooking" is rejected, which is surprising enough to be worth
      *  saying plainly in the dialog. */
-    fun createProject(rawName: String, onResult: (String?) -> Unit) {
-        val name = rawName.trim()
+    fun updateProject(p: ProjectInfo, title: String, description: String, body: String) {
+        serveClient?.updateProject(p.path, p.id, title, description, body)
+        // The sources/update reply re-lists SKILLS (shared method); projects need an
+        // explicit refresh or the drawer keeps the pre-edit title/description.
+        serveClient?.listProjects()
+    }
+
+    fun createProject(rawName: String, title: String = "", onResult: (String?) -> Unit) {        val name = rawName.trim()
         val bad = when {
             name.isEmpty() -> "Name can't be empty."
             name.length > 64 -> "Name must be 64 characters or fewer."
@@ -1102,22 +1120,9 @@ class ConnectionManager private constructor(context: Context) {
             else -> null
         }
         if (bad != null) { onResult(bad); return }
-        serveClient?.createProject(name)
+        serveClient?.createProject(name, title = title.trim())
         // The reply dispatch re-lists projects; report success now so the dialog can close.
         onResult(null)
-    }
-
-    /** Read a project's .goosehints and local memory (goose's memory extension stores its
-     *  local scope at <cwd>/.goose/memory). Direct shell call -- exact file contents. */
-    fun fetchProjectInfo(project: String, onResult: (String?, String) -> Unit) {
-        val name = cleanProjectName(project) ?: run { onResult("bad project name", ""); return }
-        runUtilityTool(
-            "echo '=== .goosehints ==='; cat '/workspace/$name/.goosehints' 2>/dev/null || echo '(none)'; " +
-                "echo; echo '=== .goose/memory ==='; " +
-                "for f in '/workspace/$name/.goose/memory'/*; do [ -f \"\$f\" ] || continue; " +
-                "echo \"-- \$(basename \"\$f\")\"; cat \"\$f\"; done 2>/dev/null; " +
-                "[ -d '/workspace/$name/.goose/memory' ] || echo '(none)'"
-        ) { err, text -> onResult(err, text) }
     }
 
     /** Delete a project: archive its chats, drop it from recents, and remove the server

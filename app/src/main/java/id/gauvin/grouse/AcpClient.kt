@@ -483,15 +483,27 @@ class AcpClient(
     })
 
     /** Create a project. Global scope: a project is not scoped to a directory -- that is the
-     *  entire point of the model. */
-    fun createProject(name: String, description: String = "", root: String = "") =
+     *  entire point of the model; Grouse supports LABEL-ONLY projects (no directory, no root).
+     *  `title` is the pretty display name; blank falls back to the slug. */
+    fun createProject(name: String, description: String = "", title: String = "") =
         rpc("_goose/unstable/sources/create", buildJsonObject {
             put("type", "project")
             put("name", name)
             put("description", description)
-            // A rooted project records its directory here; ProjectInfo.root reads it back.
-            put("content", if (root.isBlank()) "" else "root: ${root.trimEnd('/')}\n")
+            if (title.isNotBlank()) putJsonObject("properties") { put("title", title) }
+            put("content", "")
             putJsonObject("target") { put("scope", "global") }
+        })
+
+    /** Update a project: pretty `title` (frontmatter name), description, and an instructions
+     *  body (injected into every chat filed under the project). `slug` is the filename and is
+     *  NOT editable -- the server validates it, and changing it would orphan filed sessions. */
+    fun updateProject(path: String, slug: String, title: String, description: String, body: String) =
+        rpc("_goose/unstable/sources/update", buildJsonObject {
+            put("type", "project"); put("path", path); put("name", slug)
+            put("description", description)
+            if (title.isNotBlank()) put("title", title)
+            put("content", body)
         })
 
     /** Delete a project. Identified by its source PATH, not its slug -- sources/delete takes the
@@ -1269,7 +1281,11 @@ class AcpClient(
             val content = o["content"]?.jsonPrimitive?.contentOrNull ?: ""
             ProjectInfo(
                 id = slug.ifEmpty { name },
-                name = name,
+                // Prefer the server's display title (frontmatter `name:` / properties.title)
+                // over the slug filename — a project can carry a pretty name decoupled from
+                // its kebab-case file, and the drawer should show what the server calls it.
+                name = (o["properties"] as? JsonObject)?.get("title")?.jsonPrimitive?.contentOrNull
+                    ?.takeIf { it.isNotBlank() } ?: name,
                 description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
                 path = path,
                 root = content.lineSequence()

@@ -265,21 +265,23 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                         icon = { Icon(Icons.Filled.School, contentDescription = null) },
                         selected = route == "skills",
                         onClick = { closeDrawer(); nav.navigate("skills") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
+                        // Compact: these three footer items don't need the full 56dp row — the
+                        // saved height gives the projects/chat list above more room to breathe.
+                        modifier = Modifier.padding(horizontal = 12.dp).height(42.dp),
                     )
                     NavigationDrawerItem(
                         label = { Text("Recipes") },
                         icon = { Icon(Icons.Filled.MenuBook, contentDescription = null) },
                         selected = route == "recipes",
                         onClick = { closeDrawer(); nav.navigate("recipes") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp).height(42.dp),
                     )
                     NavigationDrawerItem(
                         label = { Text("Settings") },
                         icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
                         selected = route == "settings",
                         onClick = { closeDrawer(); nav.navigate("settings") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp).height(42.dp),
                     )
                 }
             }

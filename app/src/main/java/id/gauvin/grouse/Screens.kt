@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.ui.graphics.SolidColor
@@ -424,7 +425,6 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             modifier = Modifier.size(9.dp).align(Alignment.TopEnd)) {}
                     }
                 }
-                val roamPeer = ConnectionManager.roamPeer(cm.currentSession.value)
                 // Context gauge — where the tool-count pill used to sit. A ring that fills and
                 // changes color as the window fills (green → amber → red); tap for the exact
                 // numbers and the Compact button. The old usage text under the title moved here
@@ -457,17 +457,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 }
                 // Since roam-4 the server routes set_config_option to the owning peer, and
                 // the options shown came from the peer via session/load — so the config
-                // panel is live for federated sessions too. The chip stays as the "this
-                // chat is remote" marker next to it.
-                if (roamPeer != null) AssistChip(
-                    onClick = {},
-                    label = { Text(roamPeer) },
-                    leadingIcon = { Icon(Icons.Filled.Public, contentDescription = "remote session",
-                        modifier = Modifier.size(16.dp)) },
-                    modifier = Modifier.padding(end = 4.dp),
-                )
-                // One settings entry point: the merged Tools/Model sheet (the tool-count pill
-                // used to sit here too; its number is inside the sheet's Tools tab now).
+                // panel is live for federated sessions too. The hostname strip under the
+                // top bar is the "this chat is remote" marker now (the old chip is gone —
+                // redundant with the strip).
                 IconButton(onClick = { showSettings = true }) {
                     Icon(Icons.Filled.Tune, contentDescription = "chat settings")
                 }
@@ -1061,8 +1053,15 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                         Icon(Icons.Filled.Folder, contentDescription = null,
                             modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(10.dp))
-                        Text(p, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Column(Modifier.weight(1f)) {
+                            Text(p, style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            // The project's description, straight from the .md frontmatter.
+                            if (proj.description.isNotBlank())
+                                Text(proj.description, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                         if (inProject.isNotEmpty()) Text("${inProject.size}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline)
@@ -1287,6 +1286,7 @@ private fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: 
 @Composable
 private fun NewProjectDialog(cm: ConnectionManager, onCreated: (String) -> Unit, onDismiss: () -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
+    var title by rememberSaveable { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     AlertDialog(
@@ -1299,6 +1299,10 @@ private fun NewProjectDialog(cm: ConnectionManager, onCreated: (String) -> Unit,
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(name, { name = it }, singleLine = true, enabled = !busy,
                     placeholder = { Text("e.g. bird-feeder-cam") }, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(title, { title = it }, singleLine = true, enabled = !busy,
+                    placeholder = { Text("Display name (optional) — pretty title shown in the drawer") },
+                    modifier = Modifier.fillMaxWidth())
                 if (busy) {
                     Spacer(Modifier.height(10.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1317,7 +1321,7 @@ private fun NewProjectDialog(cm: ConnectionManager, onCreated: (String) -> Unit,
         confirmButton = {
             TextButton(enabled = name.isNotBlank() && !busy, onClick = {
                 busy = true; error = null
-                cm.createProject(name) { err ->
+                cm.createProject(name, title = title) { err ->
                     if (err == null) onCreated(name) else { busy = false; error = err }
                 }
             }) { Text("Create") }
@@ -1326,10 +1330,47 @@ private fun NewProjectDialog(cm: ConnectionManager, onCreated: (String) -> Unit,
     )
 }
 
-/** A project's home: its chats, its .goosehints and local memory (fetched on demand -- there
- *  is no file read over ACP, so a throwaway fast-model session cats them and echoes the output),
- *  and deletion. Delete archives the project's chats and rmdir's the server directory ONLY if
- *  empty -- a project with files keeps them and merely leaves the list. */
+/** Edit a project's pretty name, description, root dir and instructions body. The body is
+ *  injected into every chat filed under the project (the server includes name + description +
+ *  content in the system prompt), so this is also the per-project instruction editor. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EditProjectDialog(cm: ConnectionManager, proj: ProjectInfo, onDone: () -> Unit) {
+    var title by rememberSaveable { mutableStateOf(proj.name) }
+    var description by rememberSaveable { mutableStateOf(proj.description) }
+    var body by rememberSaveable { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDone() },
+        title = { Text("Edit ${proj.id}") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(title, { title = it }, singleLine = true, enabled = !busy,
+                    label = { Text("Display name") }, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(description, { description = it }, enabled = !busy,
+                    label = { Text("Description") }, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(body, { body = it }, enabled = !busy,
+                    label = { Text("Instructions (injected into every chat)") },
+                    placeholder = { Text("e.g. Always write tests; use python3.11") },
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 140.dp))
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !busy && title.isNotBlank(), onClick = {
+                busy = true
+                cm.updateProject(proj, title.trim(), description.trim(), body.trim())
+                onDone()
+            }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDone, enabled = !busy) { Text("Cancel") } },
+    )
+}
+
+/** A project's home: its chats and its settings (edit / delete). Projects are LABEL-ONLY --
+ *  no directory, no root, no .goosehints; the instructions body edited here is injected into
+ *  every chat filed under the project. */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
@@ -1338,8 +1379,7 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     var confirmDelete by remember { mutableStateOf(false) }
     var deleteBusy by remember { mutableStateOf(false) }
     var deleteNote by remember { mutableStateOf<String?>(null) }
-    var info by remember { mutableStateOf<String?>(null) }
-    var infoBusy by remember { mutableStateOf(false) }
+    var showEdit by remember { mutableStateOf(false) }
     fun goToChat() = nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
 
     actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
@@ -1368,6 +1408,9 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
         },
         dismissButton = { TextButton(onClick = { confirmDelete = false }, enabled = !deleteBusy) { Text("Cancel") } },
     )
+    cm.projects.value.firstOrNull { it.name.equals(project, true) }?.let { proj ->
+        if (showEdit) EditProjectDialog(cm, proj, onDone = { showEdit = false })
+    }
     deleteNote?.let { note ->
         AlertDialog(
             onDismissRequest = { deleteNote = null; nav.popBackStack() },
@@ -1391,6 +1434,15 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
             navigationIcon = {
                 IconButton(onClick = { nav.popBackStack() }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            },
+            actions = {
+                val proj = cm.projects.value.firstOrNull { it.name.equals(project, true) }
+                    ?: cm.projects.value.firstOrNull { it.id == project }
+                if (proj != null) {
+                    IconButton(onClick = { showEdit = true }) {
+                        Icon(Icons.Filled.Edit, contentDescription = "edit project")
+                    }
                 }
             }
         )
@@ -1441,49 +1493,6 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
                         }
                         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
                             tint = MaterialTheme.colorScheme.outline)
-                    }
-                }
-            }
-            item {
-                Text("GOOSEHINTS & MEMORY", style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(start = 6.dp, top = 18.dp, bottom = 4.dp))
-            }
-            item {
-                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
-                        when {
-                            infoBusy -> Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                                Spacer(Modifier.width(10.dp))
-                                Text("Asking the fast model to read them…",
-                                    style = MaterialTheme.typography.bodySmall)
-                            }
-                            info != null -> {
-                                Text(info!!, style = MaterialTheme.typography.bodySmall)
-                                Spacer(Modifier.height(6.dp))
-                                TextButton(onClick = {
-                                    infoBusy = true
-                                    cm.fetchProjectInfo(project) { err, text ->
-                                        infoBusy = false; info = err ?: text
-                                    }
-                                }) { Text("Reload") }
-                            }
-                            else -> {
-                                Text("The project's .goosehints and local memory " +
-                                    "(.goose/memory) live on the server; loading them runs a " +
-                                    "quick fast-model session.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline)
-                                Spacer(Modifier.height(6.dp))
-                                TextButton(onClick = {
-                                    infoBusy = true
-                                    cm.fetchProjectInfo(project) { err, text ->
-                                        infoBusy = false; info = err ?: text
-                                    }
-                                }) { Text("Load") }
-                            }
-                        }
                     }
                 }
             }

@@ -3,6 +3,20 @@
 Versions are the sideload-facing `versionName`; `versionCode` matches the minor number.
 Only tagged releases appear here — locally-built numbers in between are skipped.
 
+## 0.37-20260812
+
+**Label-only projects, project editor, and a roam dial timeout.**
+
+- Projects are labels now: no root directory, no .goosehints/memory viewer
+  (removed). New projects take an optional pretty display name.
+- Project editor (pencil icon on the project page): edit display name,
+  description, and instructions — the body is injected into every chat filed
+  under the project (server-side `load_project_instructions`).
+- Project descriptions render under project names in the drawer; pretty names
+  (frontmatter `name`/`properties.title`) display instead of kebab-case slugs.
+- Roam "Test connection" no longer spins forever: the FFI dial has no timeout
+  of its own, so a 12s watchdog now fails unreachable hosts cleanly.
+
 ## 0.36-20260812
 
 **Streaming now resumes after the app loses focus — and says so.**
