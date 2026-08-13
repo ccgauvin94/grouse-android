@@ -286,6 +286,18 @@ Master became a goose/ACP-only client for this release — the server-specific p
 (speech, directory browsing, cwd switching) moved to a private downstream. What ships here
 talks to any `goose serve`.
 
+## 0.40-20260812
+
+**Per-endpoint session contexts — the model collision is gone.** Every
+connection (serve + each roam endpoint) now keeps its OWN session state:
+config options, model lists, tools, extensions, compaction and run tracking.
+With two hosts connected on different providers, each chat shows and writes
+ITS host's models — switching between them is instant because the context is
+kept, never refetched. The follow/probe/watchdog machinery also targets the
+active endpoint's OWN last session, so it can no longer probe (or reconnect)
+peer B with peer A's session id — the source of the wrong-session errors and
+reconnect loops after connecting a second host.
+
 ## 0.39-20260812
 
 **Multiple roam endpoints at once.** Each saved host now keeps its OWN live

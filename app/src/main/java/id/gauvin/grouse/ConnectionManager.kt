@@ -55,6 +55,26 @@ data class ChatMessage(
  * it survives navigation/config changes and can later be shared with a background service,
  * share intents, tiles, etc. Compose observes its snapshot state directly.
  */
+/** Per-connection session state. The serve host and every roam endpoint get their
+ *  own context, so N endpoints coexist without clobbering each other's model,
+ *  provider, tool or extension state — the active view reads the ACTIVE context,
+ *  and event handlers mutate the context of the connection the event came from.
+ *  The ConnectionManager getters below keep the old single-connection names, so
+ *  the UI reads `cm.config.value` etc. unchanged. */
+private class RoamCtx {
+    val config = mutableStateOf<List<ConfigOption>>(emptyList())
+    val knownModels = mutableStateOf(emptySet<String>())
+    var liveModelsFetchedFor: String? = null
+    val compacting = mutableStateOf(false)
+    val lastMessageUsage = mutableStateOf<AcpEvent.MessageUsage?>(null)
+    val sessionExtensionNames = mutableStateOf<List<String>>(emptyList())
+    val sessionExtensionInfos = mutableStateOf<List<ExtInfo>>(emptyList())
+    val detachedPeerExts = mutableStateOf<List<ExtInfo>>(emptyList())
+    val sessionTools = mutableStateOf<Map<String, List<String>>>(emptyMap())
+    var discovering: ExtInfo? = null
+    var activeRunId: String? = null
+}
+
 class ConnectionManager private constructor(context: Context) {
     val store = SecureStore(context)
     private val appContext = context.applicationContext
@@ -89,7 +109,8 @@ class ConnectionManager private constructor(context: Context) {
     val messages = mutableStateListOf<ChatMessage>()
     val status = mutableStateOf("not connected")
     val online = mutableStateOf(false)   // true between Ready and disconnect — for a UI status pill
-    val config = mutableStateOf<List<ConfigOption>>(emptyList())
+    /** The ACTIVE connection's session config (model/provider/mode options). */
+    val config get() = activeCtx.config
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
     /** The ACTIVE roam peer's sessions (plain ids — the peer IS a first-class goose). */
     val roamSessions = mutableStateListOf<SessionInfo>()
@@ -232,7 +253,7 @@ class ConnectionManager private constructor(context: Context) {
     // True while compaction (manual /compact or server-triggered auto-compact) is running. The
     // protocol only ever sends discrete text status lines, never a numeric percentage, so this
     // drives an INDETERMINATE indicator, not a real progress fraction.
-    val compacting = mutableStateOf(false)
+    val compacting get() = activeCtx.compacting
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
     val elicitations = mutableStateListOf<AcpEvent.Elicitation>() // pending input forms, oldest first
@@ -241,7 +262,10 @@ class ConnectionManager private constructor(context: Context) {
     val backgroundNotice = mutableStateOf<String?>(null)
     // The current session's running turn id (from session_info_update's activeRunId _meta).
     // Non-null while a run is live == steering is possible; cleared on TurnDone.
-    private var activeRunId: String? = null
+    // Reads go through the ACTIVE context; the ActiveRun handler writes ctx(peer).
+    private var activeRunId: String?
+        get() = activeCtx.activeRunId
+        set(v) { activeCtx.activeRunId = v }
     // L0 "active elsewhere" guard (set in SessionInfoChanged): the on-screen session is being
     // run by ANOTHER goose (desktop/CLI) when its updatedAt keeps advancing while our connection
     // holds no active run. The composer then warns and requires a confirm, so a prompt cannot
@@ -270,12 +294,9 @@ class ConnectionManager private constructor(context: Context) {
     // The live one-line ticker from the summarizer session; null hides it.
     val liveSummaryText = mutableStateOf<String?>(null)
     val showAllProviders = mutableStateOf(store.showAllProviders)
-    // Live model list for the CURRENT provider, from the server, in memory only -- never
-    // persisted. See the AcpEvent.Config/SupportedModels handlers for why.
-    val knownModels = mutableStateOf(emptySet<String>())
-    // Guards listSupportedModels() to fire once per provider per connection, not on every Config
-    // event (which fires on every option change, not just provider switches).
-    private var liveModelsFetchedFor: String? = null
+    // Live model list for the CURRENT provider of the ACTIVE connection, from the server,
+    // in memory only -- never persisted. See the AcpEvent.Config/SupportedModels handlers.
+    val knownModels get() = activeCtx.knownModels
     val extensions = mutableStateOf<List<ExtInfo>>(emptyList())
     val extensionsBusy = mutableStateOf(false)
     // The installable extension catalog (extensions/available) — powers "Browse available" in the
@@ -286,18 +307,18 @@ class ConnectionManager private constructor(context: Context) {
     // Names of the CURRENT session's enabled extensions — drives the in-chat "N tools" indicator
     // and its management sheet. Refreshed on every session open (Ready); optimistically updated by
     // toggleSessionExtension since add/remove replies are empty (no server re-list to react to).
-    val sessionExtensionNames = mutableStateOf<List<String>>(emptyList())
+    val sessionExtensionNames get() = activeCtx.sessionExtensionNames
     // Full extension objects for the CURRENT session (same reply as the names above). On a
     // federated session these are the PEER's DTOs — the only objects that may be written back
     // to it — and the tool sheet's row source, since the peer's global catalog is unreachable.
-    val sessionExtensionInfos = mutableStateOf<List<ExtInfo>>(emptyList())
+    val sessionExtensionInfos get() = activeCtx.sessionExtensionInfos
     // Peer extensions toggled OFF this session, kept so their row (and DTO) survives to be
     // toggled back on. Cleared on session open; local sessions never need it because their
     // rows come from the local global catalog.
-    val detachedPeerExts = mutableStateOf<List<ExtInfo>>(emptyList())
+    val detachedPeerExts get() = activeCtx.detachedPeerExts
     // Tools ACTIVE in the current session, grouped extension -> tool names (the `ext__tool` prefix
     // goose uses, stripped). Reflects available_tools filtering, so it is the "checked" set.
-    val sessionTools = mutableStateOf<Map<String, List<String>>>(emptyMap())
+    val sessionTools get() = activeCtx.sessionTools
     // Full tool catalogue per extension, i.e. what you'd get with no allowlist. Not obtainable
     // directly -- goose has no per-extension tools endpoint -- so it is discovered on demand by
     // discoverTools() and cached here for the process lifetime. Absent = not discovered yet.
@@ -305,20 +326,21 @@ class ConnectionManager private constructor(context: Context) {
     // Extension whose full catalogue is being discovered; its tools/list reply is the catalogue,
     // not the live set, so the Tools handler must not treat it as sessionTools. Held as the full
     // ExtInfo so the restore step can round-trip the same object it discovered with.
-    private var discovering: ExtInfo? = null
+    // (Lives in the per-connection RoamCtx.)
 
     /** Drop per-session UI state when the session changes: tool/extension sheets,
      *  the model list and the discovery marker all belong to the session being
      *  closed and would otherwise linger (tools "stuck" from the previous session)
      *  until the new session's replies arrive. Called on every session switch. */
     private fun clearSessionUi() {
-        sessionTools.value = emptyMap()
-        sessionExtensionNames.value = emptyList()
-        sessionExtensionInfos.value = emptyList()
-        detachedPeerExts.value = emptyList()
-        discovering = null
-        knownModels.value = emptySet()
-        liveModelsFetchedFor = null
+        val c = activeCtx
+        c.sessionTools.value = emptyMap()
+        c.sessionExtensionNames.value = emptyList()
+        c.sessionExtensionInfos.value = emptyList()
+        c.detachedPeerExts.value = emptyList()
+        c.discovering = null
+        c.knownModels.value = emptySet()
+        c.liveModelsFetchedFor = null
         busyElsewhere.value = false; lastExtAdvance = null   // the guard is per-session
     }
 
@@ -337,7 +359,7 @@ class ConnectionManager private constructor(context: Context) {
         (roamPeer(currentSession.value) != null) != e.fromPeer
     // Per-message generation stats (tok/s, cost) for the most recently finished assistant reply.
     // Cleared when a new turn starts so stale numbers don't linger under the next streaming bubble.
-    val lastMessageUsage = mutableStateOf<AcpEvent.MessageUsage?>(null)
+    val lastMessageUsage get() = activeCtx.lastMessageUsage
 
     /** Fetch the extension list over ACP (agent-global). Reply lands as AcpEvent.Extensions.
      *  goose ≥1.42 dropped goosed's REST /config/extensions; this uses the ACP method instead. */
@@ -374,7 +396,7 @@ class ConnectionManager private constructor(context: Context) {
     fun toolsAttributable(e: ExtInfo): Boolean = e.type == "mcp"
 
     /** Ask goose for this session's active tools; lands as AcpEvent.Tools. */
-    fun refreshTools() { discovering = null; client?.listTools() }
+    fun refreshTools() { activeCtx.discovering = null; client?.listTools() }
 
     /** Everything the in-chat tool sheet displays, refreshed together on open. */
     fun refreshSessionSheet() { refreshTools(); loadServerProviders(); client?.listSessionExtensions() }
@@ -396,7 +418,7 @@ class ConnectionManager private constructor(context: Context) {
         val unfiltered = JsonObject(ext.raw.toMutableMap().apply {
             put("available_tools", JsonArray(emptyList()))
         })
-        discovering = ext
+        activeCtx.discovering = ext
         c.removeSessionExtension(ext.name)
         c.addSessionExtension(unfiltered)   // its reply triggers listTools -- see AcpClient
     }
@@ -412,7 +434,7 @@ class ConnectionManager private constructor(context: Context) {
         val scoped = JsonObject(ext.raw.toMutableMap().apply {
             put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
         })
-        discovering = null
+        activeCtx.discovering = null
         c.removeSessionExtension(ext.name)
         c.addSessionExtension(scoped)       // its reply triggers listTools
     }
@@ -527,6 +549,10 @@ class ConnectionManager private constructor(context: Context) {
         get() = if (activeClientIsRoam) roamClients[currentRoamPeer] else serveClient
     /** Generation of whichever client owns the screen (event guards in onEvent). */
     private val activeGen: Int get() = if (activeClientIsRoam) roamGens[currentRoamPeer] ?: 0 else serveGen
+    // One RoamCtx per connection: null key = the serve host, peer name = that endpoint.
+    private val ctxs = mutableMapOf<String?, RoamCtx>()
+    private fun ctx(peer: String?): RoamCtx = ctxs.getOrPut(peer) { RoamCtx() }
+    private val activeCtx: RoamCtx get() = ctx(if (activeClientIsRoam) currentRoamPeer else null)
     // MCP-App template cache: "$extension|$uri" -> HTML. Templates are static per server
     // version and shared across tools/messages/sessions, so one fetch serves everything —
     // including transcript replays, which re-emit every historical tool_call.
@@ -666,12 +692,14 @@ class ConnectionManager private constructor(context: Context) {
         val peer = roamPeers.firstOrNull { it.name == name } ?: return
         store.lastRoamPeer = name
         // Already connected and nothing to switch to: just bring it to the screen.
+        // Its RoamCtx (config, models, tools) is KEPT — that is the point of per-peer
+        // contexts; a fresh fetch would need a session anyway.
         if (roamClients[name] != null && resume == null && !createSession) {
             currentRoamPeer = name
             activeClientIsRoam = true
-            clearSessionUi()
             messages.clear()
             currentSession.value = null
+            busyElsewhere.value = false; lastExtAdvance = null
             if (roamSessionsByPeer[name].isNullOrEmpty()) client?.listSessions()
             status.value = "connected to ${peer.name}"
             live = true; connecting = false; online.value = true
@@ -687,7 +715,7 @@ class ConnectionManager private constructor(context: Context) {
         replayWiped = false; replayActive.value = false
         resetGen = -1
         pendingOpenCwd = ""   // no local cwd: session/load asks the PEER for the real one
-        liveModelsFetchedFor = null
+        activeCtx.liveModelsFetchedFor = null
         clearSessionUi()
         messages.clear()
         currentSession.value = resume
@@ -753,7 +781,7 @@ class ConnectionManager private constructor(context: Context) {
     private fun reconnectToCurrent() {
         if (activeClientIsRoam) {
             val peer = currentRoamPeer ?: return
-            connectRoam(peer, resume = lastSessionId)
+            connectRoam(peer, resume = roamLastSession[peer])
         } else {
             open(resume = lastSessionId ?: store.lastSessionId)
         }
@@ -819,6 +847,13 @@ class ConnectionManager private constructor(context: Context) {
         return h to p
     }
 
+    /** The session to probe on the ACTIVE connection: the serve host's last session, or the
+     *  ACTIVE peer's own last session — never the global lastSessionId, which can belong to a
+     *  DIFFERENT peer after a fast-path switch (probing B with A's session id errors and the
+     *  follow loop then reconnects B onto A's session). */
+    private val probeSessionId: String?
+        get() = if (activeClientIsRoam) roamLastSession[currentRoamPeer] else store.lastSessionId
+
     /** Follow-mode probe: while idle and foregrounded, ask session/info and reconnect (replay)
      *  if the server state moved. This is the client's equivalent of the roaming web's 6s
      *  updatedAt poll — ACP streams a turn only to the connection that prompted it, so a session
@@ -827,8 +862,7 @@ class ConnectionManager private constructor(context: Context) {
      *  change costs one cheap info call. */
     private fun armFollowProbe() {
         if (!live || busy.value || turnInFlight || replayActive.value || !appForeground) return
-        if (lastSessionIsRoam != activeClientIsRoam) return
-        lastSessionId?.let { sid ->
+        probeSessionId?.let { sid ->
             val tok = ++probeToken
             client?.probeSession(sid)
             main.postDelayed({
@@ -848,7 +882,7 @@ class ConnectionManager private constructor(context: Context) {
         if (activeClientIsRoam) {
             val peer = currentRoamPeer
             if (peer == null || live || connecting) return
-            connectRoam(peer, resume = lastSessionId)
+            connectRoam(peer, resume = roamLastSession[peer])
             return
         }
         if (!store.hasKey() || live || connecting) return
@@ -1574,7 +1608,7 @@ class ConnectionManager private constructor(context: Context) {
             // The superseded client will never report TurnDone here, so free the wire.
             turnInFlight = false
         activeRunId = null   // a stale run id belongs to the superseded session; steer would target the wrong run
-        liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
+        activeCtx.liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         replayWiped = false
         replayActive.value = false
         val url = "wss://${store.host}:${store.port}/acp"
@@ -1690,7 +1724,7 @@ class ConnectionManager private constructor(context: Context) {
                     // But the flags those calls set MUST clear, or the failure sticks: a dead
                     // tools/list left `discovering` armed and the NEXT tools reply triggered a
                     // spurious allowlist write; a dead extensions/list left the sheet spinning.
-                    if (ev.text.startsWith("_goose/unstable/tools/list")) discovering = null
+                    if (ev.text.startsWith("_goose/unstable/tools/list")) activeCtx.discovering = null
                     if (ev.text.startsWith("_goose/unstable/config/extensions/list")) extensionsBusy.value = false
                     backgroundNotice.value = ev.text
                     android.util.Log.w("Grouse", "background rpc error: ${ev.text}")
@@ -1919,11 +1953,11 @@ class ConnectionManager private constructor(context: Context) {
                 // None of that is needed: fetch_supported_models is authoritative and cheap. Ask
                 // the server, show the answer, keep nothing.
                 val provider = ev.options.firstOrNull { it.id == "provider" }?.currentValue ?: ""
-                if (provider != liveModelsFetchedFor) {
+                if (provider != activeCtx.liveModelsFetchedFor) {
                     // Provider changed (or first Config): drop the previous provider's list
                     // immediately so its slugs cannot be shown under the new one, even briefly.
                     knownModels.value = emptySet()
-                    liveModelsFetchedFor = provider
+                    activeCtx.liveModelsFetchedFor = provider
                     if (provider.isNotBlank()) client?.listSupportedModels(provider)
                 }
             }
@@ -2060,13 +2094,13 @@ class ConnectionManager private constructor(context: Context) {
             }
             is AcpEvent.Tools -> {
                 val g = group(ev.names)
-                val target = discovering
+                val target = activeCtx.discovering
                 if (target != null) {
                     // Catalogue read: record the full set, then restore the session's real
                     // setting by round-tripping the SAME ExtInfo the discovery ran with (a
                     // peer DTO for federated sessions — never re-looked-up locally by name).
                     toolCatalog.value = toolCatalog.value + (catKey(target) to g[target.name].orEmpty())
-                    discovering = null
+                    activeCtx.discovering = null
                     val allowed = (target.raw["available_tools"] as? JsonArray)
                         ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
                     setSessionTools(target, if (allowed.isEmpty()) g[target.name].orEmpty().toSet() else allowed)
